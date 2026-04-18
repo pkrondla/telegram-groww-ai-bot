@@ -1,0 +1,104 @@
+from __future__ import annotations
+import requests
+from .config import Config
+from .logger import logger
+
+
+class Notifier:
+    """
+    Centralized notification service.
+
+    Sends admin alerts via:
+    - Telegram Bot API (preferred, bypasses silent folder)
+    - Telegram user session fallback (when no bot token)
+
+    All modules call Notifier instead of making raw HTTP/Telegram calls directly.
+    """
+
+    def __init__(self, telegram_client=None):
+        self._client = telegram_client  # Telethon client; injected after connection
+
+    def set_client(self, client):
+        self._client = client
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
+    async def send(self, message: str, *, parse_mode: str = "Markdown"):
+        """Send a notification to the admin."""
+        if Config.BOT_TOKEN:
+            await self._send_via_bot(message, parse_mode=parse_mode)
+        else:
+            await self._send_via_session(message)
+
+    async def send_signal_result(self, action: str, symbol: str, result: str):
+        """Formatted trade action result notification."""
+        icon = {
+            "BUY": "📈",
+            "SELL": "📉",
+            "EXIT_ALL": "🚨",
+            "TRAIL_SL": "📌",
+            "UPDATE_TGT": "🎯",
+            "EXTEND_RANGE": "📶",
+            "SPREAD": "🔀",
+        }.get(action.upper(), "🤖")
+        symbol_text = str(symbol or "").strip()
+        action_text = str(action or "").upper().strip()
+        if symbol_text and symbol_text.upper() != "NONE":
+            # Keep symbol on a dedicated line so failures/skips still show context.
+            msg = f"{icon} **BOT ACTION:** `{action_text}`\n**SYMBOL:** `{symbol_text}`\n\n{result}"
+        else:
+            msg = f"{icon} **BOT ACTION:** `{action_text}`\n\n{result}"
+        await self.send(msg)
+
+    async def send_status(self, status: str, detail: str = ""):
+        """Send a bot status update (pause/resume/kill/startup)."""
+        icons = {
+            "ACTIVE": "🟢",
+            "PAUSED": "⏸️",
+            "KILLED": "🔴",
+            "STARTED": "🚀",
+        }
+        icon = icons.get(status.upper(), "ℹ️")
+        msg = f"{icon} **Bot Status: {status}**"
+        if detail:
+            msg += f"\n{detail}"
+        await self.send(msg)
+
+    async def send_alert(self, title: str, body: str):
+        """Generic scheduled alert (e.g. market close warnings)."""
+        msg = f"🔔 **{title}**\n\n{body}"
+        await self.send(msg)
+
+    async def send_error(self, context: str, error: str):
+        """Send an error notification."""
+        msg = f"❌ **Error in {context}**\n\n`{error}`"
+        await self.send(msg)
+
+    # ------------------------------------------------------------------
+    # Internal delivery
+    # ------------------------------------------------------------------
+
+    async def _send_via_bot(self, message: str, *, parse_mode: str = "Markdown"):
+        try:
+            url = f"https://api.telegram.org/bot{Config.BOT_TOKEN}/sendMessage"
+            resp = requests.post(
+                url,
+                data={"chat_id": Config.ADMIN_ID, "text": message, "parse_mode": parse_mode},
+                timeout=10,
+            )
+            if not resp.ok:
+                logger.warning(f"Notifier: Bot API returned {resp.status_code}: {resp.text[:200]}")
+        except Exception as e:
+            logger.error(f"Notifier: Bot API send failed: {e}")
+            await self._send_via_session(message)
+
+    async def _send_via_session(self, message: str):
+        if self._client is None:
+            logger.warning("Notifier: No Telegram client available for session send.")
+            return
+        try:
+            await self._client.send_message("me", message)
+        except Exception as e:
+            logger.error(f"Notifier: Session send failed: {e}")

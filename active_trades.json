@@ -1,0 +1,14 @@
+{
+    "GLENMARK26APR2400CE": {
+        "smart_order_id": "NRMLOCO-8958f61b-0301-4cb1-8c09-c0062f6cf5ed",
+        "stop_loss": 4.0,
+        "target": 18.0,
+        "protection_armed_date": "2026-04-17"
+    },
+    "ETERNAL26APR255CE": {
+        "smart_order_id": "NRMLOCO-8d5eb19e-3c9d-4af4-a604-fb6ef54d36d5",
+        "stop_loss": 5.0,
+        "target": 8.65,
+        "protection_armed_date": "2026-04-17"
+    }
+}

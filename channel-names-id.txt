@@ -1,0 +1,532 @@
+Listing all your Channels/Groups:
+========================================
+NAME: Money Purse {మనీ పర్స్ }       | ID: -1001488098286
+NAME: CHARTIANS [ FNO ] PREMIUM CHAN | ID: -1002153367077
+NAME: Finkarma                       | ID: -1001383782229
+NAME: 𝗧𝗛𝗘 𝗖𝗛𝗔𝗥𝗧𝗜𝗔𝗡𝗦                  | ID: -1001477774251
+NAME: CHARTIST RJ ( NISM CERTIFIED)  | ID: -1001077432725
+NAME: CHARTIANS MENTEE DISCUSSIONS B | ID: -1001626463385
+========================================
+NAME: Money Purse {మనీ పర్స్ }       | ID: -1001488098286
+NAME: CHARTIANS [ FNO ] PREMIUM CHAN | ID: -1002153367077
+NAME: Finkarma                       | ID: -1001383782229
+NAME: 𝗧𝗛𝗘 𝗖𝗛𝗔𝗥𝗧𝗜𝗔𝗡𝗦                  | ID: -1001477774251
+NAME: CHARTIST RJ ( NISM CERTIFIED)  | ID: -1001077432725
+NAME: CHARTIANS MENTEE DISCUSSIONS B | ID: -1001626463385
+NAME: Stock Buzz                     | ID: -1002334703152
+NAME: IPO Mantra                     | ID: -1001419866656
+NAME: @kuttrapali26                  | ID: -1001190697346
+NAME: Spark Redeem (Payback App)     | ID: -1001496682852
+NAME: CHARTIANS ELITE COMRADES       | ID: -1001731327365
+NAME: CHARTIANS ADMIN TRADES [ AJ SE | ID: -1001774429946
+NAME: DURO CAPITAL【d】                | ID: -1002182740336
+NAME: Mentee Update Group B3         | ID: -1001505101125
+NAME: Day Trader తెలుగు 2.0          | ID: -1001573425166
+NAME: Abhishek Kar Official          | ID: -1001215786591
+NAME: CHARTIANS ADMIN TRADES [ AJ SE | ID: -1001865489630
+NAME: KA PUBLIC CHARITY CHANNEL.     | ID: -1001753825783
+NAME: PK Trades                      | ID: -1001771944133
+========================================
+Done.
+PS C:\PK\Source\telegram-groww-ai-bot>
+PS C:\PK\Source\telegram-groww-ai-bot> python get_channels.py
+Connecting to Telegram...
+
+FETCHING ALL DIALOGS (Channels, Groups, Bots, Users)...
+============================================================
+[CHANNEL ]  NAME: Money Purse {మనీ పర్స్ }  | ID: -1001488098286
+[CHANNEL ]  NAME: 𝗧𝗛𝗘 𝗖𝗛𝗔𝗥𝗧𝗜𝗔𝗡𝗦             | ID: -1001477774251
+[CHANNEL ]  NAME: CHARTIST RJ ( NISM CERTIF | ID: -1001077432725
+[CHANNEL ]  NAME: CHARTIANS [ FNO ] PREMIUM | ID: -1002153367077
+[CHANNEL ]  NAME: Finkarma                  | ID: -1001383782229
+[CHANNEL ]  NAME: CHARTIANS MENTEE DISCUSSI | ID: -1001626463385
+[CHANNEL ]  NAME: Stock Buzz                | ID: -1002334703152
+[CHANNEL ]  NAME: IPO Mantra                | ID: -1001419866656
+[CHANNEL ]  NAME: @kuttrapali26             | ID: -1001190697346
+[USER/BOT]  NAME: PK Trading Bot            | ID: 8616308637
+[USER/BOT]  NAME: Unni Krishnan             | ID: 8682328708
+[USER/BOT]  NAME: Telegram                  | ID: 777000
+[USER/BOT]  NAME: BotFather                 | ID: 93372553
+[CHANNEL ]  NAME: Spark Redeem (Payback App | ID: -1001496682852
+[CHANNEL ]  NAME: CHARTIANS ELITE COMRADES  | ID: -1001731327365
+[USER/BOT]  NAME: Dominic                   | ID: 8763095284
+[USER/BOT]  NAME: Babita                    | ID: 7561546059
+[CHANNEL ]  NAME: CHARTIANS ADMIN TRADES [  | ID: -1001774429946
+[USER/BOT]  NAME:                           | ID: 7504046688
+[USER/BOT]  NAME: Anusha                    | ID: 8645856624
+[USER/BOT]  NAME: Sarfaraz Interiors        | ID: 7877450035
+[USER/BOT]  NAME:                           | ID: 8298591375
+[USER/BOT]  NAME: Hakkim F3 101             | ID: 8742237107
+[USER/BOT]  NAME: Annapoorna G1 203         | ID: 8251442746
+[USER/BOT]  NAME: Carpenter Jonson          | ID: 8271302466
+[USER/BOT]  NAME: Jayapal HDFC Loan         | ID: 8541500113
+[USER/BOT]  NAME: Balaji                    | ID: 8590171914
+[USER/BOT]  NAME: Dr Vaishnavi Suppi        | ID: 8360317190
+[USER/BOT]  NAME: Mathew Koottunkal         | ID: 7799138664
+[USER/BOT]  NAME: Chetan Sharma             | ID: 8039370202
+[USER/BOT]  NAME: Gul                       | ID: 8279308028
+[USER/BOT]  NAME: Loknath                   | ID: 8574405031
+[USER/BOT]  NAME: Electrician UrbanClap     | ID: 7983508367
+[CHANNEL ]  NAME: DURO CAPITAL【d】           | ID: -1002182740336
+[USER/BOT]  NAME:                           | ID: 6173639772
+[USER/BOT]  NAME: Jeeva F Rishi Friend      | ID: 8440856934
+[USER/BOT]  NAME: Munirathnam               | ID: 8531548903
+[USER/BOT]  NAME: Asim Turkey Knights       | ID: 8330437731
+[USER/BOT]  NAME: Arthy F2-404              | ID: 8438687759
+[USER/BOT]  NAME: Rizwan                    | ID: 8587224559
+[USER/BOT]  NAME: Academic Coordinator      | ID: 8254570773
+[USER/BOT]  NAME: George Daniel             | ID: 8303315525
+[USER/BOT]  NAME:                           | ID: 8339446540
+[USER/BOT]  NAME:                           | ID: 8589041041
+[USER/BOT]  NAME: Nagamuni BJP Selva        | ID: 1877847712
+[USER/BOT]  NAME: Sampath                   | ID: 8063191814
+[USER/BOT]  NAME:                           | ID: 8389484419
+[CHANNEL ]  NAME: Mentee Update Group B3    | ID: -1001505101125
+[USER/BOT]  NAME: Saddam                    | ID: 8211367662
+[USER/BOT]  NAME:                           | ID: 7758332713
+[USER/BOT]  NAME:                           | ID: 8558095724
+[USER/BOT]  NAME: Divya Sindhu F3 403       | ID: 8487677206
+[USER/BOT]  NAME: Divya                     | ID: 6593651318
+[USER/BOT]  NAME: Angela                    | ID: 5936320905
+[USER/BOT]  NAME: TradeTron Alerts          | ID: 8235499947
+[USER/BOT]  NAME: Abhinav BJP Dist          | ID: 8543959441
+[USER/BOT]  NAME: Prashanth Globus          | ID: 8547250819
+[USER/BOT]  NAME: Vishal Malik              | ID: 8327666515
+[USER/BOT]  NAME: Govind PGPOWA             | ID: 8447031414
+[USER/BOT]  NAME: Kishore Bali              | ID: 8269013166
+[USER/BOT]  NAME: Govind PGPOWA             | ID: 8436370752
+[USER/BOT]  NAME: Narendra                  | ID: 8007209411
+[USER/BOT]  NAME:                           | ID: 8198482088
+[USER/BOT]  NAME: Shantaram                 | ID: 8282074023
+[USER/BOT]  NAME: Nazeer Bhai Nazeer Dj     | ID: 7034106186
+[USER/BOT]  NAME: Poovendran Lifecare       | ID: 8405771704
+[USER/BOT]  NAME:                           | ID: 8258285992
+[USER/BOT]  NAME: Sophie                    | ID: 6828096353
+[USER/BOT]  NAME: Shiva Kumar               | ID: 8201696441
+[USER/BOT]  NAME: Rekha                     | ID: 6689051594
+[USER/BOT]  NAME: Prakash Vasundhara        | ID: 8161498669
+[USER/BOT]  NAME: Vignesh Glint Car         | ID: 8219429548
+[USER/BOT]  NAME: Vishnu Partime            | ID: 7617524515
+[USER/BOT]  NAME:                           | ID: 8333701641
+[USER/BOT]  NAME: SO                        | ID: 8275208540
+[USER/BOT]  NAME:                           | ID: 7444822323
+[USER/BOT]  NAME: Prabhat SO                | ID: 8435120889
+[USER/BOT]  NAME: Te𐌠egram                  | ID: 6568725874
+[USER/BOT]  NAME: Harish                    | ID: 8213252510
+[USER/BOT]  NAME: Seshasayi                 | ID: 8361052824
+[USER/BOT]  NAME: Suppi Dad                 | ID: 8364544392
+[USER/BOT]  NAME:                           | ID: 8245006654
+[USER/BOT]  NAME:                           | ID: 7988878556
+[USER/BOT]  NAME: Geetha                    | ID: 8400397681
+[USER/BOT]  NAME: Karthick Eswaran          | ID: 7957720665
+[USER/BOT]  NAME: Madhu Sudhan              | ID: 8135169353
+[USER/BOT]  NAME: Nathan PPS Badminton🏸🏸    | ID: 8121417879
+[USER/BOT]  NAME: Virender                  | ID: 7592345083
+[CHANNEL ]  NAME: Day Trader తెలుగు 2.0     | ID: -1001573425166
+[USER/BOT]  NAME: Carpenter Ramesh          | ID: 7950079650
+[USER/BOT]  NAME: Usha                      | ID: 7400169547
+[USER/BOT]  NAME: Venkatesh                 | ID: 7503007067
+[USER/BOT]  NAME: Shankar Reddy             | ID: 7089370392
+[USER/BOT]  NAME: Kamaraj Nagar Thulasi     | ID: 8166012924
+[USER/BOT]  NAME: Raidu Y.K.K               | ID: 7665062061
+[USER/BOT]  NAME: Joshua Sir Athletics PPS  | ID: 7617226041
+[USER/BOT]  NAME: Selva Sundar              | ID: 8159861079
+[USER/BOT]  NAME: Corporation               | ID: 7580986923
+[USER/BOT]  NAME: Senthil B2 102            | ID: 7796900250
+[USER/BOT]  NAME: Sravan                    | ID: 7519896588
+[USER/BOT]  NAME: Venkatesh(RVJ)            | ID: 7236118818
+[USER/BOT]  NAME: Gunny Driver              | ID: 7972652917
+[USER/BOT]  NAME: Masthan                   | ID: 8056714486
+[USER/BOT]  NAME: Manikanta                 | ID: 7158594681
+[USER/BOT]  NAME: Nagaraj                   | ID: 8168175153
+[CHANNEL ]  NAME: Abhishek Kar Official     | ID: -1001215786591
+[USER/BOT]  NAME: Mari                      | ID: 7857841655
+[USER/BOT]  NAME: Kaleswaran                | ID: 7264933241
+[USER/BOT]  NAME: Seetha Equitas            | ID: 7703640225
+[USER/BOT]  NAME:                           | ID: 8115264183
+[USER/BOT]  NAME: H1 104                    | ID: 7738567816
+[USER/BOT]  NAME: Karthick MyGate           | ID: 7557046337
+[USER/BOT]  NAME: Kais                      | ID: 7474449905
+[USER/BOT]  NAME: Miyara                    | ID: 6946662769
+[USER/BOT]  NAME: Wisetech Global           | ID: 7866036564
+[USER/BOT]  NAME: Ganesh                    | ID: 7051714521
+[USER/BOT]  NAME: Kumar                     | ID: 7903731621
+[USER/BOT]  NAME: Hari                      | ID: 7942654033
+[USER/BOT]  NAME: Boothalingam D2 102       | ID: 7849240072
+[USER/BOT]  NAME: Ragu Elcom                | ID: 7697632882
+[USER/BOT]  NAME: Srinivas                  | ID: 8107268647
+[USER/BOT]  NAME: T D. Balagenesh           | ID: 7849877441
+[USER/BOT]  NAME: Naveen Belleza            | ID: 7631929941
+[USER/BOT]  NAME: Suresh D4 201             | ID: 8039505670
+[USER/BOT]  NAME: Ranjith 3.64 Land Owner   | ID: 7694253258
+[USER/BOT]  NAME: Elavarasan                | ID: 7258485870
+[USER/BOT]  NAME:                           | ID: 7702457585
+[USER/BOT]  NAME: Sreehari BOB RO           | ID: 8027447135
+[USER/BOT]  NAME: Mayflower Badminton       | ID: 7399473647
+[USER/BOT]  NAME: Sangeetha                 | ID: 7234435622
+[USER/BOT]  NAME:                           | ID: 7800365029
+[USER/BOT]  NAME: Ravi Mama Senthil         | ID: 7549312956
+[USER/BOT]  NAME: Mani Bus                  | ID: 7717672226
+[USER/BOT]  NAME: Vignesh AC Service        | ID: 7950923414
+[USER/BOT]  NAME: Ganesh Ramasamy           | ID: 8027317590
+[USER/BOT]  NAME:                           | ID: 7701241263
+[USER/BOT]  NAME: Prince                    | ID: 7891298175
+[USER/BOT]  NAME:                           | ID: 7009694870
+[USER/BOT]  NAME:                           | ID: 7398318134
+[USER/BOT]  NAME: Arun                      | ID: 7257559441
+[USER/BOT]  NAME: EB Mani Farm Land         | ID: 6881192164
+[USER/BOT]  NAME:                           | ID: 7254085267
+[USER/BOT]  NAME: Anand Nexa Aadi           | ID: 6742970475
+[USER/BOT]  NAME: Shanthi BJP PMS Dist      | ID: 7343516884
+[USER/BOT]  NAME: Santosh Rishi Friend      | ID: 7211765300
+[USER/BOT]  NAME: Govind PGPOWA             | ID: 7169548623
+[USER/BOT]  NAME: T S Maniayam & Associates | ID: 7235403720
+[USER/BOT]  NAME: Devansh                   | ID: 7245466350
+[USER/BOT]  NAME: Siva                      | ID: 6573155234
+[USER/BOT]  NAME:                           | ID: 7379613715
+[USER/BOT]  NAME:                           | ID: 7322360099
+[USER/BOT]  NAME:                           | ID: 7474270324
+[USER/BOT]  NAME:                           | ID: 7387999041
+[USER/BOT]  NAME: Eswaran Dad               | ID: 6736409809
+[USER/BOT]  NAME: Ganesh                    | ID: 7389809749
+[USER/BOT]  NAME:                           | ID: 7226976256
+[USER/BOT]  NAME:                           | ID: 6573936540
+[USER/BOT]  NAME: Murugesh                  | ID: 7026289771
+[USER/BOT]  NAME: Shahid                    | ID: 6985578828
+[USER/BOT]  NAME: Sankarankutty C3 302      | ID: 7103986926
+[USER/BOT]  NAME:                           | ID: 6806737095
+[USER/BOT]  NAME:                           | ID: 6984839234
+[USER/BOT]  NAME: Jayesh A1 103             | ID: 7017581222
+[USER/BOT]  NAME:                           | ID: 7146584281
+[USER/BOT]  NAME:                           | ID: 6718470791
+[USER/BOT]  NAME: Gnanaraj                  | ID: 6401673880
+[USER/BOT]  NAME: Pranav Suppi              | ID: 7005116770
+[USER/BOT]  NAME: Fabian Sir                | ID: 6853758369
+[USER/BOT]  NAME:                           | ID: 6917005462
+[USER/BOT]  NAME:                           | ID: 7197263845
+[USER/BOT]  NAME:                           | ID: 6670256973
+[USER/BOT]  NAME:                           | ID: 6543712852
+[USER/BOT]  NAME: Jayakumar E3 401          | ID: 7089975480
+[USER/BOT]  NAME: Aravind Clar Aqua         | ID: 7037969390
+[USER/BOT]  NAME: Sailesh Vasundhara        | ID: 7162849659
+[USER/BOT]  NAME: Senduran D4 101           | ID: 7090165118
+[USER/BOT]  NAME: Sidvic Rishi Badminton    | ID: 7028601063
+[USER/BOT]  NAME: Vijay Kumar               | ID: 6768633885
+[USER/BOT]  NAME: Ashwin Milk               | ID: 7006011124
+[USER/BOT]  NAME:                           | ID: 6879783537
+[USER/BOT]  NAME:                           | ID: 6593641151
+[USER/BOT]  NAME: Ratna                     | ID: 7047296814
+[USER/BOT]  NAME:                           | ID: 6478580047
+[USER/BOT]  NAME:                           | ID: 6456333570
+[USER/BOT]  NAME:                           | ID: 6425610057
+[USER/BOT]  NAME:                           | ID: 6856144300
+[USER/BOT]  NAME: C1 203                    | ID: 6961610719
+[USER/BOT]  NAME:                           | ID: 6308732443
+[USER/BOT]  NAME:                           | ID: 6344020549
+[USER/BOT]  NAME:                           | ID: 6862692769
+[USER/BOT]  NAME: Sri Ram                   | ID: 6555475061
+[USER/BOT]  NAME: Vinayaga Car Electrician  | ID: 6752515810
+[USER/BOT]  NAME:                           | ID: 6462679422
+[USER/BOT]  NAME: S. Venkatraj              | ID: 6781906116
+[USER/BOT]  NAME: Rangarajan                | ID: 6782229120
+[USER/BOT]  NAME:                           | ID: 6907867610
+[USER/BOT]  NAME: Sanjay                    | ID: 6713495165
+[USER/BOT]  NAME: Murali                    | ID: 6307440935
+[USER/BOT]  NAME:                           | ID: 6653720610
+[USER/BOT]  NAME: Senthilnathan             | ID: 6875671472
+[USER/BOT]  NAME: Enfielders Hub            | ID: 6805103840
+[USER/BOT]  NAME: Standard Charted Vikas PL | ID: 6473143208
+[USER/BOT]  NAME: Pedda Babai               | ID: 6518373359
+[USER/BOT]  NAME: Mahendran Elcom           | ID: 6717463241
+[USER/BOT]  NAME:                           | ID: 6408227220
+[USER/BOT]  NAME: Arjun Thulasi             | ID: 6443801107
+[USER/BOT]  NAME: Murali                    | ID: 6696044589
+[USER/BOT]  NAME: Akshay RO                 | ID: 6452791822
+[USER/BOT]  NAME:                           | ID: 6525411835
+[USER/BOT]  NAME:                           | ID: 6953999190
+[USER/BOT]  NAME: Ravali                    | ID: 6867470559
+[USER/BOT]  NAME: Faizal Panasonic AC       | ID: 6882838445
+[USER/BOT]  NAME: Tulasi                    | ID: 6800639817
+[USER/BOT]  NAME:                           | ID: 6851715407
+[USER/BOT]  NAME: Manoj Spark Office        | ID: 6402308103
+[USER/BOT]  NAME: Melba C2 204              | ID: 6422116548
+[USER/BOT]  NAME:                           | ID: 6943370437
+[USER/BOT]  NAME:                           | ID: 6773349107
+[USER/BOT]  NAME: Ram Prasad B              | ID: 6946443890
+[USER/BOT]  NAME:                           | ID: 6537665054
+[USER/BOT]  NAME:                           | ID: 6477167724
+[USER/BOT]  NAME:                           | ID: 6026451634
+[USER/BOT]  NAME: Deepa Joseph              | ID: 6411789822
+[USER/BOT]  NAME:                           | ID: 6551732437
+[USER/BOT]  NAME:                           | ID: 6063913318
+[USER/BOT]  NAME: Mahesh D3                 | ID: 6623721739
+[USER/BOT]  NAME:                           | ID: 6595815929
+[USER/BOT]  NAME:                           | ID: 5978491861
+[USER/BOT]  NAME: Karimullah                | ID: 6424019844
+[USER/BOT]  NAME:                           | ID: 6599817706
+[USER/BOT]  NAME: Ragunathan                | ID: 6260669910
+[USER/BOT]  NAME: Shenouda Andrawis         | ID: 6697995959
+[USER/BOT]  NAME: Venkatesh                 | ID: 6589783286
+[USER/BOT]  NAME: Ganesh                    | ID: 6458973925
+[USER/BOT]  NAME: Jayaprabhu Plumber        | ID: 6626262960
+[CHANNEL ]  NAME: CHARTIANS ADMIN TRADES [  | ID: -1001865489630
+[USER/BOT]  NAME:                           | ID: 6004696483
+[USER/BOT]  NAME: G1 104                    | ID: 6422837146
+[USER/BOT]  NAME: Leon                      | ID: 6409784755
+[USER/BOT]  NAME: Shankar Babu              | ID: 6603008997
+[USER/BOT]  NAME:                           | ID: 6076485924
+[USER/BOT]  NAME: Nanna                     | ID: 6576935807
+[USER/BOT]  NAME:                           | ID: 6533082207
+[USER/BOT]  NAME: Vadivel Rangasamy         | ID: 6646379875
+[USER/BOT]  NAME: Raghu                     | ID: 6522917002
+[USER/BOT]  NAME:                           | ID: 6510509294
+[USER/BOT]  NAME:                           | ID: 6316835534
+[USER/BOT]  NAME:                           | ID: 6118314012
+[USER/BOT]  NAME: Sathish                   | ID: 5952622185
+[USER/BOT]  NAME:                           | ID: 6055519792
+[USER/BOT]  NAME: Murali                    | ID: 6455551529
+[USER/BOT]  NAME: D2 202                    | ID: 6338469868
+[USER/BOT]  NAME: Fiaz C2 204               | ID: 6508830897
+[USER/BOT]  NAME: Uday                      | ID: 6371386648
+[USER/BOT]  NAME:                           | ID: 6610376879
+[USER/BOT]  NAME:                           | ID: 6342716774
+[USER/BOT]  NAME:                           | ID: 5965041503
+[USER/BOT]  NAME: Beena                     | ID: 6163185987
+[CHANNEL ]  NAME: KA PUBLIC CHARITY CHANNEL | ID: -1001753825783
+[USER/BOT]  NAME: Waste Food                | ID: 6384279460
+[USER/BOT]  NAME: Sachin Anna Dad           | ID: 6112402365
+[USER/BOT]  NAME:                           | ID: 5883224303
+[USER/BOT]  NAME: Senthil                   | ID: 6122274873
+[USER/BOT]  NAME: Praful                    | ID: 6065061044
+[USER/BOT]  NAME:                           | ID: 6247531964
+[USER/BOT]  NAME:                           | ID: 6004820131
+[USER/BOT]  NAME:                           | ID: 6232849320
+[USER/BOT]  NAME:                           | ID: 5518992123
+[USER/BOT]  NAME:                           | ID: 5957493549
+[USER/BOT]  NAME: MI Selvapuram Dealer      | ID: 5972690335
+[USER/BOT]  NAME:                           | ID: 5590916115
+[USER/BOT]  NAME:                           | ID: 6007325290
+[USER/BOT]  NAME:                           | ID: 5943302826
+[USER/BOT]  NAME:                           | ID: 5843029006
+[USER/BOT]  NAME: Githa                     | ID: 6215097107
+[USER/BOT]  NAME: Abhishek Croma            | ID: 6253838550
+[USER/BOT]  NAME:                           | ID: 6296284927
+[USER/BOT]  NAME: Prashant EB Hyd           | ID: 6216461719
+[USER/BOT]  NAME:                           | ID: 6224531232
+[USER/BOT]  NAME: Harish Appa               | ID: 6236633047
+[USER/BOT]  NAME: Ganesh                    | ID: 5942878763
+[USER/BOT]  NAME:                           | ID: 6291908300
+[USER/BOT]  NAME: Dhanush Badminton         | ID: 6054855902
+[USER/BOT]  NAME: Mohan D3 102              | ID: 6095880881
+[USER/BOT]  NAME:                           | ID: 6228030652
+[USER/BOT]  NAME: Murugan Kesavapillai      | ID: 6197038829
+[USER/BOT]  NAME: Lal                       | ID: 6299657898
+[USER/BOT]  NAME: Manoj Perumal             | ID: 6276198733
+[USER/BOT]  NAME:                           | ID: 6286817491
+[USER/BOT]  NAME:                           | ID: 6116844667
+[USER/BOT]  NAME:                           | ID: 6056324816
+[USER/BOT]  NAME:                           | ID: 6283574827
+[USER/BOT]  NAME: Rajender                  | ID: 6066220400
+[USER/BOT]  NAME: Shenbagamurthy            | ID: 6268922099
+[USER/BOT]  NAME: PGPOWA CRM                | ID: 6176037810
+[USER/BOT]  NAME: Ruchi                     | ID: 5848834598
+[USER/BOT]  NAME: SV                        | ID: 5738106787
+[USER/BOT]  NAME: Sivanesan F2 103          | ID: 6188841346
+[USER/BOT]  NAME:                           | ID: 6054640794
+[USER/BOT]  NAME: D3 304                    | ID: 5849351005
+[USER/BOT]  NAME:                           | ID: 5985498145
+[USER/BOT]  NAME:                           | ID: 5712625981
+[USER/BOT]  NAME:                           | ID: 5806554306
+[USER/BOT]  NAME: Prem AC Repair            | ID: 5619824516
+[USER/BOT]  NAME:                           | ID: 5818722046
+[USER/BOT]  NAME:                           | ID: 5846499722
+[USER/BOT]  NAME:                           | ID: 5936912866
+[USER/BOT]  NAME:                           | ID: 5971906503
+[USER/BOT]  NAME:                           | ID: 5875337343
+[USER/BOT]  NAME:                           | ID: 5563638081
+[USER/BOT]  NAME:                           | ID: 5689671251
+[USER/BOT]  NAME:                           | ID: 5837587648
+[USER/BOT]  NAME:                           | ID: 5527698432
+[USER/BOT]  NAME:                           | ID: 5835612018
+[USER/BOT]  NAME: Saravanan                 | ID: 5763903641
+[USER/BOT]  NAME:                           | ID: 5885118257
+[USER/BOT]  NAME:                           | ID: 5668195495
+[USER/BOT]  NAME: Mani Auto Telungupalyam   | ID: 5655427339
+[USER/BOT]  NAME:                           | ID: 5167924596
+[USER/BOT]  NAME:                           | ID: 5946117745
+[USER/BOT]  NAME:                           | ID: 5736550513
+[USER/BOT]  NAME:                           | ID: 5980403634
+[USER/BOT]  NAME: Mahindran                 | ID: 5714666682
+[USER/BOT]  NAME:                           | ID: 5558028751
+[USER/BOT]  NAME:                           | ID: 5432049605
+[USER/BOT]  NAME: Suppi Mom                 | ID: 5717596517
+[USER/BOT]  NAME:                           | ID: 5613489021
+[USER/BOT]  NAME:                           | ID: 5798351186
+[USER/BOT]  NAME:                           | ID: 5648288169
+[USER/BOT]  NAME:                           | ID: 5661383341
+[USER/BOT]  NAME:                           | ID: 5784172136
+[USER/BOT]  NAME: Supraja                   | ID: 1766200194
+[USER/BOT]  NAME:                           | ID: 5500195258
+[CHANNEL ]  NAME: PK Trades                 | ID: -1001771944133
+[USER/BOT]  NAME:                           | ID: 5694436006
+[USER/BOT]  NAME:                           | ID: 5769635388
+[USER/BOT]  NAME: Karthik Eswran RSS        | ID: 5559671716
+[USER/BOT]  NAME: Sachidanandam             | ID: 5653394515
+[USER/BOT]  NAME:                           | ID: 5607829528
+[USER/BOT]  NAME:                           | ID: 5607037899
+[USER/BOT]  NAME:                           | ID: 5573429333
+[USER/BOT]  NAME:                           | ID: 5754938202
+[USER/BOT]  NAME: Preetam Anna              | ID: 5447764561
+[USER/BOT]  NAME:                           | ID: 5788610302
+[USER/BOT]  NAME: Prashant Hyd Prop AE      | ID: 5710242449
+[USER/BOT]  NAME:                           | ID: 5773323722
+[USER/BOT]  NAME: Stockstix Support         | ID: 5425360359
+[USER/BOT]  NAME: Vigneswaran               | ID: 5401929354
+[USER/BOT]  NAME: Srinivas Equitas          | ID: 5544446501
+[USER/BOT]  NAME:                           | ID: 5790392621
+[USER/BOT]  NAME: Mani                      | ID: 5683033828
+[USER/BOT]  NAME:                           | ID: 5654399913
+[USER/BOT]  NAME:                           | ID: 5428956449
+[USER/BOT]  NAME: Venkatesh Athanti         | ID: 5737288258
+[USER/BOT]  NAME:                           | ID: 5682850980
+[USER/BOT]  NAME:                           | ID: 5794323834
+[USER/BOT]  NAME: Joy Moolan                | ID: 5684517968
+[USER/BOT]  NAME: Electrician Balaji        | ID: 5599628191
+[USER/BOT]  NAME:                           | ID: 5487367635
+[USER/BOT]  NAME:                           | ID: 5593948864
+[USER/BOT]  NAME:                           | ID: 5466811309
+[USER/BOT]  NAME:                           | ID: 5383475179
+[USER/BOT]  NAME:                           | ID: 5545964026
+[USER/BOT]  NAME: Krishna Kumar             | ID: 5367447026
+[USER/BOT]  NAME:                           | ID: 5590608387
+[USER/BOT]  NAME: Mohan Ganesan G1 201      | ID: 5589634727
+[USER/BOT]  NAME:                           | ID: 5511126391
+[USER/BOT]  NAME: Anant kashiramka          | ID: 5562919744
+[USER/BOT]  NAME: Vasu                      | ID: 5597168295
+[USER/BOT]  NAME:                           | ID: 5433031598
+[USER/BOT]  NAME:                           | ID: 5563318921
+[USER/BOT]  NAME:                           | ID: 5424666310
+[USER/BOT]  NAME:                           | ID: 5503978668
+[USER/BOT]  NAME: Ravi                      | ID: 5481110128
+[USER/BOT]  NAME:                           | ID: 5535790535
+[USER/BOT]  NAME: Sathish                   | ID: 1083112176
+[USER/BOT]  NAME:                           | ID: 5458333403
+[USER/BOT]  NAME:                           | ID: 5416749756
+[USER/BOT]  NAME: Vinod                     | ID: 5588614891
+[USER/BOT]  NAME: Vijay Bhaskar             | ID: 5435657734
+[USER/BOT]  NAME:                           | ID: 5325798175
+[USER/BOT]  NAME: Kuldeep                   | ID: 5318177412
+[USER/BOT]  NAME:                           | ID: 5381657692
+[USER/BOT]  NAME:                           | ID: 5355553065
+[USER/BOT]  NAME:                           | ID: 5359235481
+[USER/BOT]  NAME:                           | ID: 5330282803
+[USER/BOT]  NAME:                           | ID: 5363651936
+[USER/BOT]  NAME:                           | ID: 5189149292
+[USER/BOT]  NAME:                           | ID: 5165225126
+[USER/BOT]  NAME: Vishwas                   | ID: 5262445639
+[USER/BOT]  NAME:                           | ID: 5278750253
+[USER/BOT]  NAME: Sree Mohan                | ID: 5101732963
+[USER/BOT]  NAME:                           | ID: 5253225141
+[USER/BOT]  NAME: Mysura                    | ID: 5296368595
+[USER/BOT]  NAME:                           | ID: 5127980932
+[USER/BOT]  NAME:                           | ID: 5126503905
+[USER/BOT]  NAME: Praveena P                | ID: 5179914719
+[USER/BOT]  NAME: Eswar F1 303              | ID: 5267315817
+[USER/BOT]  NAME:                           | ID: 5109401823
+[USER/BOT]  NAME: Ganesan                   | ID: 5220850551
+[USER/BOT]  NAME: Suresh J                  | ID: 5265894339
+[USER/BOT]  NAME:                           | ID: 5008972159
+[USER/BOT]  NAME:                           | ID: 5073021487
+[USER/BOT]  NAME:                           | ID: 5080380322
+[USER/BOT]  NAME:                           | ID: 5042493252
+[USER/BOT]  NAME:                           | ID: 5071671283
+[USER/BOT]  NAME: Alageswaran               | ID: 5025675410
+[USER/BOT]  NAME:                           | ID: 5057157602
+[USER/BOT]  NAME:                           | ID: 5090237926
+[USER/BOT]  NAME:                           | ID: 5087805481
+[USER/BOT]  NAME:                           | ID: 2134659191
+[USER/BOT]  NAME:                           | ID: 2107342883
+[USER/BOT]  NAME:                           | ID: 2117045069
+[USER/BOT]  NAME:                           | ID: 2145679471
+[USER/BOT]  NAME:                           | ID: 2143126179
+[USER/BOT]  NAME:                           | ID: 2137524919
+[USER/BOT]  NAME:                           | ID: 2133049930
+[USER/BOT]  NAME:                           | ID: 2138356341
+[USER/BOT]  NAME:                           | ID: 2117851791
+[USER/BOT]  NAME:                           | ID: 2108855695
+[USER/BOT]  NAME: Ravi                      | ID: 2135971803
+[USER/BOT]  NAME:                           | ID: 2018663926
+[USER/BOT]  NAME:                           | ID: 2084176966
+[USER/BOT]  NAME:                           | ID: 2079594580
+[USER/BOT]  NAME: Karthik-Finance           | ID: 2069655750
+[USER/BOT]  NAME:                           | ID: 1913314618
+[USER/BOT]  NAME: Shankar                   | ID: 2018193978
+[USER/BOT]  NAME: Kamal Colliers            | ID: 2013046392
+[USER/BOT]  NAME:                           | ID: 1963730471
+[USER/BOT]  NAME:                           | ID: 1994207473
+[USER/BOT]  NAME:                           | ID: 1964496471
+[USER/BOT]  NAME:                           | ID: 1910833425
+[USER/BOT]  NAME:                           | ID: 1974094930
+[USER/BOT]  NAME:                           | ID: 1972384796
+[USER/BOT]  NAME:                           | ID: 1969335914
+[USER/BOT]  NAME:                           | ID: 1965882399
+[USER/BOT]  NAME:                           | ID: 1936232966
+[USER/BOT]  NAME: Vijay                     | ID: 1883987526
+[USER/BOT]  NAME:                           | ID: 1916575522
+[USER/BOT]  NAME:                           | ID: 1948377926
+[USER/BOT]  NAME:                           | ID: 1886543291
+[USER/BOT]  NAME:                           | ID: 1844511770
+[USER/BOT]  NAME: Raj Shekar                | ID: 1829380706
+[USER/BOT]  NAME:                           | ID: 1806850337
+[USER/BOT]  NAME:                           | ID: 1822067199
+[USER/BOT]  NAME:                           | ID: 1780352352
+[USER/BOT]  NAME:                           | ID: 1822734528
+[USER/BOT]  NAME:                           | ID: 1760765329
+[USER/BOT]  NAME:                           | ID: 1812944276
+[USER/BOT]  NAME:                           | ID: 1701324895
+[USER/BOT]  NAME:                           | ID: 1872806830
+[USER/BOT]  NAME:                           | ID: 1724328637
+[USER/BOT]  NAME:                           | ID: 1701458377
+[USER/BOT]  NAME:                           | ID: 1752093538
+[USER/BOT]  NAME:                           | ID: 1727960985
+[USER/BOT]  NAME:                           | ID: 1892366033
+[USER/BOT]  NAME:                           | ID: 1693523559
+[USER/BOT]  NAME:                           | ID: 1675277984
+[USER/BOT]  NAME:                           | ID: 1809711382
+[USER/BOT]  NAME: Raghava                   | ID: 1880692968
+[USER/BOT]  NAME:                           | ID: 1850177748
+[USER/BOT]  NAME: Nirmal                    | ID: 1712953839
+[USER/BOT]  NAME:                           | ID: 1886593835
+[USER/BOT]  NAME: Vineet Parekh R           | ID: 1852297853
+[USER/BOT]  NAME:                           | ID: 1640572113
+[USER/BOT]  NAME:                           | ID: 1886306244
+[USER/BOT]  NAME: Suresh                    | ID: 1718384303
+[USER/BOT]  NAME: Karthikeyan GST           | ID: 1789180214
+[USER/BOT]  NAME: Sunitha                   | ID: 1870566046
+[USER/BOT]  NAME:                           | ID: 1898434418
+[USER/BOT]  NAME:                           | ID: 1813856957
+[USER/BOT]  NAME:                           | ID: 1765565767
+[USER/BOT]  NAME:                           | ID: 1772656354
+[USER/BOT]  NAME:                           | ID: 1801437901
+[USER/BOT]  NAME:                           | ID: 1862018969
+[USER/BOT]  NAME:                           | ID: 1897970540
+[USER/BOT]  NAME: Karnam                    | ID: 1592813708
+[USER/BOT]  NAME:                           | ID: 1765097879
+[USER/BOT]  NAME:                           | ID: 1625699239
+[USER/BOT]  NAME: Sathish Home Loan         | ID: 1770804777
+[USER/BOT]  NAME:                           | ID: 1721806751
+[USER/BOT]  NAME:                           | ID: 1721204417
+[USER/BOT]  NAME:                           | ID: 1704254110
+[USER/BOT]  NAME:                           | ID: 1704954136
+[USER/BOT]  NAME: Srinivas                  | ID: 1732250743
+[USER/BOT]  NAME:                           | ID: 1690431030
+[USER/BOT]  NAME:                           | ID: 1763437495
+[USER/BOT]  NAME:                           | ID: 1768932332
+[USER/BOT]  NAME:                           | ID: 1736985610
+[USER/BOT]  NAME:                           | ID: 1738099671
+[USER/BOT]  NAME: Robert                    | ID: 1770518526
+[USER/BOT]  NAME:                           | ID: 1797241982
+[USER/BOT]  NAME:                           | ID: 1721409199
+[USER/BOT]  NAME:                           | ID: 1709453910
+[USER/BOT]  NAME:                           | ID: 1659889933
+============================================================

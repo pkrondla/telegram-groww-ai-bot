@@ -316,6 +316,13 @@ class SymbolManager:
                 for k, v in data.get("aliases", {}).items()
                 if k and v
             }
+            # Always re-apply manual overrides at load time so local edits in
+            # symbol_overrides.json take effect immediately even with fresh cache.
+            overrides = self._load_overrides()
+            for raw_key, groww_sym in overrides.items():
+                key = self._normalise_key(raw_key)
+                if key:
+                    self._aliases[key] = groww_sym
             self._symbol_keys = {self._normalise_key(s) for s in self._symbols}
             self._loaded = True
             logger.info(

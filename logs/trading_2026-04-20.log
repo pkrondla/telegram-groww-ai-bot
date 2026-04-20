@@ -1110,3 +1110,126 @@ Wait and watch for now.
 2026-04-20 18:22:44 [INFO] :: Pending entry watcher started (every 30s).
 2026-04-20 18:22:44 [INFO] :: Management queue watcher started (every 10s).
 2026-04-20 18:22:44 [INFO] :: Active trade reconciler started (every 900s).
+2026-04-20 18:24:50 [INFO] :: Bot Process Terminated.
+2026-04-20 18:24:50 [INFO] :: Bot Manually Stopped by User.
+2026-04-20 18:24:54 [INFO] :: Initializing Industrial-Standard Trading Bot...
+2026-04-20 18:24:56 [INFO] :: Startup active-trade maintenance: active=6 removed=0 rearmed=0
+2026-04-20 18:24:58 [INFO] :: SymbolManager: cache is fresh, loading from symbol_map.json
+2026-04-20 18:24:58 [INFO] :: SymbolManager: cache loaded — 220 symbols, 362 aliases.
+2026-04-20 18:24:58 [INFO] :: Connected to Telegram as: Praveen
+2026-04-20 18:24:58 [INFO] :: 📡 LISTENING TO: CHARTIANS [ FNO ] PREMIUM CHANNEL (-1002153367077)
+2026-04-20 18:24:58 [INFO] :: 🔔 NOTIFYING ADMIN: Praveen Rondla (1447109810)
+2026-04-20 18:24:59 [INFO] :: Bot Connection Established.
+2026-04-20 18:25:00 [INFO] :: Market Alert Scheduler Started.
+2026-04-20 18:25:00 [INFO] :: Volatility SL scheduler started (every 30s, IST widen/restore).
+2026-04-20 18:25:00 [INFO] :: EOD summary scheduler started (every 1500s).
+2026-04-20 18:25:00 [INFO] :: Pending entry watcher started (every 30s).
+2026-04-20 18:25:00 [INFO] :: Management queue watcher started (every 10s).
+2026-04-20 18:25:00 [INFO] :: Active trade reconciler started (every 900s).
+2026-04-20 18:27:07 [INFO] :: Bot Process Terminated.
+2026-04-20 18:27:07 [INFO] :: Bot Manually Stopped by User.
+2026-04-20 18:27:11 [INFO] :: Initializing Industrial-Standard Trading Bot...
+2026-04-20 18:27:13 [INFO] :: Startup active-trade maintenance: active=6 removed=0 rearmed=0
+2026-04-20 18:27:16 [INFO] :: SymbolManager: cache is fresh, loading from symbol_map.json
+2026-04-20 18:27:16 [INFO] :: SymbolManager: cache loaded — 220 symbols, 362 aliases.
+2026-04-20 18:27:17 [INFO] :: Connected to Telegram as: Praveen
+2026-04-20 18:27:17 [INFO] :: 📡 LISTENING TO: CHARTIANS [ FNO ] PREMIUM CHANNEL (-1002153367077)
+2026-04-20 18:27:17 [INFO] :: 🔔 NOTIFYING ADMIN: Praveen Rondla (1447109810)
+2026-04-20 18:27:18 [INFO] :: Bot Connection Established.
+2026-04-20 18:27:18 [INFO] :: Market Alert Scheduler Started.
+2026-04-20 18:27:18 [INFO] :: Volatility SL scheduler started (every 30s, IST widen/restore).
+2026-04-20 18:27:18 [INFO] :: EOD summary scheduler started (every 1500s).
+2026-04-20 18:27:18 [INFO] :: Pending entry watcher started (every 30s).
+2026-04-20 18:27:18 [INFO] :: Management queue watcher started (every 10s).
+2026-04-20 18:27:18 [INFO] :: Active trade reconciler started (every 900s).
+2026-04-20 18:29:12 [INFO] :: Bot Process Terminated.
+2026-04-20 18:29:12 [INFO] :: Bot Manually Stopped by User.
+2026-04-20 18:29:16 [INFO] :: Initializing Industrial-Standard Trading Bot...
+2026-04-20 18:29:18 [INFO] :: Startup active-trade maintenance: active=6 removed=0 rearmed=0
+2026-04-20 18:29:20 [INFO] :: SymbolManager: cache is fresh, loading from symbol_map.json
+2026-04-20 18:29:20 [INFO] :: SymbolManager: cache loaded — 220 symbols, 362 aliases.
+2026-04-20 18:29:20 [INFO] :: Connected to Telegram as: Praveen
+2026-04-20 18:29:20 [INFO] :: 📡 LISTENING TO: CHARTIANS [ FNO ] PREMIUM CHANNEL (-1002153367077)
+2026-04-20 18:29:20 [INFO] :: 🔔 NOTIFYING ADMIN: Praveen Rondla (1447109810)
+2026-04-20 18:29:21 [INFO] :: Bot Connection Established.
+2026-04-20 18:29:22 [INFO] :: Market Alert Scheduler Started.
+2026-04-20 18:29:22 [INFO] :: Volatility SL scheduler started (every 30s, IST widen/restore).
+2026-04-20 18:29:22 [INFO] :: EOD summary scheduler started (every 1500s).
+2026-04-20 18:29:22 [INFO] :: Pending entry watcher started (every 30s).
+2026-04-20 18:29:22 [INFO] :: Management queue watcher started (every 10s).
+2026-04-20 18:29:22 [INFO] :: Active trade reconciler started (every 900s).
+2026-04-20 18:30:05 [INFO] :: Bot Process Terminated.
+2026-04-20 18:30:05 [INFO] :: Bot Manually Stopped by User.
+2026-04-20 18:30:09 [INFO] :: Initializing Industrial-Standard Trading Bot...
+2026-04-20 18:30:11 [INFO] :: Startup active-trade maintenance: active=6 removed=0 rearmed=0
+2026-04-20 18:30:13 [INFO] :: SymbolManager: cache is fresh, loading from symbol_map.json
+2026-04-20 18:30:13 [INFO] :: SymbolManager: cache loaded — 220 symbols, 362 aliases.
+2026-04-20 18:30:14 [INFO] :: Connected to Telegram as: Praveen
+2026-04-20 18:30:14 [INFO] :: 📡 LISTENING TO: CHARTIANS [ FNO ] PREMIUM CHANNEL (-1002153367077)
+2026-04-20 18:30:14 [INFO] :: 🔔 NOTIFYING ADMIN: Praveen Rondla (1447109810)
+2026-04-20 18:30:15 [INFO] :: Bot Connection Established.
+2026-04-20 18:30:16 [INFO] :: Market Alert Scheduler Started.
+2026-04-20 18:30:16 [INFO] :: Volatility SL scheduler started (every 30s, IST widen/restore).
+2026-04-20 18:30:16 [INFO] :: EOD summary scheduler started (every 1500s).
+2026-04-20 18:30:16 [INFO] :: Pending entry watcher started (every 30s).
+2026-04-20 18:30:16 [INFO] :: Management queue watcher started (every 10s).
+2026-04-20 18:30:16 [INFO] :: Active trade reconciler started (every 900s).
+2026-04-20 18:30:22 [INFO] :: [STAGE 1] Admin override command: help
+2026-04-20 18:30:33 [INFO] :: [STAGE 1] Admin override command: status
+2026-04-20 18:33:29 [INFO] :: Bot Process Terminated.
+2026-04-20 18:33:29 [INFO] :: Bot Manually Stopped by User.
+2026-04-20 18:33:34 [INFO] :: Initializing Industrial-Standard Trading Bot...
+2026-04-20 18:33:36 [INFO] :: Startup active-trade maintenance: active=6 removed=0 rearmed=0
+2026-04-20 18:33:38 [INFO] :: SymbolManager: cache is fresh, loading from symbol_map.json
+2026-04-20 18:33:38 [INFO] :: SymbolManager: cache loaded — 220 symbols, 362 aliases.
+2026-04-20 18:33:40 [INFO] :: Connected to Telegram as: Praveen
+2026-04-20 18:33:40 [INFO] :: 📡 LISTENING TO: CHARTIANS [ FNO ] PREMIUM CHANNEL (-1002153367077)
+2026-04-20 18:33:40 [INFO] :: 🔔 NOTIFYING ADMIN: Praveen Rondla (1447109810)
+2026-04-20 18:33:41 [INFO] :: Bot Connection Established.
+2026-04-20 18:33:41 [INFO] :: Market Alert Scheduler Started.
+2026-04-20 18:33:41 [INFO] :: Volatility SL scheduler started (every 30s, IST widen/restore).
+2026-04-20 18:33:41 [INFO] :: EOD summary scheduler started (every 1500s).
+2026-04-20 18:33:41 [INFO] :: Pending entry watcher started (every 30s).
+2026-04-20 18:33:41 [INFO] :: Management queue watcher started (every 10s).
+2026-04-20 18:33:41 [INFO] :: Active trade reconciler started (every 900s).
+2026-04-20 18:33:51 [INFO] :: [STAGE 1] Admin override command: trades
+2026-04-20 18:38:19 [INFO] :: ────────────────────────────────────────────────────────────
+2026-04-20 18:38:19 [INFO] :: [STAGE 1] MESSAGE RECEIVED
+2026-04-20 18:38:19 [INFO] :: [STAGE 1] is_reply=True | child_len=35 | parent_len=69
+2026-04-20 18:38:19 [INFO] :: [STAGE 1] child : Good consolidation happening here ✅
+2026-04-20 18:38:19 [INFO] :: [STAGE 1] parent: BUY #NIFTTY 24300 PE 21ST APR AT 110-120
+
+SL : 85
+
+TARGETS : 134, 156
+2026-04-20 18:38:19 [INFO] :: [STAGE 2] AI parser started.
+2026-04-20 18:38:19 [INFO] :: [STAGE 2] Symbol hint: (none matched)
+2026-04-20 18:38:19 [INFO] :: [STAGE 2] Deterministic intent: none
+2026-04-20 18:38:19 [INFO] :: [STAGE 2] Calling LLM (gpt-4o-mini)...
+2026-04-20 18:38:21 [INFO] :: [STAGE 2] LLM raw: is_trade=False action=None symbol=None strike=None type=None expiry=None/None/None entry=None sl=None tgt=None
+2026-04-20 18:38:21 [INFO] :: [STAGE 2] Decision: IGNORE — LLM says not a trade.
+2026-04-20 18:38:21 [INFO] :: [STAGE 2] Parser returned no signal — message ignored.
+2026-04-20 18:38:21 [INFO] :: ────────────────────────────────────────────────────────────
+2026-04-20 18:39:22 [INFO] :: ────────────────────────────────────────────────────────────
+2026-04-20 18:39:22 [INFO] :: [STAGE 1] MESSAGE RECEIVED
+2026-04-20 18:39:22 [INFO] :: [STAGE 1] is_reply=False | child_len=69 | parent_len=0
+2026-04-20 18:39:22 [INFO] :: [STAGE 1] child : BUY #NIFTTY 24300 PE 21ST APR AT 110-120
+
+SL : 85
+
+TARGETS : 134, 156
+2026-04-20 18:39:22 [INFO] :: [STAGE 2] AI parser started.
+2026-04-20 18:39:22 [INFO] :: [STAGE 2] Symbol hint: (none matched)
+2026-04-20 18:39:22 [INFO] :: [STAGE 2] Deterministic intent: none
+2026-04-20 18:39:22 [INFO] :: [STAGE 2] Calling LLM (gpt-4o-mini)...
+2026-04-20 18:39:25 [INFO] :: [STAGE 2] LLM raw: is_trade=True action=BUY symbol=NIFTTY strike=24300 type=PE expiry=21/APR/2026 entry=[110.0, 120.0] sl=85.0 tgt=134.0
+2026-04-20 18:39:25 [INFO] :: [STAGE 2] Validator passed: ok
+2026-04-20 18:39:25 [INFO] :: [STAGE 2] Signal ready: BUY NIFTTY26APR24300PE strike=24300 PE expiry=21/APR/2026 @ 110.0-120.0 sl=85.0 tgt=134.0 trading_symbol=NIFTTY26APR24300PE
+2026-04-20 18:39:25 [INFO] :: [STAGE 2] Signal: action=BUY | symbol=NIFTTY26APR24300PE | range=110.0-120.0 | sl=85.0 | tgt=134.0
+2026-04-20 18:39:25 [INFO] :: [STAGE 3] StateEngine.process: action=BUY symbol=NIFTTY26APR24300PE bot_status=ACTIVE
+2026-04-20 18:39:25 [INFO] :: [STAGE 3] Active book has 1 position(s): ['GMRAIRPORT26APR100CE']
+2026-04-20 18:39:25 [INFO] :: [STAGE 3] Forwarding BUY NIFTTY26APR24300PE to executor.
+2026-04-20 18:39:30 [INFO] :: [STAGE 4] RESULT: ❌ FAILURE: Could not find instrument details for NIFTTY26APR24300PE (Variants tried: ['NIFTTY26APR24300PE', 'NIFTTY26424300PE']) on Groww.
+2026-04-20 18:39:31 [INFO] :: ────────────────────────────────────────────────────────────
+2026-04-20 18:40:59 [INFO] :: Bot Process Terminated.
+2026-04-20 18:40:59 [INFO] :: Bot Manually Stopped by User.

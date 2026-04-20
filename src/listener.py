@@ -1,6 +1,7 @@
 from telethon import TelegramClient, events
 import asyncio
 import datetime
+import re
 import pytz
 from .config import Config
 from .logger import logger
@@ -17,6 +18,11 @@ _OVERRIDE_COMMANDS = {
     "RESUME":   "resume",
     "KILL":     "kill",
     "STATUS":   "status",
+    "TRADES":   "trades",
+    "ACTIVE TRADES": "trades",
+    "POSITIONS": "trades",
+    "SIZING":   "sizing_status",
+    "SIZING MODE": "sizing_status",
     "HELP":     "help",
     "DRYRUN ON":  "dryrun_on",
     "DRYRUN OFF": "dryrun_off",
@@ -35,15 +41,7 @@ _SIZE_OVERRIDE_FIXED_PHRASES = (
 
 def _startup_command_reference() -> str:
     """Compact admin command/help text shown in startup notification."""
-    return (
-        "Admin commands:\n"
-        "• `HELP` • `STATUS` • `PAUSE` • `RESUME` • `KILL`\n"
-        "• `DRYRUN ON` • `DRYRUN OFF`\n"
-        "\n"
-        "Single-trade exit:\n"
-        "Send `EXIT ALL <TRADING_SYMBOL>` from admin chat "
-        "(or reply `EXIT ALL` when reply context is available)."
-    )
+    return "Send `HELP` to view all available commands."
 
 
 class BotListener:
@@ -235,13 +233,54 @@ class BotListener:
     def _parse_override(self, text: str) -> str | None:
         """Returns override command key if text matches, else None."""
         t = re.sub(r"\s+", " ", str(text or "").strip().upper())
+        # Accept bot-style slash commands: /status, /help, /pause@my_bot
+        if t.startswith("/"):
+            t = t[1:]
+            if " " in t:
+                first, rest = t.split(" ", 1)
+            else:
+                first, rest = t, ""
+            if "@" in first:
+                first = first.split("@", 1)[0]
+            t = f"{first} {rest}".strip()
         # HELP accepts suffixes like "HELP SYMBOL", "HELP COMMANDS", etc.
         if t == "HELP" or t.startswith("HELP "):
             return "help"
+        # Position sizing mode controls (runtime):
+        # SIZING / SIZING MODE                -> show current mode
+        # SIZING FIXED / SIZING RISK          -> set mode
+        # SIZING MODE FIXED / ... RISK        -> set mode
+        # POSITION SIZING FIXED / ... RISK    -> set mode
+        if t in ("SIZING", "SIZING MODE", "POSITION SIZING", "POSITION_SIZING_MODE"):
+            return "sizing_status"
+        m = re.fullmatch(
+            r"(?:SIZING|SIZING MODE|POSITION SIZING|POSITION_SIZING_MODE)\s+(FIXED|RISK)",
+            t,
+        )
+        if m:
+            return f"sizing_{m.group(1).lower()}"
         for cmd in _OVERRIDE_COMMANDS:
             if t == cmd:
                 return _OVERRIDE_COMMANDS[cmd]
         return None
+
+    @staticmethod
+    def _format_active_trades(active: dict) -> str:
+        if not active:
+            return "📭 **Active Trades**\nNo active trades."
+
+        lines = [f"📊 **Active Trades ({len(active)})**"]
+        for symbol, info in active.items():
+            data = info if isinstance(info, dict) else {}
+            side = str(data.get("entry_side", "BUY")).upper()
+            qty = data.get("entry_qty", data.get("quantity", "-"))
+            entry = data.get("entry_avg_price", data.get("entry_price", "-"))
+            sl = data.get("sl_true", data.get("stop_loss", "-"))
+            tgt = data.get("target", "-")
+            lines.append(
+                f"• `{symbol}` | {side} | qty={qty} | entry={entry} | sl={sl} | tgt={tgt}"
+            )
+        return "\n".join(lines)
 
     async def _handle_override(self, command: str):
         if command == "pause":
@@ -258,20 +297,48 @@ class BotListener:
             pending = self.trader._load_pending()
             pending_mgmt = self.trader._load_pending_management()
             dry = "ON" if not self.trader.execute_orders else "OFF"
+            sizing_mode = str(Config.POSITION_SIZING_MODE or "fixed").strip().lower()
             detail = (
                 f"State: {self.state_engine.status}\n"
                 f"Dry Run (entry orders only): {dry}\n"
+                f"Position sizing mode: {sizing_mode}\n"
                 f"Active trades: {len(active)}\n"
                 f"Pending entry queue: {len(pending)}\n"
                 f"Pending management queue: {len(pending_mgmt)}"
             )
             await self.notifier.send_status(self.state_engine.status, detail)
+        elif command == "sizing_status":
+            mode = str(Config.POSITION_SIZING_MODE or "fixed").strip().lower()
+            await self.notifier.send(
+                "⚙️ **Position Sizing Mode**\n"
+                f"Current: `{mode}`\n\n"
+                "Use `SIZING FIXED` or `SIZING RISK` to change."
+            )
+        elif command == "sizing_fixed":
+            Config.POSITION_SIZING_MODE = "fixed"
+            await self.notifier.send(
+                "⚙️ Position sizing mode set to `fixed`.\n"
+                "Applies immediately for new entries."
+            )
+        elif command == "sizing_risk":
+            Config.POSITION_SIZING_MODE = "risk"
+            await self.notifier.send(
+                "⚙️ Position sizing mode set to `risk`.\n"
+                "Applies immediately for new entries."
+            )
+        elif command == "trades":
+            active = self.trader._load_active_trades()
+            await self.notifier.send(self._format_active_trades(active))
         elif command == "help":
             await self.notifier.send(
                 "📘 **Bot Command Help**\n\n"
                 "**Admin override commands**\n"
                 "• `HELP` — show this help\n"
                 "• `STATUS` — bot state, dry-run, active/pending counts\n"
+                "• `TRADES` — list all active trades\n"
+                "• `SIZING` — show current position sizing mode\n"
+                "• `SIZING FIXED` — use configured fixed lots\n"
+                "• `SIZING RISK` — use risk-based sizing\n"
                 "• `PAUSE` — ignore all incoming signals\n"
                 "• `RESUME` — resume signal processing\n"
                 "• `KILL` — emergency stop (restart required)\n"
@@ -303,13 +370,30 @@ class BotListener:
         child_text = event.raw_text
         parent_text = ""
         is_reply = False
+        sender_id = getattr(event, "sender_id", None)
+
+        is_target_chat = (
+            event.chat_id == self.target_chat_id
+            or str(event.chat_id) == str(self.target_chat_id)
+        )
+        is_admin_context = (
+            event.chat_id == Config.ADMIN_ID
+            or str(event.chat_id) == str(Config.ADMIN_ID)
+            or sender_id == Config.ADMIN_ID
+            or str(sender_id) == str(Config.ADMIN_ID)
+        )
+
+        # Ignore unrelated chats; process only channel signals and admin-origin messages.
+        if not (is_target_chat or is_admin_context):
+            return
 
         # Ignore own bot notifications to prevent feedback loop
         if child_text.startswith("🤖") or "BOT ACTION" in child_text:
             return
 
-        # Admin override commands (from admin chat only)
-        if event.chat_id == Config.ADMIN_ID or str(event.chat_id) == str(Config.ADMIN_ID):
+        # Admin override commands:
+        # accept when message is in admin chat OR sent by admin user (e.g. bot DM).
+        if is_admin_context:
             override = self._parse_override(child_text)
             if override:
                 logger.info(f"[STAGE 1] Admin override command: {override}")
@@ -442,7 +526,9 @@ class BotListener:
         asyncio.create_task(self._management_queue_watcher())
         asyncio.create_task(self._active_trade_reconciler())
 
-        @self.client.on(events.NewMessage(chats=[self.target_chat_id, Config.ADMIN_ID]))
+        # Listen to both incoming and outgoing so admin commands typed from the
+        # same logged-in account (Saved Messages / bot DM) are also captured.
+        @self.client.on(events.NewMessage())
         async def handler(event):
             await self._handle_message(event)
 

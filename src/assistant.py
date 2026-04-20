@@ -209,6 +209,16 @@ class Assistant:
         "WORKED WELL",
         "CARRYING",
     )
+    _SIZE_OVERRIDE_FIXED_PHRASES = (
+        "RISKY TRADE",
+        "HIGH RISK",
+        "TRADE LESS QTY",
+        "LESS QTY",
+        "LOW QTY",
+        "SMALL QTY",
+        "REDUCE QTY",
+        "TRADE SMALL",
+    )
 
     def __init__(self):
         self.api_key = Config.OPENAI_API_KEY
@@ -1549,9 +1559,32 @@ Return is_trade: false for:
         raw = self.parse_signal(message)
         if raw is None:
             return None
+        override_mode, override_reason = self._detect_size_override_mode(
+            child_text=child_text,
+            parent_text=parent_text,
+        )
+        if override_mode:
+            raw["size_override_mode"] = override_mode
+            raw["size_override_reason"] = override_reason
+            if raw.get("spread") and isinstance(raw.get("legs"), list):
+                for leg in raw["legs"]:
+                    if isinstance(leg, dict):
+                        leg["size_override_mode"] = override_mode
+                        leg["size_override_reason"] = override_reason
         return TradeSignal.from_dict(
             raw,
             raw_child=child_text,
             raw_parent=parent_text,
             is_reply=is_reply,
         )
+
+    @classmethod
+    def _detect_size_override_mode(cls, *, child_text: str, parent_text: str) -> tuple[str, str]:
+        text = f"{child_text or ''} {parent_text or ''}"
+        n = cls._normalize_for_match(text)
+        if not n:
+            return "", ""
+        for phrase in cls._SIZE_OVERRIDE_FIXED_PHRASES:
+            if phrase in n:
+                return "FIXED", phrase
+        return "", ""

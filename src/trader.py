@@ -7,6 +7,7 @@ import csv
 import copy
 import time
 import datetime
+import math
 import pytz
 from .config import Config
 
@@ -30,6 +31,7 @@ class Trader:
     # Stored in active_trades.json when a BUY was validated in dry run but not sent to Groww.
     DRY_RUN_PLACEHOLDER_ORDER_ID = "DRY_RUN_NO_ORDER"
     SMART_SEGMENT = "FNO"
+    INDEX_UNDERLYINGS = frozenset({"NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX", "BANKEX"})
     
     def __init__(self, dry_run=True):
         self.dry_run = dry_run
@@ -914,19 +916,23 @@ class Trader:
         trades[symbol] = rec
         self._save_all_trades(trades)
 
-    def _modify_oco_sl(self, symbol: str, order_id: str, new_sl: float):
+    def _modify_oco_sl(self, symbol: str, order_id: str, new_sl: float) -> float:
         if not self.client:
             raise RuntimeError("Groww client not initialized")
+        sl = self._round_price_to_tick(new_sl, mode="nearest")
+        if sl <= 0:
+            raise RuntimeError(f"Invalid SL after tick-rounding: {new_sl}")
         self.client.modify_smart_order(
             smart_order_id=order_id,
             smart_order_type=self.client.SMART_ORDER_TYPE_OCO,
             segment=self.SMART_SEGMENT,
             stop_loss={
-                "trigger_price": float(new_sl),
-                "price": float(new_sl),
+                "trigger_price": float(sl),
+                "price": float(sl),
                 "order_type": "SL",
             },
         )
+        return float(sl)
 
     def restore_channel_sl(self, symbol: str, *, source: str) -> str:
         """
@@ -965,7 +971,7 @@ class Trader:
             return f"⚠️ RESTORE_SL skipped for {symbol}: missing sl_true in local book."
 
         logger.info(f"[STAGE 4] RESTORE_SL ({source}): modify_smart_order {symbol} → sl_true={sl_true}.")
-        self._modify_oco_sl(symbol, order_id, sl_true)
+        sl_true = self._modify_oco_sl(symbol, order_id, sl_true)
         today = self._today_ist_iso()
         self._update_active_trade_levels(
             symbol,
@@ -1035,7 +1041,7 @@ class Trader:
                         f"[VOL_SL] Widen schedule: {symbol} sl_true={sl_true} pct={pct} → broker_sl={widened} "
                         f"(smart_order_id={oid})."
                     )
-                    self._modify_oco_sl(symbol, oid, widened)
+                    widened = self._modify_oco_sl(symbol, oid, widened)
                     self._update_active_trade_levels(
                         symbol,
                         stop_loss=widened,
@@ -1370,9 +1376,128 @@ class Trader:
                 continue
         return None
 
+    @classmethod
+    def _is_index_option_trade(cls, trade_data: dict) -> bool:
+        candidates = []
+        for k in ("official_symbol", "underlying", "stock", "trading_symbol"):
+            v = str(trade_data.get(k) or "").upper().strip()
+            if v:
+                candidates.append(v)
+        for raw in candidates:
+            letters = re.match(r"^[A-Z]+", raw)
+            head = letters.group(0) if letters else raw
+            if head in cls.INDEX_UNDERLYINGS:
+                return True
+            for idx in cls.INDEX_UNDERLYINGS:
+                if raw.startswith(idx):
+                    return True
+        return False
+
+    def _segment_lots_caps(self, trade_data: dict) -> tuple[int, int]:
+        if self._is_index_option_trade(trade_data):
+            return int(Config.INDEX_MIN_LOTS), int(Config.INDEX_MAX_LOTS)
+        return int(Config.STOCK_MIN_LOTS), int(Config.STOCK_MAX_LOTS)
+
+    @staticmethod
+    def _is_buy_entry_trade(trade_data: dict) -> bool:
+        return str(trade_data.get("action") or "").upper().strip() == "BUY"
+
+    def _entry_ref_for_risk(self, trade_data: dict) -> float:
+        # Conservative sizing for BUY: use worst-case entry in range (max).
+        er = trade_data.get("entry_range") or [0, 0]
+        if isinstance(er, list) and len(er) >= 2:
+            try:
+                hi = float(er[1])
+                if hi > 0:
+                    return hi
+            except Exception:
+                pass
+        return self._num_or(trade_data.get("buy_range_max"), 0.0)
+
+    def _open_portfolio_risk_inr(self) -> float:
+        trades = self._load_active_trades()
+        total = 0.0
+        for _, raw in trades.items():
+            rec = self._normalize_active_trade_record(raw)
+            side = str(rec.get("entry_side") or "BUY").upper()
+            if side != "BUY":
+                continue
+            entry = self._num_or(rec.get("entry_avg_price"), 0.0)
+            sl = self._num_or(rec.get("sl_true"), self._num_or(rec.get("stop_loss"), 0.0))
+            qty = int(self._num_or(rec.get("entry_qty"), 0))
+            if entry <= 0 or sl <= 0 or qty <= 0:
+                continue
+            risk_pts = max(entry - sl, 0.0)
+            total += risk_pts * qty
+        return total
+
+    def _risk_based_lots(self, trade_data: dict, instrument: dict | None) -> tuple[int, dict]:
+        diag = {
+            "mode": "risk",
+            "reason": "",
+            "risk_budget_inr": 0.0,
+            "risk_per_lot_inr": 0.0,
+            "open_portfolio_risk_inr": 0.0,
+            "entry_ref": 0.0,
+            "sl": 0.0,
+            "raw_lots": 0,
+            "used_lots": 0,
+        }
+        lot_size = self._extract_lot_size(instrument) or int(self._num_or(trade_data.get("lot_size"), 0))
+        if lot_size <= 0:
+            diag["reason"] = "missing_lot_size"
+            return 0, diag
+        if not self._is_buy_entry_trade(trade_data):
+            diag["reason"] = "non_buy_entry"
+            return 0, diag
+        entry_ref = self._entry_ref_for_risk(trade_data)
+        sl = self._num_or(trade_data.get("stop_loss"), 0.0)
+        if entry_ref <= 0 or sl <= 0 or entry_ref <= sl:
+            diag["reason"] = "invalid_entry_or_sl"
+            return 0, diag
+
+        cap = float(Config.ACCOUNT_CAPITAL_INR)
+        if cap <= 0:
+            diag["reason"] = "missing_account_capital"
+            return 0, diag
+        per_trade_budget = cap * float(Config.RISK_PCT_PER_TRADE)
+        portfolio_budget = cap * float(Config.MAX_TOTAL_OPEN_RISK_PCT)
+        open_risk = self._open_portfolio_risk_inr()
+        remaining = max(portfolio_budget - open_risk, 0.0)
+        effective_budget = min(per_trade_budget, remaining)
+
+        risk_per_lot = (entry_ref - sl) * float(lot_size)
+        if risk_per_lot <= 0 or effective_budget <= 0:
+            diag["reason"] = "no_budget_or_invalid_risk"
+            diag["risk_budget_inr"] = effective_budget
+            diag["risk_per_lot_inr"] = risk_per_lot
+            diag["open_portfolio_risk_inr"] = open_risk
+            diag["entry_ref"] = entry_ref
+            diag["sl"] = sl
+            return 0, diag
+
+        raw_lots = int(effective_budget // risk_per_lot)
+        min_lots, max_lots = self._segment_lots_caps(trade_data)
+        used_lots = raw_lots
+        if used_lots > 0:
+            used_lots = max(min_lots, min(max_lots, used_lots))
+
+        diag.update(
+            {
+                "risk_budget_inr": effective_budget,
+                "risk_per_lot_inr": risk_per_lot,
+                "open_portfolio_risk_inr": open_risk,
+                "entry_ref": entry_ref,
+                "sl": sl,
+                "raw_lots": raw_lots,
+                "used_lots": used_lots,
+            }
+        )
+        return used_lots, diag
+
     def _compute_order_quantity(self, trade_data: dict, instrument: dict | None = None) -> int:
         """
-        quantity = lot_size * ORDER_LOTS_COUNT.
+        quantity = lot_size * (INDEX_ORDER_LOTS_COUNT or STOCK_ORDER_LOTS_COUNT).
         Falls back to trade_data.quantity, then Config.ORDER_QUANTITY.
         """
         explicit = trade_data.get("quantity")
@@ -1385,7 +1510,29 @@ class Trader:
 
         lot_size = self._extract_lot_size(instrument)
         if lot_size:
-            lots = max(1, int(Config.ORDER_LOTS_COUNT))
+            force_fixed = str(trade_data.get("size_override_mode") or "").upper().strip() == "FIXED"
+            sizing_mode = str(Config.POSITION_SIZING_MODE or "fixed").strip().lower()
+            if force_fixed:
+                sizing_mode = "fixed"
+            if sizing_mode == "risk":
+                lots, diag = self._risk_based_lots(trade_data, instrument)
+                if lots > 0:
+                    trade_data["sizing_mode_used"] = "risk"
+                    trade_data["sizing_diag"] = diag
+                    return int(lot_size) * int(lots)
+                # Risk mode could not size; follow configured fallback.
+                fallback = str(Config.RISK_MODE_ON_ZERO_LOTS or "fixed").strip().lower()
+                if fallback != "fixed":
+                    trade_data["sizing_mode_used"] = "risk_skip"
+                    trade_data["sizing_diag"] = diag
+                    return 0
+                trade_data["sizing_mode_used"] = "fixed_fallback"
+                trade_data["sizing_diag"] = diag
+            if self._is_index_option_trade(trade_data):
+                lots = max(1, int(Config.INDEX_ORDER_LOTS_COUNT))
+            else:
+                lots = max(1, int(Config.STOCK_ORDER_LOTS_COUNT))
+            trade_data.setdefault("sizing_mode_used", "fixed")
             return lot_size * lots
 
         return int(Config.ORDER_QUANTITY)
@@ -1528,6 +1675,9 @@ class Trader:
         logger.info(
             f"OCO target: signal {raw_tgt} → broker {eff_tgt} (TARGET_BUFFER_PCT={Config.TARGET_BUFFER_PCT})"
         )
+        broker_sl = self._round_price_to_tick(float(trade_data["stop_loss"]), mode="nearest")
+        if broker_sl <= 0:
+            raise RuntimeError(f"Invalid stop loss after tick-rounding: {trade_data.get('stop_loss')}")
         oco_ref = str(uuid.uuid4())[:15]
         quantity = self._compute_order_quantity(trade_data)
         oco_resp = self.client.create_smart_order(
@@ -1547,8 +1697,8 @@ class Trader:
                 "order_type": "LIMIT",
             },
             stop_loss={
-                "trigger_price": float(trade_data["stop_loss"]),
-                "price": float(trade_data["stop_loss"]),
+                "trigger_price": float(broker_sl),
+                "price": float(broker_sl),
                 "order_type": "SL",
             },
         )
@@ -1556,7 +1706,7 @@ class Trader:
         self._save_active_trade(
             symbol,
             smart_order_id,
-            stop_loss=float(trade_data["stop_loss"]),
+            stop_loss=float(broker_sl),
             target=float(raw_tgt),
             entry_side=str(trade_data.get("action") or "BUY").upper(),
             entry_qty=int(trade_data.get("quantity") or 0),
@@ -1604,6 +1754,14 @@ class Trader:
 
         product_type = "NRML"
         quantity = self._compute_order_quantity(trade_data)
+        if quantity <= 0:
+            diag = trade_data.get("sizing_diag") or {}
+            return (
+                f"⚠️ SKIP: computed quantity is 0 for {symbol}. "
+                f"Sizing mode={trade_data.get('sizing_mode_used', 'unknown')} "
+                f"reason={diag.get('reason', 'n/a')}."
+            )
+        trade_data["quantity"] = int(quantity)
         entry_response = self.client.place_order(
             validity="DAY",
             exchange=exchange,
@@ -1639,7 +1797,15 @@ class Trader:
             entry_avg_price=float(fill.get("avg_price") or 0.0),
         )
         if oco_line:
-            return f"✅ SUCCESS: {action} {symbol} @ {ltp}.\n{oco_line}"
+            sizing_mode = str(trade_data.get("sizing_mode_used") or Config.POSITION_SIZING_MODE).upper()
+            override_reason = str(trade_data.get("size_override_reason") or "").strip()
+            sizing_line = (
+                f"📦 Sizing: {sizing_mode}"
+                + (f" (override: {override_reason})" if override_reason else "")
+                + f", qty={quantity}"
+            )
+            rr_line = self._risk_reward_line(trade_data, qty=quantity, entry_ref=float(ltp or 0.0))
+            return f"✅ SUCCESS: {action} {symbol} @ {ltp}.\n{sizing_line}\n{oco_line}\n{rr_line}"
         return f"✅ SUCCESS: {action} {symbol} @ {ltp}. (No OCO — spread leg or missing SL/target.)"
 
     def _after_limit_order_filled(
@@ -1672,8 +1838,13 @@ class Trader:
                 entry_order_id=entry_order_id,
                 entry_avg_price=float(fill.get("avg_price") or 0.0),
             )
+            rr_line = self._risk_reward_line(
+                trade_data,
+                qty=int(fill.get("filled_qty") or trade_data.get("quantity") or 0),
+                entry_ref=float(fill.get("avg_price") or ltp or 0.0),
+            )
             if oco_line:
-                return f"✅ LIMIT BUY filled {symbol} @ ~{ltp}. {oco_line}"
+                return f"✅ LIMIT BUY filled {symbol} @ ~{ltp}. {oco_line}\n{rr_line}"
             return f"✅ LIMIT BUY filled {symbol} @ ~{ltp}. (No OCO.)"
         return f"✅ LIMIT {action} filled {symbol} @ ~{ltp}."
 
@@ -1690,6 +1861,15 @@ class Trader:
         if not self.place_entry_orders:
             return self._queue_single(trade_data, exchange, trading_symbol, segment)
 
+        qty = self._compute_order_quantity(trade_data)
+        if qty <= 0:
+            diag = trade_data.get("sizing_diag") or {}
+            return (
+                f"⚠️ SKIP: computed quantity is 0 for {trading_symbol}. "
+                f"Sizing mode={trade_data.get('sizing_mode_used', 'unknown')} "
+                f"reason={diag.get('reason', 'n/a')}."
+            )
+        trade_data["quantity"] = int(qty)
         entry_response = None
         try:
             entry_response = self.client.place_order(
@@ -1697,7 +1877,7 @@ class Trader:
                 exchange=exchange,
                 order_type="LIMIT",
                 product="NRML",
-                quantity=self._compute_order_quantity(trade_data),
+                quantity=qty,
                 segment=segment,
                 trading_symbol=trading_symbol,
                 transaction_type=action,
@@ -2028,7 +2208,56 @@ class Trader:
         if raw <= 0:
             return 0.0
         pct = max(0.0, float(Config.TARGET_BUFFER_PCT))
-        return max(raw * (1.0 - pct), 0.0)
+        reduced = max(raw * (1.0 - pct), 0.0)
+        return Trader._round_price_to_tick(reduced, mode="down")
+
+    @staticmethod
+    def _round_price_to_tick(price: float, *, mode: str = "nearest") -> float:
+        """
+        Normalize broker prices to valid tick-size decimals.
+        mode:
+          - 'down': floor to tick (useful for profit target sell-limit).
+          - 'up': ceil to tick.
+          - 'nearest': nearest tick.
+        """
+        try:
+            p = float(price)
+        except (TypeError, ValueError):
+            return 0.0
+        if p <= 0:
+            return 0.0
+        tick = max(0.01, float(Config.TARGET_PRICE_TICK_SIZE))
+        steps = p / tick
+        if mode == "down":
+            n = math.floor(steps + 1e-9)
+        elif mode == "up":
+            n = math.ceil(steps - 1e-9)
+        else:
+            n = round(steps)
+        out = n * tick
+        return max(round(out, 4), 0.0)
+
+    @staticmethod
+    def _risk_reward_line(trade_data: dict, *, qty: int, entry_ref: float) -> str:
+        try:
+            sl = float(trade_data.get("stop_loss") or 0)
+            tgt = float(trade_data.get("target") or 0)
+            er = trade_data.get("entry_range") or [0, 0]
+            range_hi = float(er[1]) if isinstance(er, list) and len(er) > 1 else 0.0
+            basis = float(entry_ref or range_hi or 0.0)
+            if basis <= 0:
+                basis = range_hi
+            risk_pts = max(basis - sl, 0.0)
+            reward_pts = max(tgt - basis, 0.0)
+            risk_inr = risk_pts * float(qty or 0)
+            reward_inr = reward_pts * float(qty or 0)
+            rr = (reward_pts / risk_pts) if risk_pts > 0 else 0.0
+            return (
+                f"📐 Risk/Reward: risk ₹{risk_inr:.2f} ({risk_pts:.2f} pts), "
+                f"reward ₹{reward_inr:.2f} ({reward_pts:.2f} pts), R:R {rr:.2f}"
+            )
+        except Exception:
+            return "📐 Risk/Reward: n/a"
 
     def _should_attach_oco(self, trade_data: dict) -> bool:
         if trade_data.get("spread_leg"):
@@ -2342,7 +2571,7 @@ class Trader:
                         f"[STAGE 4] Calling Groww modify_smart_order for {symbol}: "
                         f"sl_true={new_sl} broker_sl={broker_sl}."
                     )
-                    self._modify_oco_sl(symbol, order_id, broker_sl)
+                    broker_sl = self._modify_oco_sl(symbol, order_id, broker_sl)
                     self._update_active_trade_levels(
                         symbol,
                         stop_loss=broker_sl,

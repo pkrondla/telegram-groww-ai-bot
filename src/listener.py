@@ -17,9 +17,33 @@ _OVERRIDE_COMMANDS = {
     "RESUME":   "resume",
     "KILL":     "kill",
     "STATUS":   "status",
+    "HELP":     "help",
     "DRYRUN ON":  "dryrun_on",
     "DRYRUN OFF": "dryrun_off",
 }
+_SIZE_OVERRIDE_FIXED_PHRASES = (
+    "RISKY TRADE",
+    "HIGH RISK",
+    "TRADE LESS QTY",
+    "LESS QTY",
+    "LOW QTY",
+    "SMALL QTY",
+    "REDUCE QTY",
+    "TRADE SMALL",
+)
+
+
+def _startup_command_reference() -> str:
+    """Compact admin command/help text shown in startup notification."""
+    return (
+        "Admin commands:\n"
+        "• `HELP` • `STATUS` • `PAUSE` • `RESUME` • `KILL`\n"
+        "• `DRYRUN ON` • `DRYRUN OFF`\n"
+        "\n"
+        "Single-trade exit:\n"
+        "Send `EXIT ALL <TRADING_SYMBOL>` from admin chat "
+        "(or reply `EXIT ALL` when reply context is available)."
+    )
 
 
 class BotListener:
@@ -47,6 +71,9 @@ class BotListener:
         self.trader = Trader(dry_run=Config.DRY_RUN)
         self.state_engine = StateEngine(self.trader)
         self.notifier = Notifier()
+        self._pending_size_override_mode = ""
+        self._pending_size_override_reason = ""
+        self._pending_size_override_until_ts = 0.0
 
     # ------------------------------------------------------------------
     # Background tasks
@@ -207,7 +234,10 @@ class BotListener:
 
     def _parse_override(self, text: str) -> str | None:
         """Returns override command key if text matches, else None."""
-        t = text.strip().upper()
+        t = re.sub(r"\s+", " ", str(text or "").strip().upper())
+        # HELP accepts suffixes like "HELP SYMBOL", "HELP COMMANDS", etc.
+        if t == "HELP" or t.startswith("HELP "):
+            return "help"
         for cmd in _OVERRIDE_COMMANDS:
             if t == cmd:
                 return _OVERRIDE_COMMANDS[cmd]
@@ -236,6 +266,24 @@ class BotListener:
                 f"Pending management queue: {len(pending_mgmt)}"
             )
             await self.notifier.send_status(self.state_engine.status, detail)
+        elif command == "help":
+            await self.notifier.send(
+                "📘 **Bot Command Help**\n\n"
+                "**Admin override commands**\n"
+                "• `HELP` — show this help\n"
+                "• `STATUS` — bot state, dry-run, active/pending counts\n"
+                "• `PAUSE` — ignore all incoming signals\n"
+                "• `RESUME` — resume signal processing\n"
+                "• `KILL` — emergency stop (restart required)\n"
+                "• `DRYRUN ON` — no live entry orders\n"
+                "• `DRYRUN OFF` — live entry orders enabled\n\n"
+                "**Single-trade management (no reply context needed)**\n"
+                "• `EXIT ALL <TRADING_SYMBOL>`\n"
+                "• `TSL TO <PRICE> <TRADING_SYMBOL>`\n"
+                "• `CHANGE TARGET TO <PRICE> <TRADING_SYMBOL>`\n"
+                "• `RESTORE SL <TRADING_SYMBOL>`\n\n"
+                "Example: `EXIT ALL NIFTY26424300PE`"
+            )
         elif command == "dryrun_on":
             self.trader.execute_orders = False
             await self.notifier.send(
@@ -275,6 +323,14 @@ class BotListener:
                 parent_text = reply_msg.raw_text or ""
 
         raw_text = f"[CONTEXT: {parent_text}] {child_text}" if is_reply else child_text
+        advisory_mode, advisory_reason = self._detect_size_override_advisory(child_text)
+        if advisory_mode:
+            self._pending_size_override_mode = advisory_mode
+            self._pending_size_override_reason = advisory_reason
+            self._pending_size_override_until_ts = datetime.datetime.now().timestamp() + 900
+            logger.info(
+                f"[STAGE 1] Size advisory armed for next signal: mode={advisory_mode} reason={advisory_reason}"
+            )
         logger.info("─" * 60)
         logger.info(f"[STAGE 1] MESSAGE RECEIVED")
         logger.info(f"[STAGE 1] is_reply={is_reply} | child_len={len(child_text)} | parent_len={len(parent_text)}")
@@ -296,6 +352,21 @@ class BotListener:
             logger.info("[STAGE 2] Parser returned no signal — message ignored.")
             logger.info("─" * 60)
             return
+
+        if (
+            not signal.size_override_mode
+            and self._pending_size_override_mode
+            and datetime.datetime.now().timestamp() <= self._pending_size_override_until_ts
+        ):
+            signal.size_override_mode = self._pending_size_override_mode
+            signal.size_override_reason = self._pending_size_override_reason
+            logger.info(
+                f"[STAGE 2] Applied pending size override: {signal.size_override_mode} "
+                f"({signal.size_override_reason})"
+            )
+            self._pending_size_override_mode = ""
+            self._pending_size_override_reason = ""
+            self._pending_size_override_until_ts = 0.0
 
         if signal.is_spread:
             symbol_summary = ", ".join(f"{l.action} {l.trading_symbol}" for l in signal.legs)
@@ -323,6 +394,14 @@ class BotListener:
             logger.info("[STAGE 4] No result returned — signal suppressed by state engine.")
         logger.info("─" * 60)
 
+    @staticmethod
+    def _detect_size_override_advisory(text: str) -> tuple[str, str]:
+        t = str(text or "").upper()
+        for phrase in _SIZE_OVERRIDE_FIXED_PHRASES:
+            if phrase in t:
+                return "FIXED", phrase
+        return "", ""
+
     # ------------------------------------------------------------------
     # Startup
     # ------------------------------------------------------------------
@@ -348,7 +427,11 @@ class BotListener:
             logger.info(f"Connected to Telegram as: {(await self.client.get_me()).first_name}")
             logger.info(f"📡 LISTENING TO: {target_name} ({self.target_chat_id})")
             logger.info(f"🔔 NOTIFYING ADMIN: {admin_name} ({Config.ADMIN_ID})")
-            await self.notifier.send_status("STARTED", f"Monitoring signals from: {target_name}")
+            startup_detail = (
+                f"Monitoring signals from: {target_name}\n\n"
+                f"{_startup_command_reference()}"
+            )
+            await self.notifier.send_status("STARTED", startup_detail)
         except Exception as e:
             logger.warning(f"Metadata Fetch Error: {str(e)}")
 

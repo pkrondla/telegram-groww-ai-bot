@@ -31,13 +31,25 @@ class Config:
     # EXIT/trail/target go to the broker only for real smart-order ids; simulated book rows use local handling only.
     DRY_RUN = os.getenv("DRY_RUN", "True").lower() == "true"
     LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
-    # Preferred sizing: quantity = instrument_lot_size * ORDER_LOTS_COUNT.
-    # ORDER_QUANTITY is kept as a fallback if lot size cannot be resolved.
-    ORDER_LOTS_COUNT = max(1, int(os.getenv("ORDER_LOTS_COUNT", "1")))
+    # Preferred sizing: quantity = instrument_lot_size * lots_count (separate index/stock knobs).
+    INDEX_ORDER_LOTS_COUNT = max(1, int(os.getenv("INDEX_ORDER_LOTS_COUNT", "1")))
+    STOCK_ORDER_LOTS_COUNT = max(1, int(os.getenv("STOCK_ORDER_LOTS_COUNT", "1")))
     ORDER_QUANTITY = max(1, int(os.getenv("ORDER_QUANTITY", "1")))
     # Percentage cushion below signal target for OCO LIMIT target
     # (e.g. 2% => 100 -> 98, 5 -> 4.9).
     TARGET_BUFFER_PCT = max(0.0, min(0.5, float(os.getenv("TARGET_BUFFER_PCT", "0.02"))))
+    # Price tick size used to sanitize OCO target/SL prices before broker API calls.
+    TARGET_PRICE_TICK_SIZE = max(0.01, float(os.getenv("TARGET_PRICE_TICK_SIZE", "0.05")))
+    # Position sizing mode: fixed (configured lots) or risk (SL-distance based).
+    POSITION_SIZING_MODE = os.getenv("POSITION_SIZING_MODE", "fixed").strip().lower()
+    ACCOUNT_CAPITAL_INR = max(0.0, float(os.getenv("ACCOUNT_CAPITAL_INR", "0")))
+    RISK_PCT_PER_TRADE = max(0.0, min(1.0, float(os.getenv("RISK_PCT_PER_TRADE", "0.01"))))
+    MAX_TOTAL_OPEN_RISK_PCT = max(0.0, min(1.0, float(os.getenv("MAX_TOTAL_OPEN_RISK_PCT", "0.03"))))
+    INDEX_MIN_LOTS = max(1, int(os.getenv("INDEX_MIN_LOTS", "1")))
+    INDEX_MAX_LOTS = max(1, int(os.getenv("INDEX_MAX_LOTS", "999")))
+    STOCK_MIN_LOTS = max(1, int(os.getenv("STOCK_MIN_LOTS", "1")))
+    STOCK_MAX_LOTS = max(1, int(os.getenv("STOCK_MAX_LOTS", "999")))
+    RISK_MODE_ON_ZERO_LOTS = os.getenv("RISK_MODE_ON_ZERO_LOTS", "fixed").strip().lower()
 
     # When LTP is outside the signal entry_range, queue and retry instead of permanently skipping
     ENTRY_QUEUE_ENABLED = os.getenv("ENTRY_QUEUE_ENABLED", "true").lower() == "true"

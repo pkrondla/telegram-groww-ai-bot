@@ -17,6 +17,8 @@ class TradeLeg:
     entry_range: list[float] = field(default_factory=lambda: [0.0, 0.0])
     stop_loss: float = 0.0
     target: float = 0.0
+    size_override_mode: str = ""
+    size_override_reason: str = ""
     spread_leg: bool = False
 
     @property
@@ -49,6 +51,8 @@ class TradeSignal:
     entry_range: list[float] = field(default_factory=lambda: [0.0, 0.0])
     stop_loss: float = 0.0
     target: float = 0.0
+    size_override_mode: str = ""
+    size_override_reason: str = ""
 
     # Parser metadata
     raw_child_text: str = ""
@@ -82,6 +86,8 @@ class TradeSignal:
                     entry_range=list(leg_dict.get("entry_range", [0.0, 0.0])),
                     stop_loss=float(leg_dict.get("stop_loss", 0) or 0),
                     target=float(leg_dict.get("target", 0) or 0),
+                    size_override_mode=str(leg_dict.get("size_override_mode", data.get("size_override_mode", "")) or ""),
+                    size_override_reason=str(leg_dict.get("size_override_reason", data.get("size_override_reason", "")) or ""),
                     spread_leg=True,
                 ))
             return cls(
@@ -106,6 +112,8 @@ class TradeSignal:
             entry_range=list(data.get("entry_range", [0.0, 0.0])),
             stop_loss=float(data.get("stop_loss", 0) or 0),
             target=float(data.get("target", 0) or 0),
+            size_override_mode=str(data.get("size_override_mode", "") or ""),
+            size_override_reason=str(data.get("size_override_reason", "") or ""),
             raw_child_text=raw_child,
             raw_parent_text=raw_parent,
             is_reply=is_reply,
@@ -134,6 +142,8 @@ class TradeSignal:
                         "buy_range_min": leg.buy_range_min,
                         "buy_range_max": leg.buy_range_max,
                         "is_trade": True,
+                        "size_override_mode": self.size_override_mode,
+                        "size_override_reason": self.size_override_reason,
                     }
                     for leg in self.legs
                 ],
@@ -154,4 +164,6 @@ class TradeSignal:
             "stop_loss": self.stop_loss,
             "target": self.target,
             "is_trade": True,
+            "size_override_mode": self.size_override_mode,
+            "size_override_reason": self.size_override_reason,
         }

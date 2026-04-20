@@ -1,0 +1,311 @@
+2026-04-20 12:43:22 [INFO] :: Initializing Industrial-Standard Trading Bot...
+2026-04-20 12:43:27 [INFO] :: Startup active-trade maintenance: active=7 removed=0 rearmed=0
+2026-04-20 12:43:29 [INFO] :: SymbolManager: cache is fresh, loading from symbol_map.json
+2026-04-20 12:43:29 [INFO] :: SymbolManager: cache loaded — 220 symbols, 362 aliases.
+2026-04-20 12:43:30 [INFO] :: Connected to Telegram as: Praveen
+2026-04-20 12:43:30 [INFO] :: 📡 LISTENING TO: CHARTIANS [ FNO ] PREMIUM CHANNEL (-1002153367077)
+2026-04-20 12:43:30 [INFO] :: 🔔 NOTIFYING ADMIN: Praveen Rondla (1447109810)
+2026-04-20 12:43:31 [INFO] :: Bot Connection Established.
+2026-04-20 12:43:32 [INFO] :: Market Alert Scheduler Started.
+2026-04-20 12:43:32 [INFO] :: Pending entry watcher started (every 30s).
+2026-04-20 12:43:32 [INFO] :: Active trade reconciler started (every 900s).
+2026-04-20 12:55:22 [INFO] :: Bot Process Terminated.
+2026-04-20 12:55:22 [INFO] :: Bot Manually Stopped by User.
+2026-04-20 12:56:18 [INFO] :: Initializing Industrial-Standard Trading Bot...
+2026-04-20 12:56:20 [INFO] :: Startup active-trade maintenance: active=7 removed=0 rearmed=0
+2026-04-20 12:56:22 [INFO] :: SymbolManager: cache is fresh, loading from symbol_map.json
+2026-04-20 12:56:22 [INFO] :: SymbolManager: cache loaded — 220 symbols, 362 aliases.
+2026-04-20 12:56:23 [INFO] :: Connected to Telegram as: Praveen
+2026-04-20 12:56:23 [INFO] :: 📡 LISTENING TO: CHARTIANS [ FNO ] PREMIUM CHANNEL (-1002153367077)
+2026-04-20 12:56:23 [INFO] :: 🔔 NOTIFYING ADMIN: Praveen Rondla (1447109810)
+2026-04-20 12:56:24 [INFO] :: Bot Connection Established.
+2026-04-20 12:56:24 [INFO] :: Market Alert Scheduler Started.
+2026-04-20 12:56:24 [INFO] :: Pending entry watcher started (every 30s).
+2026-04-20 12:56:24 [INFO] :: Active trade reconciler started (every 900s).
+2026-04-20 13:05:20 [INFO] :: ────────────────────────────────────────────────────────────
+2026-04-20 13:05:20 [INFO] :: [STAGE 1] MESSAGE RECEIVED
+2026-04-20 13:05:20 [INFO] :: [STAGE 1] is_reply=False | child_len=23 | parent_len=0
+2026-04-20 13:05:20 [INFO] :: [STAGE 1] child : Good morning Traders ⭐️
+2026-04-20 13:05:20 [INFO] :: [STAGE 2] AI parser started.
+2026-04-20 13:05:20 [INFO] :: [STAGE 2] Symbol hint: (none matched)
+2026-04-20 13:05:20 [INFO] :: [STAGE 2] Deterministic intent: none
+2026-04-20 13:05:20 [INFO] :: [STAGE 2] Calling LLM (gpt-4o-mini)...
+2026-04-20 13:05:22 [INFO] :: [STAGE 2] LLM raw: is_trade=False action=None symbol=None strike=None type=None expiry=None/None/None entry=None sl=None tgt=None
+2026-04-20 13:05:22 [INFO] :: [STAGE 2] Decision: IGNORE — LLM says not a trade.
+2026-04-20 13:05:22 [INFO] :: [STAGE 2] Parser returned no signal — message ignored.
+2026-04-20 13:05:22 [INFO] :: ────────────────────────────────────────────────────────────
+2026-04-20 13:11:24 [INFO] :: [RECONCILE] Polling broker for 2 active trade(s)...
+2026-04-20 13:26:24 [INFO] :: [RECONCILE] Polling broker for 2 active trade(s)...
+2026-04-20 13:32:00 [INFO] :: ────────────────────────────────────────────────────────────
+2026-04-20 13:32:00 [INFO] :: [STAGE 1] MESSAGE RECEIVED
+2026-04-20 13:32:00 [INFO] :: [STAGE 1] is_reply=False | child_len=317 | parent_len=0
+2026-04-20 13:32:00 [INFO] :: [STAGE 1] child : MUST FOLLOW THESE RULES  🟢
+
+✅ Market orders only
+✅ SL always in the system
+✅ Entry only in range. No late chasing
+✅ Book 50–60% at T1, rest on cost SL
+✅ Trending day = ride it
+✅ Sideways day = Scalp &
+2026-04-20 13:32:00 [INFO] :: [STAGE 2] AI parser started.
+2026-04-20 13:32:00 [INFO] :: [STAGE 2] Symbol hint: (none matched)
+2026-04-20 13:32:00 [INFO] :: [STAGE 2] Deterministic intent: none
+2026-04-20 13:32:00 [INFO] :: [STAGE 2] Calling LLM (gpt-4o-mini)...
+2026-04-20 13:32:03 [INFO] :: [STAGE 2] LLM raw: is_trade=False action=None symbol=None strike=None type=None expiry=None/None/None entry=None sl=None tgt=None
+2026-04-20 13:32:03 [INFO] :: [STAGE 2] Decision: IGNORE — LLM says not a trade.
+2026-04-20 13:32:03 [INFO] :: [STAGE 2] Parser returned no signal — message ignored.
+2026-04-20 13:32:03 [INFO] :: ────────────────────────────────────────────────────────────
+2026-04-20 13:35:08 [INFO] :: ────────────────────────────────────────────────────────────
+2026-04-20 13:35:08 [INFO] :: [STAGE 1] MESSAGE RECEIVED
+2026-04-20 13:35:08 [INFO] :: [STAGE 1] is_reply=False | child_len=688 | parent_len=0
+2026-04-20 13:35:08 [INFO] :: [STAGE 1] child : ⚠️ Risk Rules That Matter
+
+• Never risk 30–40% on a single trade
+• Increase qty only after you double your capital
+• Set weekly/monthly profit goals. Once hit, stop trading.
+• It’s okay to not trade e
+2026-04-20 13:35:08 [INFO] :: [STAGE 2] AI parser started.
+2026-04-20 13:35:08 [INFO] :: [STAGE 2] Symbol hint: (none matched)
+2026-04-20 13:35:08 [INFO] :: [STAGE 2] Deterministic intent: none
+2026-04-20 13:35:08 [INFO] :: [STAGE 2] Calling LLM (gpt-4o-mini)...
+2026-04-20 13:35:11 [INFO] :: [STAGE 2] LLM raw: is_trade=False action=None symbol=None strike=None type=None expiry=None/None/None entry=None sl=None tgt=None
+2026-04-20 13:35:11 [INFO] :: [STAGE 2] Decision: IGNORE — LLM says not a trade.
+2026-04-20 13:35:11 [INFO] :: [STAGE 2] Parser returned no signal — message ignored.
+2026-04-20 13:35:11 [INFO] :: ────────────────────────────────────────────────────────────
+2026-04-20 13:35:28 [INFO] :: ────────────────────────────────────────────────────────────
+2026-04-20 13:35:28 [INFO] :: [STAGE 1] MESSAGE RECEIVED
+2026-04-20 13:35:28 [INFO] :: [STAGE 1] is_reply=False | child_len=13 | parent_len=0
+2026-04-20 13:35:28 [INFO] :: [STAGE 1] child : Active Stocks
+2026-04-20 13:35:28 [INFO] :: [STAGE 2] AI parser started.
+2026-04-20 13:35:28 [INFO] :: [STAGE 2] Symbol hint: (none matched)
+2026-04-20 13:35:28 [INFO] :: [STAGE 2] Deterministic intent: none
+2026-04-20 13:35:28 [INFO] :: [STAGE 2] Calling LLM (gpt-4o-mini)...
+2026-04-20 13:35:30 [INFO] :: [STAGE 2] LLM raw: is_trade=False action=None symbol=None strike=None type=None expiry=None/None/None entry=None sl=None tgt=None
+2026-04-20 13:35:30 [INFO] :: [STAGE 2] Decision: IGNORE — LLM says not a trade.
+2026-04-20 13:35:30 [INFO] :: [STAGE 2] Parser returned no signal — message ignored.
+2026-04-20 13:35:30 [INFO] :: ────────────────────────────────────────────────────────────
+2026-04-20 13:38:24 [INFO] :: ────────────────────────────────────────────────────────────
+2026-04-20 13:38:24 [INFO] :: [STAGE 1] MESSAGE RECEIVED
+2026-04-20 13:38:24 [INFO] :: [STAGE 1] is_reply=False | child_len=249 | parent_len=0
+2026-04-20 13:38:24 [INFO] :: [STAGE 1] child : Weekend we saw we On & off on & Off news of Strait of Hormuz, there were attacks that happened on some ships.
+
+Environment is not looking positive.
+We are opening FLAT.
+
+We are opening again at resist
+2026-04-20 13:38:24 [INFO] :: [STAGE 2] AI parser started.
+2026-04-20 13:38:24 [INFO] :: [STAGE 2] Symbol hint: (none matched)
+2026-04-20 13:38:24 [INFO] :: [STAGE 2] Deterministic intent: none
+2026-04-20 13:38:24 [INFO] :: [STAGE 2] Calling LLM (gpt-4o-mini)...
+2026-04-20 13:38:26 [INFO] :: [STAGE 2] LLM raw: is_trade=False action=None symbol=None strike=None type=None expiry=None/None/None entry=None sl=None tgt=None
+2026-04-20 13:38:26 [INFO] :: [STAGE 2] Decision: IGNORE — LLM says not a trade.
+2026-04-20 13:38:26 [INFO] :: [STAGE 2] Parser returned no signal — message ignored.
+2026-04-20 13:38:26 [INFO] :: ────────────────────────────────────────────────────────────
+2026-04-20 13:39:44 [INFO] :: ────────────────────────────────────────────────────────────
+2026-04-20 13:39:44 [INFO] :: [STAGE 1] MESSAGE RECEIVED
+2026-04-20 13:39:44 [INFO] :: [STAGE 1] is_reply=False | child_len=64 | parent_len=0
+2026-04-20 13:39:44 [INFO] :: [STAGE 1] child : Get ready to exit #ETERNAL 255 CE , rest setups look ok to hold.
+2026-04-20 13:39:44 [INFO] :: [STAGE 2] AI parser started.
+2026-04-20 13:39:44 [INFO] :: [STAGE 2] Symbol hint: SYMBOL RESOLUTION HINT (use these exact values for official_symbol):
+  "ETERNAL" → exact Groww symbol: ETERNAL
+2026-04-20 13:39:44 [INFO] :: [STAGE 2] Deterministic intent: none
+2026-04-20 13:39:44 [INFO] :: [STAGE 2] Calling LLM (gpt-4o-mini)...
+2026-04-20 13:39:45 [INFO] :: [STAGE 2] LLM raw: is_trade=False action=None symbol=None strike=None type=None expiry=None/None/None entry=None sl=None tgt=None
+2026-04-20 13:39:45 [INFO] :: [STAGE 2] Decision: IGNORE — LLM says not a trade.
+2026-04-20 13:39:45 [INFO] :: [STAGE 2] Parser returned no signal — message ignored.
+2026-04-20 13:39:45 [INFO] :: ────────────────────────────────────────────────────────────
+2026-04-20 13:39:48 [INFO] :: ────────────────────────────────────────────────────────────
+2026-04-20 13:39:48 [INFO] :: [STAGE 1] MESSAGE RECEIVED
+2026-04-20 13:39:48 [INFO] :: [STAGE 1] is_reply=True | child_len=93 | parent_len=64
+2026-04-20 13:39:48 [INFO] :: [STAGE 1] child : TRADE CLOSED @ 6.32
+
+#ETERNAL 255 CE
+7.35 TO 6.32 | LOSS : ₹ -2497.75 / LOT 
+
+EXIT COMPLETE ✅
+2026-04-20 13:39:48 [INFO] :: [STAGE 1] parent: BUY #ETERNAL 255CE APR AT 7.2-7.5
+
+SL : 5
+
+TARGETS : 8.65, 10.85
+2026-04-20 13:39:48 [INFO] :: [STAGE 2] AI parser started.
+2026-04-20 13:39:48 [INFO] :: [STAGE 2] Symbol hint: SYMBOL RESOLUTION HINT (use these exact values for official_symbol):
+  "ETERNAL" → exact Groww symbol: ETERNAL
+2026-04-20 13:39:48 [INFO] :: [STAGE 2] Deterministic intent: EXIT_ALL
+2026-04-20 13:39:48 [INFO] :: [STAGE 2] Path: forced EXIT_ALL — calling LLM for symbol extraction only.
+2026-04-20 13:39:51 [INFO] :: [STAGE 2] LLM raw (forced): {'official_symbol': 'ETERNAL', 'stock': 'ETERNAL', 'strike': '255', 'option_type': 'CE', 'expiry_day': '01', 'expiry_month': 'APR', 'expiry_year': '2026', 'entry_range': [0, 0], 'stop_loss': 5, 'target': 0, 'is_trade': True, 'action': 'EXIT_ALL'}
+2026-04-20 13:39:51 [INFO] :: [STAGE 2] Expiry 01/APR/2026 is in the past — rolling forward to 01/APR/2026.
+2026-04-20 13:39:51 [INFO] :: [STAGE 2] Signal ready: EXIT_ALL ETERNAL26APR255CE @ 0.0-0.0
+2026-04-20 13:39:51 [INFO] :: [STAGE 2] Signal: action=EXIT_ALL | symbol=ETERNAL26APR255CE | range=0-0 | sl=5.0 | tgt=0.0
+2026-04-20 13:39:51 [INFO] :: [STAGE 3] StateEngine.process: action=EXIT_ALL symbol=ETERNAL26APR255CE bot_status=ACTIVE
+2026-04-20 13:39:51 [INFO] :: [STAGE 3] EXIT_ALL requested for: ETERNAL26APR255CE
+2026-04-20 13:39:51 [INFO] :: [STAGE 3] Active book: ['GLENMARK26APR2400CE', 'ETERNAL26APR255CE']
+2026-04-20 13:39:51 [INFO] :: [STAGE 3] Symbol matched exactly: ETERNAL26APR255CE
+2026-04-20 13:39:51 [INFO] :: [STAGE 3] Forwarding EXIT_ALL ETERNAL26APR255CE to executor.
+2026-04-20 13:39:51 [INFO] :: [STAGE 4] RESULT: 🚨 EXIT SUCCESS: Cancelled smart order for ETERNAL26APR255CE.
+2026-04-20 13:39:52 [INFO] :: ────────────────────────────────────────────────────────────
+2026-04-20 13:41:24 [INFO] :: [RECONCILE] Polling broker for 1 active trade(s)...
+2026-04-20 13:45:31 [INFO] :: ────────────────────────────────────────────────────────────
+2026-04-20 13:45:31 [INFO] :: [STAGE 1] MESSAGE RECEIVED
+2026-04-20 13:45:31 [INFO] :: [STAGE 1] is_reply=False | child_len=28 | parent_len=0
+2026-04-20 13:45:31 [INFO] :: [STAGE 1] child : Close ETERNAL 255 CE AT 5.35
+2026-04-20 13:45:31 [INFO] :: [STAGE 2] AI parser started.
+2026-04-20 13:45:31 [INFO] :: [STAGE 2] Symbol hint: SYMBOL RESOLUTION HINT (use these exact values for official_symbol):
+  "ETERNAL" → exact Groww symbol: ETERNAL
+2026-04-20 13:45:31 [INFO] :: [STAGE 2] Deterministic intent: none
+2026-04-20 13:45:31 [INFO] :: [STAGE 2] Calling LLM (gpt-4o-mini)...
+2026-04-20 13:45:34 [INFO] :: [STAGE 2] LLM raw: is_trade=True action=EXIT_ALL symbol=ETERNAL strike=255 type=CE expiry=01/APR/2026 entry=[0, 0] sl=0 tgt=0
+2026-04-20 13:45:34 [INFO] :: [STAGE 2] Validator passed: ok
+2026-04-20 13:45:34 [INFO] :: [STAGE 2] Expiry 01/APR/2026 is in the past — rolling forward to 01/APR/2026.
+2026-04-20 13:45:34 [INFO] :: [STAGE 2] Signal ready: EXIT_ALL ETERNAL26APR255CE strike=255 CE expiry=01/APR/2026 @ 0.0-0.0 sl=0 tgt=0 trading_symbol=ETERNAL26APR255CE
+2026-04-20 13:45:34 [INFO] :: [STAGE 2] Signal: action=EXIT_ALL | symbol=ETERNAL26APR255CE | range=0-0 | sl=0.0 | tgt=0.0
+2026-04-20 13:45:34 [INFO] :: [STAGE 3] StateEngine.process: action=EXIT_ALL symbol=ETERNAL26APR255CE bot_status=ACTIVE
+2026-04-20 13:45:34 [INFO] :: [STAGE 3] EXIT_ALL requested for: ETERNAL26APR255CE
+2026-04-20 13:45:34 [INFO] :: [STAGE 3] Active book: ['GLENMARK26APR2400CE']
+2026-04-20 13:45:34 [INFO] :: [STAGE 3] No active trade matched for 'ETERNAL26APR255CE' — cannot exit/trail.
+2026-04-20 13:45:34 [INFO] :: [STAGE 4] RESULT: ⚠️ NO ACTIVE TRADE: Could not find an open position for ETERNAL26APR255CE.
+2026-04-20 13:45:35 [INFO] :: ────────────────────────────────────────────────────────────
+2026-04-20 13:46:07 [INFO] :: ────────────────────────────────────────────────────────────
+2026-04-20 13:46:07 [INFO] :: [STAGE 1] MESSAGE RECEIVED
+2026-04-20 13:46:07 [INFO] :: [STAGE 1] is_reply=False | child_len=63 | parent_len=0
+2026-04-20 13:46:07 [INFO] :: [STAGE 1] child : TSL | 25 HITS 🟢
+
+#GLENMARK 2300 CE 28TH APRIL
+CLOSE THE TRADE 👍
+2026-04-20 13:46:07 [INFO] :: [STAGE 2] AI parser started.
+2026-04-20 13:46:07 [INFO] :: [STAGE 2] Symbol hint: SYMBOL RESOLUTION HINT (use these exact values for official_symbol):
+  "GLENMARK" → exact Groww symbol: GLENMARK
+2026-04-20 13:46:07 [INFO] :: [STAGE 2] Deterministic intent: EXIT_ALL
+2026-04-20 13:46:07 [INFO] :: [STAGE 2] Path: forced EXIT_ALL — calling LLM for symbol extraction only.
+2026-04-20 13:46:11 [INFO] :: [STAGE 2] LLM raw (forced): {'official_symbol': 'GLENMARK', 'stock': 'GLENMARK', 'strike': '2300', 'option_type': 'CE', 'expiry_day': '28', 'expiry_month': 'APR', 'expiry_year': '2026', 'entry_range': [0, 0], 'stop_loss': 25, 'target': 0, 'is_trade': True, 'action': 'EXIT_ALL'}
+2026-04-20 13:46:11 [INFO] :: [STAGE 2] Signal ready: EXIT_ALL GLENMARK26APR2300CE @ 0.0-0.0
+2026-04-20 13:46:11 [INFO] :: [STAGE 2] Signal: action=EXIT_ALL | symbol=GLENMARK26APR2300CE | range=0-0 | sl=25.0 | tgt=0.0
+2026-04-20 13:46:11 [INFO] :: [STAGE 3] StateEngine.process: action=EXIT_ALL symbol=GLENMARK26APR2300CE bot_status=ACTIVE
+2026-04-20 13:46:11 [INFO] :: [STAGE 3] EXIT_ALL requested for: GLENMARK26APR2300CE
+2026-04-20 13:46:11 [INFO] :: [STAGE 3] Active book: ['GLENMARK26APR2400CE']
+2026-04-20 13:46:11 [INFO] :: [STAGE 3] No active trade matched for 'GLENMARK26APR2300CE' — cannot exit/trail.
+2026-04-20 13:46:11 [INFO] :: [STAGE 4] RESULT: ⚠️ NO ACTIVE TRADE: Could not find an open position for GLENMARK26APR2300CE.
+2026-04-20 13:46:12 [INFO] :: ────────────────────────────────────────────────────────────
+2026-04-20 13:46:23 [INFO] :: ────────────────────────────────────────────────────────────
+2026-04-20 13:46:23 [INFO] :: [STAGE 1] MESSAGE RECEIVED
+2026-04-20 13:46:23 [INFO] :: [STAGE 1] is_reply=False | child_len=27 | parent_len=0
+2026-04-20 13:46:23 [INFO] :: [STAGE 1] child : GLENMARK 2400 CE HOLDING ✔️
+2026-04-20 13:46:23 [INFO] :: [STAGE 2] AI parser started.
+2026-04-20 13:46:23 [INFO] :: [STAGE 2] Symbol hint: SYMBOL RESOLUTION HINT (use these exact values for official_symbol):
+  "GLENMARK" → exact Groww symbol: GLENMARK
+2026-04-20 13:46:23 [INFO] :: [STAGE 2] Deterministic intent: none
+2026-04-20 13:46:23 [INFO] :: [STAGE 2] Calling LLM (gpt-4o-mini)...
+2026-04-20 13:46:24 [INFO] :: [STAGE 2] LLM raw: is_trade=False action=None symbol=None strike=None type=None expiry=None/None/None entry=None sl=None tgt=None
+2026-04-20 13:46:24 [INFO] :: [STAGE 2] Decision: IGNORE — LLM says not a trade.
+2026-04-20 13:46:24 [INFO] :: [STAGE 2] Parser returned no signal — message ignored.
+2026-04-20 13:46:24 [INFO] :: ────────────────────────────────────────────────────────────
+2026-04-20 13:48:19 [INFO] :: ────────────────────────────────────────────────────────────
+2026-04-20 13:48:19 [INFO] :: [STAGE 1] MESSAGE RECEIVED
+2026-04-20 13:48:19 [INFO] :: [STAGE 1] is_reply=False | child_len=18 | parent_len=0
+2026-04-20 13:48:19 [INFO] :: [STAGE 1] child : Hold on #DELHIVERY
+2026-04-20 13:48:19 [INFO] :: [STAGE 2] AI parser started.
+2026-04-20 13:48:19 [INFO] :: [STAGE 2] Symbol hint: SYMBOL RESOLUTION HINT (use these exact values for official_symbol):
+  "DELHIVERY" → exact Groww symbol: DELHIVERY
+2026-04-20 13:48:19 [INFO] :: [STAGE 2] Deterministic intent: none
+2026-04-20 13:48:19 [INFO] :: [STAGE 2] Calling LLM (gpt-4o-mini)...
+2026-04-20 13:48:20 [INFO] :: [STAGE 2] LLM raw: is_trade=False action=None symbol=None strike=None type=None expiry=None/None/None entry=None sl=None tgt=None
+2026-04-20 13:48:20 [INFO] :: [STAGE 2] Decision: IGNORE — LLM says not a trade.
+2026-04-20 13:48:20 [INFO] :: [STAGE 2] Parser returned no signal — message ignored.
+2026-04-20 13:48:20 [INFO] :: ────────────────────────────────────────────────────────────
+2026-04-20 13:50:07 [INFO] :: ────────────────────────────────────────────────────────────
+2026-04-20 13:50:07 [INFO] :: [STAGE 1] MESSAGE RECEIVED
+2026-04-20 13:50:07 [INFO] :: [STAGE 1] is_reply=False | child_len=6 | parent_len=0
+2026-04-20 13:50:07 [INFO] :: [STAGE 1] child : Status
+2026-04-20 13:50:07 [INFO] :: [STAGE 2] AI parser started.
+2026-04-20 13:50:07 [INFO] :: [STAGE 2] Symbol hint: (none matched)
+2026-04-20 13:50:07 [INFO] :: [STAGE 2] Deterministic intent: none
+2026-04-20 13:50:07 [INFO] :: [STAGE 2] Calling LLM (gpt-4o-mini)...
+2026-04-20 13:50:08 [INFO] :: [STAGE 2] LLM raw: is_trade=False action=None symbol=None strike=None type=None expiry=None/None/None entry=None sl=None tgt=None
+2026-04-20 13:50:08 [INFO] :: [STAGE 2] Decision: IGNORE — LLM says not a trade.
+2026-04-20 13:50:08 [INFO] :: [STAGE 2] Parser returned no signal — message ignored.
+2026-04-20 13:50:08 [INFO] :: ────────────────────────────────────────────────────────────
+2026-04-20 13:53:29 [INFO] :: ────────────────────────────────────────────────────────────
+2026-04-20 13:53:29 [INFO] :: [STAGE 1] MESSAGE RECEIVED
+2026-04-20 13:53:29 [INFO] :: [STAGE 1] is_reply=False | child_len=78 | parent_len=0
+2026-04-20 13:53:29 [INFO] :: [STAGE 1] child : WE DONT EXIT OPTIOSN AT 9:15 AM.
+
+We said clearly to hold rest excet #ETERNAL.
+2026-04-20 13:53:29 [INFO] :: [STAGE 2] AI parser started.
+2026-04-20 13:53:29 [INFO] :: [STAGE 2] Symbol hint: SYMBOL RESOLUTION HINT (use these exact values for official_symbol):
+  "ETERNAL" → exact Groww symbol: ETERNAL
+2026-04-20 13:53:29 [INFO] :: [STAGE 2] Deterministic intent: none
+2026-04-20 13:53:29 [INFO] :: [STAGE 2] Calling LLM (gpt-4o-mini)...
+2026-04-20 13:53:30 [INFO] :: [STAGE 2] LLM raw: is_trade=False action=None symbol=None strike=None type=None expiry=None/None/None entry=None sl=None tgt=None
+2026-04-20 13:53:30 [INFO] :: [STAGE 2] Decision: IGNORE — LLM says not a trade.
+2026-04-20 13:53:30 [INFO] :: [STAGE 2] Parser returned no signal — message ignored.
+2026-04-20 13:53:30 [INFO] :: ────────────────────────────────────────────────────────────
+2026-04-20 13:55:07 [INFO] :: ────────────────────────────────────────────────────────────
+2026-04-20 13:55:07 [INFO] :: [STAGE 1] MESSAGE RECEIVED
+2026-04-20 13:55:07 [INFO] :: [STAGE 1] is_reply=False | child_len=20 | parent_len=0
+2026-04-20 13:55:07 [INFO] :: [STAGE 1] child : Active Stock Options
+2026-04-20 13:55:07 [INFO] :: [STAGE 2] AI parser started.
+2026-04-20 13:55:07 [INFO] :: [STAGE 2] Symbol hint: (none matched)
+2026-04-20 13:55:07 [INFO] :: [STAGE 2] Deterministic intent: none
+2026-04-20 13:55:07 [INFO] :: [STAGE 2] Calling LLM (gpt-4o-mini)...
+2026-04-20 13:55:09 [INFO] :: [STAGE 2] LLM raw: is_trade=False action=None symbol=None strike=None type=None expiry=None/None/None entry=None sl=None tgt=None
+2026-04-20 13:55:09 [INFO] :: [STAGE 2] Decision: IGNORE — LLM says not a trade.
+2026-04-20 13:55:09 [INFO] :: [STAGE 2] Parser returned no signal — message ignored.
+2026-04-20 13:55:09 [INFO] :: ────────────────────────────────────────────────────────────
+2026-04-20 13:56:25 [INFO] :: [RECONCILE] Polling broker for 1 active trade(s)...
+2026-04-20 13:56:25 [INFO] :: [RECONCILE] Maintenance result: active=3 removed=1 rearmed=0
+2026-04-20 13:59:48 [INFO] :: ────────────────────────────────────────────────────────────
+2026-04-20 13:59:48 [INFO] :: [STAGE 1] MESSAGE RECEIVED
+2026-04-20 13:59:48 [INFO] :: [STAGE 1] is_reply=False | child_len=199 | parent_len=0
+2026-04-20 13:59:48 [INFO] :: [STAGE 1] child : Make it a rule lads Announcing here for the new guys!
+
+NEVER PLACE SL ORDERS AT 9:15 AM.
+LOT OF ADJUSTMENTS HAPPEN IN THE FIRST 5 MINS!
+
+EXIT ONLY WHEN WE MENTION!
+DO NOT PLACE ANY ORDERS AT 9:15 AM.
+2026-04-20 13:59:48 [INFO] :: [STAGE 2] AI parser started.
+2026-04-20 13:59:48 [INFO] :: [STAGE 2] Symbol hint: (none matched)
+2026-04-20 13:59:48 [INFO] :: [STAGE 2] Deterministic intent: none
+2026-04-20 13:59:48 [INFO] :: [STAGE 2] Calling LLM (gpt-4o-mini)...
+2026-04-20 13:59:49 [INFO] :: [STAGE 2] LLM raw: is_trade=False action=None symbol=None strike=None type=None expiry=None/None/None entry=None sl=None tgt=None
+2026-04-20 13:59:49 [INFO] :: [STAGE 2] Decision: IGNORE — LLM says not a trade.
+2026-04-20 13:59:49 [INFO] :: [STAGE 2] Parser returned no signal — message ignored.
+2026-04-20 13:59:49 [INFO] :: ────────────────────────────────────────────────────────────
+2026-04-20 14:01:49 [INFO] :: ────────────────────────────────────────────────────────────
+2026-04-20 14:01:49 [INFO] :: [STAGE 1] MESSAGE RECEIVED
+2026-04-20 14:01:49 [INFO] :: [STAGE 1] is_reply=False | child_len=89 | parent_len=0
+2026-04-20 14:01:49 [INFO] :: [STAGE 1] child : We will be taking a index trade keep NIFTY 24300 PE IN LIST 21ST APR  BUT KEEP QTYS LESSS
+2026-04-20 14:01:49 [INFO] :: [STAGE 2] AI parser started.
+2026-04-20 14:01:49 [INFO] :: [STAGE 2] Symbol hint: SYMBOL RESOLUTION HINT (use these exact values for official_symbol):
+  "NIFTY" → exact Groww symbol: NIFTY
+2026-04-20 14:01:49 [INFO] :: [STAGE 2] Deterministic intent: none
+2026-04-20 14:01:49 [INFO] :: [STAGE 2] Calling LLM (gpt-4o-mini)...
+2026-04-20 14:01:50 [INFO] :: [STAGE 2] LLM raw: is_trade=False action=None symbol=None strike=None type=None expiry=None/None/None entry=None sl=None tgt=None
+2026-04-20 14:01:50 [INFO] :: [STAGE 2] Decision: IGNORE — LLM says not a trade.
+2026-04-20 14:01:50 [INFO] :: [STAGE 2] Parser returned no signal — message ignored.
+2026-04-20 14:01:50 [INFO] :: ────────────────────────────────────────────────────────────
+2026-04-20 14:02:16 [INFO] :: ────────────────────────────────────────────────────────────
+2026-04-20 14:02:16 [INFO] :: [STAGE 1] MESSAGE RECEIVED
+2026-04-20 14:02:16 [INFO] :: [STAGE 1] is_reply=False | child_len=68 | parent_len=0
+2026-04-20 14:02:16 [INFO] :: [STAGE 1] child : BUY #NIFTY 24300 PE 21ST APR AT 110-120
+
+SL : 85
+
+TARGETS : 134, 158
+2026-04-20 14:02:16 [INFO] :: [STAGE 2] AI parser started.
+2026-04-20 14:02:16 [INFO] :: [STAGE 2] Symbol hint: SYMBOL RESOLUTION HINT (use these exact values for official_symbol):
+  "NIFTY" → exact Groww symbol: NIFTY
+2026-04-20 14:02:16 [INFO] :: [STAGE 2] Deterministic intent: none
+2026-04-20 14:02:16 [INFO] :: [STAGE 2] Calling LLM (gpt-4o-mini)...
+2026-04-20 14:02:19 [INFO] :: [STAGE 2] LLM raw: is_trade=True action=BUY symbol=NIFTY strike=24300 type=PE expiry=21/APR/2026 entry=[110.0, 120.0] sl=85.0 tgt=134.0
+2026-04-20 14:02:19 [INFO] :: [STAGE 2] Validator passed: ok
+2026-04-20 14:02:19 [INFO] :: [STAGE 2] Signal ready: BUY NIFTY2642124300PE strike=24300 PE expiry=21/APR/2026 @ 110.0-120.0 sl=85.0 tgt=134.0 trading_symbol=NIFTY2642124300PE
+2026-04-20 14:02:19 [INFO] :: [STAGE 2] Signal: action=BUY | symbol=NIFTY2642124300PE | range=110.0-120.0 | sl=85.0 | tgt=134.0
+2026-04-20 14:02:19 [INFO] :: [STAGE 3] StateEngine.process: action=BUY symbol=NIFTY2642124300PE bot_status=ACTIVE
+2026-04-20 14:02:19 [INFO] :: [STAGE 3] Active book has 0 position(s): []
+2026-04-20 14:02:19 [INFO] :: [STAGE 3] Forwarding BUY NIFTY2642124300PE to executor.
+2026-04-20 14:02:26 [INFO] :: [STAGE 4] RESULT: ✅ SUCCESS: BUY NIFTY2642124300PE @ 118.75.
+Targets: signal 134.0 → broker 133.5 | SL: 85.0
+2026-04-20 14:02:27 [INFO] :: ────────────────────────────────────────────────────────────
+2026-04-20 14:04:53 [INFO] :: Bot Process Terminated.
+2026-04-20 14:04:53 [INFO] :: Bot Manually Stopped by User.

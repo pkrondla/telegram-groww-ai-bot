@@ -50,3 +50,5 @@ class Config:
     # Active-trade reconciliation watcher (broker positions vs local active_trades.json)
     ACTIVE_RECONCILE_ENABLED = os.getenv("ACTIVE_RECONCILE_ENABLED", "true").lower() == "true"
     ACTIVE_RECONCILE_POLL_SEC = max(10, int(os.getenv("ACTIVE_RECONCILE_POLL_SEC", "60")))
+    # Auto re-arm OCO for carry-forward positions. Keep FALSE when broker already carries OCO overnight.
+    AUTO_REARM_PROTECTION = os.getenv("AUTO_REARM_PROTECTION", "false").lower() == "true"

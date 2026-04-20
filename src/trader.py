@@ -177,6 +177,17 @@ class Trader:
                 out[str(sym)] = p
         return out
 
+    def _get_open_position_for_symbol(self, symbol: str) -> tuple[dict | None, int]:
+        """Return (position_dict, qty) for symbol from broker live positions."""
+        try:
+            pmap = self._active_positions_map()
+        except Exception:
+            return None, 0
+        pos = pmap.get(symbol)
+        if not pos:
+            return None, 0
+        return pos, self._position_quantity(pos)
+
     def _rearm_oco_for_open_position(self, symbol: str, rec: dict, position: dict) -> tuple[bool, str | None]:
         """
         Recreate OCO once per day for carry-forward open positions.
@@ -222,28 +233,45 @@ class Trader:
         logger.info(
             f"[REARM] Creating OCO for {symbol}: qty={qty}, sl={raw_sl}, target(signal={raw_tgt}, broker={eff_tgt})"
         )
-        resp = self.client.create_smart_order(
-            smart_order_type=self.client.SMART_ORDER_TYPE_OCO,
-            reference_id=rearm_ref,
-            segment=segment,
-            trading_symbol=symbol,
-            quantity=qty,
-            net_position_quantity=qty,
-            transaction_type="SELL",
-            product_type=product_type,
-            exchange=exchange,
-            duration="DAY",
-            target={
-                "trigger_price": eff_tgt,
-                "price": eff_tgt,
-                "order_type": "LIMIT",
-            },
-            stop_loss={
-                "trigger_price": raw_sl,
-                "price": raw_sl,
-                "order_type": "SL",
-            },
-        )
+        try:
+            resp = self.client.create_smart_order(
+                smart_order_type=self.client.SMART_ORDER_TYPE_OCO,
+                reference_id=rearm_ref,
+                segment=segment,
+                trading_symbol=symbol,
+                quantity=qty,
+                net_position_quantity=qty,
+                transaction_type="SELL",
+                product_type=product_type,
+                exchange=exchange,
+                duration="DAY",
+                target={
+                    "trigger_price": eff_tgt,
+                    "price": eff_tgt,
+                    "order_type": "LIMIT",
+                },
+                stop_loss={
+                    "trigger_price": raw_sl,
+                    "price": raw_sl,
+                    "order_type": "SL",
+                },
+            )
+        except Exception as e:
+            msg = str(e)
+            if "cannot exceed position quantity" in msg.lower():
+                # Broker indicates protective quantity is already attached.
+                # Mark today's armed date to avoid repeated re-arm attempts/spam.
+                trades = self._load_active_trades()
+                nrec = self._normalize_active_trade_record(trades.get(symbol))
+                nrec["protection_armed_date"] = today
+                trades[symbol] = nrec
+                self._save_all_trades(trades)
+                logger.info(f"[REARM] Skip {symbol}: broker reports protection already present.")
+                return (
+                    False,
+                    f"ℹ️ OCO re-arm skipped for {symbol}: broker reports protection already attached.",
+                )
+            raise
         new_id = self._extract_smart_order_id(resp, fallback=rearm_ref)
         self._save_active_trade(symbol, new_id, stop_loss=raw_sl, target=raw_tgt)
         trades = self._load_active_trades()
@@ -265,7 +293,7 @@ class Trader:
         """
         Unified active-trade maintenance:
         1) Reconcile local active trades with broker open positions.
-        2) Re-arm OCO once per day for carry-forward open positions using stored SL/target.
+        2) Optionally re-arm OCO once per day for carry-forward open positions.
         """
         stats = {"active": 0, "removed": 0, "rearmed": 0, "alerts": []}
         if self.client is None:
@@ -288,6 +316,9 @@ class Trader:
                 stats["removed"] += 1
                 logger.info(f"[RECONCILE] Removing stale local trade {symbol} (not active on broker).")
         self._save_all_trades(updated)
+
+        if not Config.AUTO_REARM_PROTECTION:
+            return stats
 
         # Re-arm protection for carry-forward open positions.
         for symbol, rec in list(updated.items()):
@@ -1289,18 +1320,71 @@ class Trader:
                     return f"⚠️ NO GROWW CLIENT: Cannot {action} for {symbol}. Configure GROWW_API_KEY."
 
                 if action == "EXIT_ALL":
+                    # 1) Cancel OCO protection (best effort).
+                    try:
+                        logger.info(
+                            f"[STAGE 4] Calling Groww cancel_smart_order for {symbol} "
+                            f"(segment={self.SMART_SEGMENT}, smart_order_type=OCO, id={order_id})."
+                        )
+                        self.client.cancel_smart_order(
+                            segment=self.SMART_SEGMENT,
+                            smart_order_type=self.client.SMART_ORDER_TYPE_OCO,
+                            smart_order_id=order_id,
+                        )
+                    except Exception as e:
+                        logger.warning(f"[STAGE 4] EXIT_ALL cancel_smart_order warning for {symbol}: {e}")
+
+                    # 2) Flatten any remaining net position with MARKET order.
+                    pos, qty = self._get_open_position_for_symbol(symbol)
+                    if qty == 0:
+                        self._remove_active_trade(symbol)
+                        logger.info(
+                            f"[STAGE 4] EXIT SUCCESS: {symbol} has no open position after cancel; removed from active book."
+                        )
+                        return f"🚨 EXIT SUCCESS: {symbol} already flat; cleared local active trade."
+
+                    tx = "SELL" if qty > 0 else "BUY"
+                    flat_qty = abs(int(qty))
+                    seg = str((pos or {}).get("segment") or self.SMART_SEGMENT)
+                    ex = str((pos or {}).get("exchange") or "NSE")
+                    product = str(
+                        (pos or {}).get("product")
+                        or (pos or {}).get("product_type")
+                        or (pos or {}).get("productType")
+                        or "NRML"
+                    ).upper()
                     logger.info(
-                        f"[STAGE 4] Calling Groww cancel_smart_order for {symbol} "
-                        f"(segment={self.SMART_SEGMENT}, smart_order_type=OCO, id={order_id})."
+                        f"[STAGE 4] EXIT_ALL flatten: placing MARKET {tx} {symbol} qty={flat_qty} "
+                        f"(exchange={ex}, segment={seg}, product={product})."
                     )
-                    self.client.cancel_smart_order(
-                        segment=self.SMART_SEGMENT,
-                        smart_order_type=self.client.SMART_ORDER_TYPE_OCO,
-                        smart_order_id=order_id,
+                    self.client.place_order(
+                        validity="DAY",
+                        exchange=ex,
+                        order_type="MARKET",
+                        product=product,
+                        quantity=flat_qty,
+                        segment=seg,
+                        trading_symbol=symbol,
+                        transaction_type=tx,
+                        price=0.0,
                     )
+
+                    # 3) Verify flattened.
+                    _, qty_after = self._get_open_position_for_symbol(symbol)
+                    if qty_after != 0:
+                        logger.warning(
+                            f"[STAGE 4] EXIT_ALL partial/failed flatten for {symbol}: remaining qty={qty_after}."
+                        )
+                        return (
+                            f"⚠️ EXIT PARTIAL: Cancelled protection for {symbol}, but position still open "
+                            f"(remaining qty {qty_after})."
+                        )
+
                     self._remove_active_trade(symbol)
-                    logger.info(f"[STAGE 4] EXIT SUCCESS: {symbol} smart order cancelled and removed from active book.")
-                    return f"🚨 EXIT SUCCESS: Cancelled smart order for {symbol}."
+                    logger.info(
+                        f"[STAGE 4] EXIT SUCCESS: {symbol} flattened and removed from active book."
+                    )
+                    return f"🚨 EXIT SUCCESS: Closed {symbol} position and cleared active trade."
                 
                 elif action == "TRAIL_SL":
                     new_sl = float(trade_data["stop_loss"])

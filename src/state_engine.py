@@ -75,7 +75,7 @@ class StateEngine:
         if action == "SPREAD":
             return self._handle_spread(signal)
 
-        if action in ("EXIT_ALL", "TRAIL_SL"):
+        if action in ("EXIT_ALL", "TRAIL_SL", "RESTORE_SL"):
             return self._handle_management(signal)
 
         if action == "RECONCILE":
@@ -335,7 +335,7 @@ class StateEngine:
         logger.info(f"[STAGE 3] SPREAD: {len(signal.legs)} legs, actions={leg_actions}")
 
         # Spread exit/trail: route each leg as a management action
-        if leg_actions.issubset({"EXIT_ALL", "TRAIL_SL"}):
+        if leg_actions.issubset({"EXIT_ALL", "TRAIL_SL", "RESTORE_SL"}):
             out = []
             for i, leg in enumerate(signal.legs):
                 logger.info(f"[STAGE 3] Spread management leg {i+1}: {leg.action} {leg.trading_symbol}")

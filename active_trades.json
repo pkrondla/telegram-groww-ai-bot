@@ -1,8 +1,17 @@
 {
-    "NIFTY2642124300PE": {
-        "smart_order_id": "NRMLOCO-6798bb86-c90b-4321-ad32-c72e2bc4499c",
-        "stop_loss": 85.0,
-        "target": 134.0,
+    "GMRAIRPORT26APR100CE": {
+        "smart_order_id": "NRMLOCO-af5358e6-a37e-4557-883a-2b93e362059f",
+        "stop_loss": 0.9,
+        "sl_true": 0.9,
+        "sl_mode": "NORMAL",
+        "target": 2.4,
+        "entry_side": "BUY",
+        "entry_qty": 6975,
+        "lot_size": 6975,
+        "entry_avg_price": 1.6,
+        "opened_at_ist": "2026-04-20T11:46:24+05:30",
+        "entry_order_id": "GMKFO2604201146244UXGVWETDOEA",
+        "spread_group_id": "",
         "protection_armed_date": "2026-04-20"
     }
 }

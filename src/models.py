@@ -6,7 +6,7 @@ from typing import Optional
 @dataclass
 class TradeLeg:
     """Single leg of an option trade (entry or spread leg)."""
-    action: str                        # BUY | SELL | EXIT_ALL | TRAIL_SL
+    action: str                        # BUY | SELL | EXIT_ALL | TRAIL_SL | RESTORE_SL
     official_symbol: str               # Underlying root e.g. SENSEX, WAAREEENER
     trading_symbol: str                # Full broker symbol e.g. SENSEX2640976500CE
     strike: str
@@ -34,7 +34,7 @@ class TradeSignal:
     Canonical event object produced by the AI parser and consumed by the state engine.
     Represents a single parsed intent from a Telegram message.
     """
-    action: str                                    # BUY | SELL | EXIT_ALL | TRAIL_SL
+    action: str                                    # BUY | SELL | EXIT_ALL | TRAIL_SL | RESTORE_SL
     is_spread: bool = False
     legs: list[TradeLeg] = field(default_factory=list)
 

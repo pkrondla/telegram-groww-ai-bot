@@ -73,6 +73,23 @@ class Assistant:
         "UPDATE SL",
         "REVISED SL",
     )
+    # Volatility schedule early restore / re-arm true SL on broker (before LLM).
+    _RESTORE_SL_PHRASES = (
+        "RESTORE SL",
+        "RESTORE STOP",
+        "RESTORE STOPLOSS",
+        "RESTORE STOP LOSS",
+        "RESET SL",
+        "RESET STOP",
+        "REVERT SL",
+        "REVERT STOP",
+        "ORIGINAL SL",
+        "TRUE SL",
+        "CHANNEL SL",
+        "BACK TO SL",
+        "SL RESTORE",
+        "RESTORE PROTECTION",
+    )
     # Phrases that indicate an admin is updating the target for an existing trade.
     _UPDATE_TGT_PHRASES = (
         "CHANGE T1",
@@ -161,7 +178,17 @@ class Assistant:
         }
     )
     _ALLOWED_ACTIONS = frozenset(
-        {"BUY", "SELL", "TRAIL_SL", "EXIT_ALL", "EXTEND_RANGE", "UPDATE_TGT", "RECONCILE", "COMMENT"}
+        {
+            "BUY",
+            "SELL",
+            "TRAIL_SL",
+            "RESTORE_SL",
+            "EXIT_ALL",
+            "EXTEND_RANGE",
+            "UPDATE_TGT",
+            "RECONCILE",
+            "COMMENT",
+        }
     )
 
     _ENTRY_PHRASES = (
@@ -235,7 +262,7 @@ class Assistant:
 
     def _detect_forced_intent(self, tail: str, full: str) -> tuple[str, float | None] | None:
         """
-        Returns ("EXIT_ALL", None), ("TRAIL_SL", price_or_None), or None.
+        Returns ("EXIT_ALL", None), ("RESTORE_SL", None), ("TRAIL_SL", price_or_None), or None.
         Prefer tail when non-empty; then scan full string.
         """
         chunks = [tail] if tail.strip() else []
@@ -247,6 +274,9 @@ class Assistant:
             for phrase in self._EXIT_PHRASES:
                 if phrase in n:
                     return ("EXIT_ALL", None)
+            for phrase in self._RESTORE_SL_PHRASES:
+                if phrase in n:
+                    return ("RESTORE_SL", None)
             for phrase in self._TRAIL_PHRASES:
                 if phrase in n:
                     sl = self._extract_trail_sl_price(chunk)
@@ -266,6 +296,9 @@ class Assistant:
             if phrase in n:
                 return True
         for phrase in cls._TRAIL_PHRASES:
+            if phrase in n:
+                return True
+        for phrase in cls._RESTORE_SL_PHRASES:
             if phrase in n:
                 return True
         return False
@@ -562,6 +595,12 @@ class Assistant:
                 return None, "reply_is_ack_only_not_exit"
             if not self._has_symbol_fields(data) and not self._has_option_hint(parent_text):
                 return None, "missing_exit_symbol"
+
+        if action == "RESTORE_SL":
+            if is_reply and self._is_ack_only_tail(child):
+                return None, "reply_is_ack_only_not_restore"
+            if not self._has_symbol_fields(data) and not self._has_option_hint(parent_text):
+                return None, "missing_restore_symbol"
 
         if action == "EXTEND_RANGE":
             # Must be a reply with a valid new upper price in entry_range.
@@ -1077,6 +1116,37 @@ Rules:
             logger.info(f"[STAGE 2] Signal ready: {data['action']} {data['stock']} @ {data['buy_range_min']}-{data['buy_range_max']}")
             return data
 
+        if forced and forced[0] == "RESTORE_SL":
+            logger.info("[STAGE 2] Path: forced RESTORE_SL — calling LLM for symbol extraction only.")
+            data = self._llm_parse_forced(
+                text,
+                "EXIT_ALL",
+                parent_text=context_inner or parent_text,
+                child_text=tail or child_text,
+                is_reply=has_context,
+            )
+            logger.info(f"[STAGE 2] LLM raw (forced): {data}")
+            if not data or not data.get("is_trade"):
+                logger.info("[STAGE 2] Decision: IGNORE — forced RESTORE_SL could not resolve instrument.")
+                return None
+            data["action"] = "RESTORE_SL"
+            data["stop_loss"] = 0
+            data["target"] = 0
+            data, reason = self._validate_intent(
+                data,
+                child_text=tail or child_text,
+                parent_text=context_inner or parent_text,
+                is_reply=has_context,
+                forced_action="RESTORE_SL",
+            )
+            if not data:
+                logger.info(f"[STAGE 2] Decision: IGNORE forced RESTORE_SL — validator rejected ({reason}).")
+                return None
+            data = self._apply_alias_to_data(data)
+            data = self._apply_symbol_factory(data)
+            logger.info(f"[STAGE 2] Signal ready: {data['action']} {data['stock']}")
+            return data
+
         if forced and forced[0] == "TRAIL_SL":
             logger.info("[STAGE 2] Path: forced TRAIL_SL — calling LLM for symbol extraction only.")
             data = self._llm_parse_forced(
@@ -1133,7 +1203,7 @@ The input has these fields:
 OUTPUT SCHEMAS
 ════════════════════════════════════════
 
-SINGLE LEG (BUY / SELL / EXIT_ALL / TRAIL_SL):
+SINGLE LEG (BUY / SELL / EXIT_ALL / TRAIL_SL / RESTORE_SL):
 {{
     "is_trade": true,
     "is_spread": false,
@@ -1164,6 +1234,23 @@ TRAIL SL example (reply updating stop loss):
     "expiry_year": "2026",
     "entry_range": [0, 0],
     "stop_loss": 40.0,
+    "target": 0
+}}
+
+RESTORE SL example (reply restoring broker OCO SL back to the channel/admin true SL):
+{{
+    "is_trade": true,
+    "is_spread": false,
+    "action": "RESTORE_SL",
+    "official_symbol": "WAAREEENER",
+    "stock": "WAAREEENER",
+    "strike": "3500",
+    "option_type": "CE",
+    "expiry_day": "28",
+    "expiry_month": "APR",
+    "expiry_year": "2026",
+    "entry_range": [0, 0],
+    "stop_loss": 0,
     "target": 0
 }}
 
@@ -1293,10 +1380,11 @@ expiry_year:
 entry_range:
   - Array [min, max] as numbers.
   - "CMP 38-42", "AT 38-42", "@ 38-42", "38 TO 42" all map to [38.0, 42.0].
-  - Use [0, 0] for EXIT_ALL and TRAIL_SL.
+  - Use [0, 0] for EXIT_ALL, TRAIL_SL, and RESTORE_SL.
 
 stop_loss:
   - Number. For TRAIL_SL use the NEW stop value from child_message (e.g. "TSL TO 40" → 40.0).
+  - For RESTORE_SL use 0 (the bot restores using persisted sl_true in active_trades.json).
   - "SL 22" → 22.0. Use 0 if not stated.
 
 target:
@@ -1309,6 +1397,9 @@ action:
                       STOPLOSS HIT, BOOK PROFIT, SQUARE OFF, EXIT TRADE, FULL EXIT, STOPPED OUT.
   - "TRAIL_SL"     — update stop loss. Triggered by: TSL TO, NEW TSL, TRAIL SL, MOVE SL, SHIFT SL,
                       SL TO, TRAILING SL. Extract new SL value from child_message.
+  - "RESTORE_SL"   — restore broker OCO SL to the channel/admin true SL (persisted as sl_true).
+                      Triggered by replies like: RESTORE SL, RESET SL, REVERT SL, TRUE SL, CHANNEL SL.
+                      Set entry_range = [0, 0], stop_loss = 0, target = 0.
   - "EXTEND_RANGE" — widen the BUY entry range. Triggered by replies like: CAN BUY TILL X,
                       BUY UP TO X, BUY UPTO X, ENTRY UPTO X, RANGE UP TO X, MAX ENTRY X,
                       ACCEPTABLE TILL X, VALID UPTO X. The price X becomes the new entry_range max.
@@ -1410,6 +1501,12 @@ Return is_trade: false for:
             if rerun and rerun[0] == "EXIT_ALL" and data.get("action") == "BUY":
                 logger.info("[STAGE 2] Deterministic override: BUY → EXIT_ALL (explicit exit phrase in tail).")
                 data["action"] = "EXIT_ALL"
+            elif rerun and rerun[0] == "RESTORE_SL" and data.get("action") == "BUY":
+                logger.info("[STAGE 2] Deterministic override: BUY → RESTORE_SL (explicit restore phrase in tail).")
+                data["action"] = "RESTORE_SL"
+                data["stop_loss"] = 0
+                data["target"] = 0
+                data["entry_range"] = [0, 0]
             elif rerun and rerun[0] == "TRAIL_SL" and data.get("action") == "BUY":
                 logger.info("[STAGE 2] Deterministic override: BUY → TRAIL_SL (explicit trail phrase in tail).")
                 data["action"] = "TRAIL_SL"

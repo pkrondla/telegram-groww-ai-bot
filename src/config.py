@@ -35,8 +35,9 @@ class Config:
     # ORDER_QUANTITY is kept as a fallback if lot size cannot be resolved.
     ORDER_LOTS_COUNT = max(1, int(os.getenv("ORDER_LOTS_COUNT", "1")))
     ORDER_QUANTITY = max(1, int(os.getenv("ORDER_QUANTITY", "1")))
-    # Fixed points subtracted from signal target for OCO LIMIT target (e.g. 100 → 99.5 when 0.5).
-    TARGET_BUFFER_POINTS = max(0.0, float(os.getenv("TARGET_BUFFER_POINTS", "0.5")))
+    # Percentage cushion below signal target for OCO LIMIT target
+    # (e.g. 2% => 100 -> 98, 5 -> 4.9).
+    TARGET_BUFFER_PCT = max(0.0, min(0.5, float(os.getenv("TARGET_BUFFER_PCT", "0.02"))))
 
     # When LTP is outside the signal entry_range, queue and retry instead of permanently skipping
     ENTRY_QUEUE_ENABLED = os.getenv("ENTRY_QUEUE_ENABLED", "true").lower() == "true"
@@ -52,3 +53,26 @@ class Config:
     ACTIVE_RECONCILE_POLL_SEC = max(10, int(os.getenv("ACTIVE_RECONCILE_POLL_SEC", "60")))
     # Auto re-arm OCO for carry-forward positions. Keep FALSE when broker already carries OCO overnight.
     AUTO_REARM_PROTECTION = os.getenv("AUTO_REARM_PROTECTION", "false").lower() == "true"
+
+    # Volatility schedule: widen OCO SL before close, restore next morning (IST). Policy 1: admin TRAIL_SL
+    # still updates broker SL immediately; sl_true in active_trades tracks the channel's true SL.
+    VOL_SL_SCHEDULE_ENABLED = os.getenv("VOL_SL_SCHEDULE_ENABLED", "false").lower() == "true"
+    VOL_SL_WIDEN_TIME_IST = os.getenv("VOL_SL_WIDEN_TIME_IST", "15:15")  # HH:MM
+    VOL_SL_RESTORE_TIME_IST = os.getenv("VOL_SL_RESTORE_TIME_IST", "09:25")
+    VOL_SL_WIDEN_PCT = max(0.0, min(0.95, float(os.getenv("VOL_SL_WIDEN_PCT", "0.10"))))
+    VOL_SL_SCHEDULE_POLL_SEC = max(10, int(os.getenv("VOL_SL_SCHEDULE_POLL_SEC", "30")))
+    VOL_SL_SKIP_WEEKENDS = os.getenv("VOL_SL_SKIP_WEEKENDS", "true").lower() == "true"
+
+    # End-of-day completed-trades summary (IST).
+    EOD_SUMMARY_ENABLED = os.getenv("EOD_SUMMARY_ENABLED", "true").lower() == "true"
+    EOD_SUMMARY_TIME_IST = os.getenv("EOD_SUMMARY_TIME_IST", "15:30")  # HH:MM
+    EOD_SUMMARY_POLL_SEC = max(10, int(os.getenv("EOD_SUMMARY_POLL_SEC", "30")))
+    EOD_SUMMARY_SKIP_WEEKENDS = os.getenv("EOD_SUMMARY_SKIP_WEEKENDS", "true").lower() == "true"
+
+    # Management actions queue (EXIT/TRAIL/RESTORE/TARGET updates).
+    MGMT_QUEUE_ENABLED = os.getenv("MGMT_QUEUE_ENABLED", "true").lower() == "true"
+    MGMT_QUEUE_POLL_SEC = max(5, int(os.getenv("MGMT_QUEUE_POLL_SEC", "10")))
+    MGMT_QUEUE_MAX_RETRIES = max(1, int(os.getenv("MGMT_QUEUE_MAX_RETRIES", "20")))
+    MGMT_QUEUE_TTL_MIN = max(5, int(os.getenv("MGMT_QUEUE_TTL_MIN", "360")))
+    MARKET_OPEN_TIME_IST = os.getenv("MARKET_OPEN_TIME_IST", "09:15")
+    MARKET_CLOSE_TIME_IST = os.getenv("MARKET_CLOSE_TIME_IST", "15:30")

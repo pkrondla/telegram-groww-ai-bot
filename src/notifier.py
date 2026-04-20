@@ -39,8 +39,10 @@ class Notifier:
             "SELL": "📉",
             "EXIT_ALL": "🚨",
             "TRAIL_SL": "📌",
+            "RESTORE_SL": "🔁",
             "UPDATE_TGT": "🎯",
             "EXTEND_RANGE": "📶",
+            "RECONCILE": "🧾",
             "SPREAD": "🔀",
         }.get(action.upper(), "🤖")
         symbol_text = str(symbol or "").strip()

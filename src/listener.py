@@ -107,6 +107,47 @@ class BotListener:
                 logger.error(f"Alert Scheduler Error: {str(e)}")
                 await asyncio.sleep(60)
 
+    async def _vol_sl_scheduler(self):
+        if not Config.VOL_SL_SCHEDULE_ENABLED:
+            return
+        interval = max(10, Config.VOL_SL_SCHEDULE_POLL_SEC)
+        logger.info(f"Volatility SL scheduler started (every {interval}s, IST widen/restore).")
+        while True:
+            try:
+                await asyncio.sleep(interval)
+                if not self.state_engine.is_active():
+                    continue
+                lines = self.trader.run_volatility_sl_schedule_tick()
+                for line in lines:
+                    logger.info(f"[VOL_SL] {line}")
+                    try:
+                        await self.notifier.send(line)
+                    except Exception as notify_err:
+                        logger.error(f"VOL_SL notify error: {notify_err}")
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                logger.error(f"VOL_SL scheduler error: {e}")
+                await asyncio.sleep(interval)
+
+    async def _eod_summary_scheduler(self):
+        if not Config.EOD_SUMMARY_ENABLED:
+            return
+        interval = max(10, Config.EOD_SUMMARY_POLL_SEC)
+        logger.info(f"EOD summary scheduler started (every {interval}s).")
+        while True:
+            try:
+                await asyncio.sleep(interval)
+                msg = self.trader.run_eod_summary_tick()
+                if msg:
+                    logger.info("[EOD] Sending end-of-day summary alert.")
+                    await self.notifier.send_alert("Market Closing Summary", msg)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                logger.error(f"EOD summary scheduler error: {e}")
+                await asyncio.sleep(interval)
+
     async def _active_trade_reconciler(self):
         if not Config.ACTIVE_RECONCILE_ENABLED:
             return
@@ -137,6 +178,29 @@ class BotListener:
             except Exception as e:
                 logger.error(f"Active trade reconciler error: {e}")
 
+    async def _management_queue_watcher(self):
+        if not Config.MGMT_QUEUE_ENABLED:
+            return
+        interval = max(5, Config.MGMT_QUEUE_POLL_SEC)
+        logger.info(f"Management queue watcher started (every {interval}s).")
+        while True:
+            try:
+                await asyncio.sleep(interval)
+                if not self.state_engine.is_active():
+                    continue
+                messages = self.trader.process_management_queue()
+                for msg in messages:
+                    logger.info(f"[MGMT_QUEUE] {msg}")
+                    try:
+                        await self.notifier.send(f"🧠 **Management Queue**\n\n{msg}")
+                    except Exception as notify_err:
+                        logger.error(f"Management queue notify error: {notify_err}")
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                logger.error(f"Management queue watcher error: {e}")
+                await asyncio.sleep(interval)
+
     # ------------------------------------------------------------------
     # Admin override handler
     # ------------------------------------------------------------------
@@ -162,12 +226,14 @@ class BotListener:
         elif command == "status":
             active = self.trader._load_active_trades()
             pending = self.trader._load_pending()
+            pending_mgmt = self.trader._load_pending_management()
             dry = "ON" if not self.trader.execute_orders else "OFF"
             detail = (
                 f"State: {self.state_engine.status}\n"
                 f"Dry Run (entry orders only): {dry}\n"
                 f"Active trades: {len(active)}\n"
-                f"Pending queue: {len(pending)}"
+                f"Pending entry queue: {len(pending)}\n"
+                f"Pending management queue: {len(pending_mgmt)}"
             )
             await self.notifier.send_status(self.state_engine.status, detail)
         elif command == "dryrun_on":
@@ -287,7 +353,10 @@ class BotListener:
             logger.warning(f"Metadata Fetch Error: {str(e)}")
 
         asyncio.create_task(self._scheduled_alerts())
+        asyncio.create_task(self._vol_sl_scheduler())
+        asyncio.create_task(self._eod_summary_scheduler())
         asyncio.create_task(self._pending_entry_watcher())
+        asyncio.create_task(self._management_queue_watcher())
         asyncio.create_task(self._active_trade_reconciler())
 
         @self.client.on(events.NewMessage(chats=[self.target_chat_id, Config.ADMIN_ID]))

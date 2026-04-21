@@ -287,6 +287,12 @@ class Assistant:
             if not n:
                 continue
             for phrase in self._EXIT_PHRASES:
+                # Keep colon-style P&L summaries strict so generic commentary like
+                # "profit booking" does not become a forced EXIT_ALL.
+                if phrase in ("PROFIT :", "LOSS :"):
+                    if re.search(rf"\b{phrase.split(':')[0]}\s*:", chunk, re.IGNORECASE):
+                        return ("EXIT_ALL", None)
+                    continue
                 if self._normalize_for_match(phrase) in n:
                     return ("EXIT_ALL", None)
             for phrase in self._RESTORE_SL_PHRASES:

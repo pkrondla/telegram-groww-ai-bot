@@ -640,3 +640,20 @@ TARGETS : 52, 80 [2x,3x]
 2026-04-21 15:39:13 [INFO] :: [STAGE 4] RESULT: 🚨 EXIT SUCCESS: Closed NIFTY2642124400PE position and cleared active trade.
 2026-04-21 15:39:15 [INFO] :: ────────────────────────────────────────────────────────────
 2026-04-21 15:43:33 [INFO] :: [RECONCILE] Polling broker for 1 active trade(s)...
+2026-04-21 15:58:33 [INFO] :: [RECONCILE] Polling broker for 1 active trade(s)...
+2026-04-21 16:03:50 [INFO] :: Bot Process Terminated.
+2026-04-21 16:03:50 [INFO] :: Bot Manually Stopped by User.
+2026-04-21 16:03:56 [INFO] :: Initializing Industrial-Standard Trading Bot...
+2026-04-21 16:03:59 [INFO] :: Startup active-trade maintenance: active=6 removed=0 rearmed=0
+2026-04-21 16:04:01 [INFO] :: SymbolManager: cache is fresh, loading from symbol_map.json
+2026-04-21 16:04:01 [INFO] :: SymbolManager: cache loaded — 220 symbols, 363 aliases.
+2026-04-21 16:04:02 [INFO] :: Connected to Telegram as: Praveen
+2026-04-21 16:04:02 [INFO] :: 📡 LISTENING TO: CHARTIANS [ FNO ] PREMIUM CHANNEL (-1002153367077)
+2026-04-21 16:04:02 [INFO] :: 🔔 NOTIFYING ADMIN: Praveen Rondla (1447109810)
+2026-04-21 16:04:03 [INFO] :: Bot Connection Established.
+2026-04-21 16:04:03 [INFO] :: Market Alert Scheduler Started.
+2026-04-21 16:04:03 [INFO] :: Volatility SL scheduler started (every 30s, IST widen/restore).
+2026-04-21 16:04:03 [INFO] :: EOD summary scheduler started (every 1500s).
+2026-04-21 16:04:03 [INFO] :: Pending entry watcher started (every 30s).
+2026-04-21 16:04:03 [INFO] :: Management queue watcher started (every 10s).
+2026-04-21 16:04:03 [INFO] :: Active trade reconciler started (every 900s).

@@ -262,6 +262,14 @@ class BotListener:
         )
         if m:
             return f"sizing_{m.group(1).lower()}"
+        # Admin fast exits:
+        # - EXIT <TRADING_SYMBOL> : close one position
+        # - EXIT ALL              : close every active position
+        if t == "EXIT ALL":
+            return "exit_all_positions"
+        m_exit_symbol = re.fullmatch(r"EXIT\s+([A-Z0-9]+)", t)
+        if m_exit_symbol:
+            return f"exit_symbol:{m_exit_symbol.group(1)}"
         for cmd in _OVERRIDE_COMMANDS:
             if t == cmd:
                 return _OVERRIDE_COMMANDS[cmd]
@@ -332,6 +340,47 @@ class BotListener:
         elif command == "trades":
             active = self.trader._load_active_trades()
             await self.notifier.send(self._format_active_trades(active))
+        elif command == "exit_all_positions":
+            active = self.trader._load_active_trades()
+            symbols = [str(s) for s in active.keys() if str(s)]
+            if not symbols:
+                await self.notifier.send("ℹ️ EXIT ALL: no active trades to close.")
+                return
+
+            out = []
+            for symbol in symbols:
+                payload = {
+                    "action": "EXIT_ALL",
+                    "stock": symbol,
+                    "trading_symbol": symbol,
+                    "entry_range": [0, 0],
+                    "buy_range_min": 0.0,
+                    "buy_range_max": 0.0,
+                    "stop_loss": 0,
+                    "target": 0,
+                    "is_trade": True,
+                }
+                msg = await asyncio.to_thread(self.trader.execute_trade, payload)
+                out.append(f"• `{symbol}`: {msg}")
+            await self.notifier.send(
+                "🚨 **EXIT ALL completed**\n"
+                f"Processed {len(symbols)} active trade(s).\n\n" + "\n".join(out)
+            )
+        elif command.startswith("exit_symbol:"):
+            symbol = command.split(":", 1)[1].strip().upper()
+            payload = {
+                "action": "EXIT_ALL",
+                "stock": symbol,
+                "trading_symbol": symbol,
+                "entry_range": [0, 0],
+                "buy_range_min": 0.0,
+                "buy_range_max": 0.0,
+                "stop_loss": 0,
+                "target": 0,
+                "is_trade": True,
+            }
+            msg = await asyncio.to_thread(self.trader.execute_trade, payload)
+            await self.notifier.send(f"🚨 **EXIT** `{symbol}`\n\n{msg}")
         elif command == "rearm":
             msg = await asyncio.to_thread(self.trader.admin_rearm_protection_for_active_trades)
             await self.notifier.send(msg)
@@ -342,6 +391,8 @@ class BotListener:
                 "• `HELP` — show this help\n"
                 "• `STATUS` — bot state, dry-run, active/pending counts\n"
                 "• `TRADES` — list all active trades\n"
+                "• `EXIT <TRADING_SYMBOL>` — close one active trade\n"
+                "• `EXIT ALL` — close all active trades\n"
                 "• `REARM` — re-arm missing OCO protection for active trades\n"
                 "• `SIZING` — show current position sizing mode\n"
                 "• `SIZING FIXED` — use configured fixed lots\n"

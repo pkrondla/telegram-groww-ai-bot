@@ -1,0 +1,49 @@
+{
+    "date": "2026-04-21",
+    "timezone": "Asia/Kolkata",
+    "trades": [
+        {
+            "trade_id": "8a17aad9-a4e",
+            "group_id": "",
+            "is_spread_leg": false,
+            "symbol": "NIFTY2642124500CE",
+            "side": "BUY",
+            "quantity": 130,
+            "lot_size": 65,
+            "lots": 2.0,
+            "entry_avg_price": 50.55,
+            "exit_avg_price": 50.55,
+            "pnl_points_per_lot": 0.0,
+            "pnl_inr": 0.0,
+            "opened_at_ist": "2026-04-21T09:27:18+05:30",
+            "closed_at_ist": "2026-04-21T09:57:27+05:30",
+            "close_reason": "RECONCILE_FLAT",
+            "entry_order_id": "GMKFO2604210927170K2FJR5AOI4Y",
+            "exit_order_id": "",
+            "smart_order_id": "NRMLOCO-ef0a9fef-1b01-40d6-a927-a381afe6b98c"
+        },
+        {
+            "trade_id": "99fe48db-94d",
+            "group_id": "",
+            "is_spread_leg": false,
+            "symbol": "NIFTY2642124400PE",
+            "side": "BUY",
+            "quantity": 195,
+            "lot_size": 65,
+            "lots": 3.0,
+            "entry_avg_price": 26.0,
+            "exit_avg_price": 0.0,
+            "pnl_points_per_lot": -26.0,
+            "pnl_inr": -5070.0,
+            "opened_at_ist": "2026-04-21T09:59:04+05:30",
+            "closed_at_ist": "2026-04-21T11:09:13+05:30",
+            "close_reason": "EXIT_ALL",
+            "entry_order_id": "GMKFO260421095903JW402HYR3M9I",
+            "exit_order_id": "GMKFO260421110913TZ6Q37RIG3U2",
+            "smart_order_id": "NRMLOCO-944ecc69-f12d-41ec-95fe-aec8d35fb82c"
+        }
+    ],
+    "eod": {
+        "summary_sent_at": ""
+    }
+}

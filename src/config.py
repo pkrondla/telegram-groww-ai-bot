@@ -38,6 +38,10 @@ class Config:
     # Percentage cushion below signal target for OCO LIMIT target
     # (e.g. 2% => 100 -> 98, 5 -> 4.9).
     TARGET_BUFFER_PCT = max(0.0, min(0.5, float(os.getenv("TARGET_BUFFER_PCT", "0.02"))))
+    # Multi-target OCO split for single-leg BUY entries.
+    MULTI_TARGET_ENABLED = os.getenv("MULTI_TARGET_ENABLED", "true").lower() == "true"
+    TARGET_SPLIT_2 = os.getenv("TARGET_SPLIT_2", "60:40").strip()
+    TARGET_SPLIT_3 = os.getenv("TARGET_SPLIT_3", "60:30:10").strip()
     # Price tick size used to sanitize OCO target/SL prices before broker API calls.
     TARGET_PRICE_TICK_SIZE = max(0.01, float(os.getenv("TARGET_PRICE_TICK_SIZE", "0.05")))
     # Position sizing mode: fixed (configured lots) or risk (SL-distance based).

@@ -1,6 +1,52 @@
 import logging
 import sys
+import time
+import requests
 from .config import Config
+
+
+class TelegramErrorAlertHandler(logging.Handler):
+    """
+    Sends ERROR/CRITICAL log records to admin via Telegram Bot API.
+    Uses simple dedupe cooldown to avoid alert floods on repeated errors.
+    """
+
+    def __init__(self, cooldown_sec: int = 20):
+        super().__init__(level=logging.ERROR)
+        self._cooldown_sec = max(1, int(cooldown_sec))
+        self._last_sent_at = 0.0
+        self._last_fingerprint = ""
+
+    def emit(self, record: logging.LogRecord):
+        # Requires bot token + admin id configured.
+        if not Config.BOT_TOKEN or not Config.ADMIN_ID:
+            return
+        try:
+            msg = self.format(record)
+            fp = f"{record.levelname}|{record.name}|{record.msg}"
+            now = time.time()
+            if fp == self._last_fingerprint and (now - self._last_sent_at) < self._cooldown_sec:
+                return
+            self._last_fingerprint = fp
+            self._last_sent_at = now
+
+            text = (
+                "❌ BOT ERROR ALERT\n"
+                f"Level: {record.levelname}\n"
+                f"{msg[-3500:]}"
+            )
+            requests.post(
+                f"https://api.telegram.org/bot{Config.BOT_TOKEN}/sendMessage",
+                data={
+                    "chat_id": Config.ADMIN_ID,
+                    "text": text,
+                },
+                timeout=8,
+            )
+        except Exception:
+            # Never raise from logging handler; avoid recursive logging loops.
+            pass
+
 
 def setup_logger():
     """
@@ -46,6 +92,12 @@ def setup_logger():
     # Add handlers to the logger
     logger.addHandler(c_handler)
     logger.addHandler(f_handler)
+
+    # Error alerts to Telegram admin for all logger.error/logger.critical calls.
+    err_handler = TelegramErrorAlertHandler(cooldown_sec=20)
+    err_handler.setLevel(logging.ERROR)
+    err_handler.setFormatter(log_format)
+    logger.addHandler(err_handler)
     
     return logger
 

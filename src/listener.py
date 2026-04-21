@@ -23,6 +23,7 @@ _OVERRIDE_COMMANDS = {
     "POSITIONS": "trades",
     "SIZING":   "sizing_status",
     "SIZING MODE": "sizing_status",
+    "REARM":   "rearm",
     "HELP":     "help",
     "DRYRUN ON":  "dryrun_on",
     "DRYRUN OFF": "dryrun_off",
@@ -87,10 +88,11 @@ class BotListener:
                 await asyncio.sleep(interval)
                 if not self.state_engine.is_active():
                     continue
-                pending_count = len(self.trader._load_pending())
+                pending_items = await asyncio.to_thread(self.trader._load_pending)
+                pending_count = len(pending_items)
                 if pending_count:
                     logger.info(f"[PENDING] Watcher polling {pending_count} queued item(s)...")
-                messages = self.trader.process_pending_queue()
+                messages = await asyncio.to_thread(self.trader.process_pending_queue)
                 for msg in messages:
                     logger.info(f"PENDING: {msg}")
                     try:
@@ -115,7 +117,7 @@ class BotListener:
                 now = datetime.datetime.now(ist)
                 current_time = now.strftime("%H:%M")
                 if current_time in ["14:45", "15:15"]:
-                    active_trades = self.trader._load_active_trades()
+                    active_trades = await asyncio.to_thread(self.trader._load_active_trades)
                     if active_trades:
                         trades_list = "\n".join([f"🔹 {s}" for s in active_trades.keys()])
                         body = (
@@ -142,7 +144,7 @@ class BotListener:
                 await asyncio.sleep(interval)
                 if not self.state_engine.is_active():
                     continue
-                lines = self.trader.run_volatility_sl_schedule_tick()
+                lines = await asyncio.to_thread(self.trader.run_volatility_sl_schedule_tick)
                 for line in lines:
                     logger.info(f"[VOL_SL] {line}")
                     try:
@@ -163,7 +165,7 @@ class BotListener:
         while True:
             try:
                 await asyncio.sleep(interval)
-                msg = self.trader.run_eod_summary_tick()
+                msg = await asyncio.to_thread(self.trader.run_eod_summary_tick)
                 if msg:
                     logger.info("[EOD] Sending end-of-day summary alert.")
                     await self.notifier.send_alert("Market Closing Summary", msg)
@@ -183,11 +185,12 @@ class BotListener:
                 await asyncio.sleep(interval)
                 if not self.state_engine.is_active():
                     continue
-                active_count = len(self.trader._load_active_trades())
+                active_trades = await asyncio.to_thread(self.trader._load_active_trades)
+                active_count = len(active_trades)
                 if not active_count:
                     continue
                 logger.info(f"[RECONCILE] Polling broker for {active_count} active trade(s)...")
-                stats = self.trader.maintain_active_trades()
+                stats = await asyncio.to_thread(self.trader.maintain_active_trades)
                 if stats.get("removed") or stats.get("rearmed"):
                     logger.info(
                         f"[RECONCILE] Maintenance result: active={stats.get('active', 0)} "
@@ -213,7 +216,7 @@ class BotListener:
                 await asyncio.sleep(interval)
                 if not self.state_engine.is_active():
                     continue
-                messages = self.trader.process_management_queue()
+                messages = await asyncio.to_thread(self.trader.process_management_queue)
                 for msg in messages:
                     logger.info(f"[MGMT_QUEUE] {msg}")
                     try:
@@ -329,6 +332,9 @@ class BotListener:
         elif command == "trades":
             active = self.trader._load_active_trades()
             await self.notifier.send(self._format_active_trades(active))
+        elif command == "rearm":
+            msg = await asyncio.to_thread(self.trader.admin_rearm_protection_for_active_trades)
+            await self.notifier.send(msg)
         elif command == "help":
             await self.notifier.send(
                 "📘 **Bot Command Help**\n\n"
@@ -336,6 +342,7 @@ class BotListener:
                 "• `HELP` — show this help\n"
                 "• `STATUS` — bot state, dry-run, active/pending counts\n"
                 "• `TRADES` — list all active trades\n"
+                "• `REARM` — re-arm missing OCO protection for active trades\n"
                 "• `SIZING` — show current position sizing mode\n"
                 "• `SIZING FIXED` — use configured fixed lots\n"
                 "• `SIZING RISK` — use risk-based sizing\n"

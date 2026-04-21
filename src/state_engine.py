@@ -78,6 +78,9 @@ class StateEngine:
         if action in ("EXIT_ALL", "TRAIL_SL", "RESTORE_SL"):
             return self._handle_management(signal)
 
+        if action == "RESTORE_ALL":
+            return self._handle_restore_all()
+
         if action == "RECONCILE":
             return self._handle_reconcile_only(signal)
 
@@ -322,6 +325,38 @@ class StateEngine:
 
         logger.info(f"[STAGE 3] Forwarding {signal.action} {resolved} to executor.")
         return self._trader.execute_trade(legacy)
+
+    def _handle_restore_all(self) -> str | None:
+        active = self._trader._load_active_trades()
+        symbols = [str(s) for s in active.keys() if str(s)]
+        if not symbols:
+            logger.info("[STAGE 3] RESTORE_ALL requested but active book is empty.")
+            return "ℹ️ RESTORE_ALL: no active trades to re-arm."
+
+        logger.info(f"[STAGE 3] RESTORE_ALL requested for {len(symbols)} active trade(s).")
+        out = []
+        for symbol in symbols:
+            payload = {
+                "action": "RESTORE_SL",
+                "stock": symbol,
+                "trading_symbol": symbol,
+                "entry_range": [0, 0],
+                "buy_range_min": 0.0,
+                "buy_range_max": 0.0,
+                "stop_loss": 0,
+                "target": 0,
+                "is_trade": True,
+            }
+            try:
+                msg = self._trader.execute_trade(payload)
+                if msg:
+                    out.append(f"{symbol}: {msg}")
+            except Exception as e:
+                logger.error(f"[STAGE 3] RESTORE_ALL failed for {symbol}: {e}")
+                out.append(f"{symbol}: ❌ restore failed ({e})")
+        if not out:
+            return "ℹ️ RESTORE_ALL: no actionable result."
+        return "🔁 RESTORE_ALL completed:\n" + "\n".join(out)
 
     # ------------------------------------------------------------------
     # Spread

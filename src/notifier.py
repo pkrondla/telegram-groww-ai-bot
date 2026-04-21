@@ -1,4 +1,5 @@
 from __future__ import annotations
+import asyncio
 import requests
 from .config import Config
 from .logger import logger
@@ -40,6 +41,7 @@ class Notifier:
             "EXIT_ALL": "🚨",
             "TRAIL_SL": "📌",
             "RESTORE_SL": "🔁",
+            "RESTORE_ALL": "🔁",
             "UPDATE_TGT": "🎯",
             "EXTEND_RANGE": "📶",
             "RECONCILE": "🧾",
@@ -85,13 +87,29 @@ class Notifier:
     async def _send_via_bot(self, message: str, *, parse_mode: str = "Markdown"):
         try:
             url = f"https://api.telegram.org/bot{Config.BOT_TOKEN}/sendMessage"
-            resp = requests.post(
+            resp = await asyncio.to_thread(
+                requests.post,
                 url,
                 data={"chat_id": Config.ADMIN_ID, "text": message, "parse_mode": parse_mode},
                 timeout=10,
             )
             if not resp.ok:
-                logger.warning(f"Notifier: Bot API returned {resp.status_code}: {resp.text[:200]}")
+                body = (resp.text or "")[:500]
+                logger.warning(f"Notifier: Bot API returned {resp.status_code}: {body[:200]}")
+                # Some runtime messages contain Markdown-sensitive characters
+                # (e.g. underscores in [VOL_SL]). Retry as plain text.
+                if "can't parse entities" in body.lower():
+                    plain_resp = await asyncio.to_thread(
+                        requests.post,
+                        url,
+                        data={"chat_id": Config.ADMIN_ID, "text": message},
+                        timeout=10,
+                    )
+                    if not plain_resp.ok:
+                        logger.warning(
+                            f"Notifier: Plain-text retry failed {plain_resp.status_code}: "
+                            f"{(plain_resp.text or '')[:200]}"
+                        )
         except Exception as e:
             logger.error(f"Notifier: Bot API send failed: {e}")
             await self._send_via_session(message)

@@ -2,6 +2,19 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Optional
 
+def _to_positive_float_list(values) -> list[float]:
+    out: list[float] = []
+    if not isinstance(values, list):
+        return out
+    for item in values:
+        try:
+            v = float(item)
+        except Exception:
+            continue
+        if v > 0:
+            out.append(v)
+    return out
+
 
 @dataclass
 class TradeLeg:
@@ -51,6 +64,7 @@ class TradeSignal:
     entry_range: list[float] = field(default_factory=lambda: [0.0, 0.0])
     stop_loss: float = 0.0
     target: float = 0.0
+    targets: list[float] = field(default_factory=list)
     size_override_mode: str = ""
     size_override_reason: str = ""
 
@@ -112,6 +126,7 @@ class TradeSignal:
             entry_range=list(data.get("entry_range", [0.0, 0.0])),
             stop_loss=float(data.get("stop_loss", 0) or 0),
             target=float(data.get("target", 0) or 0),
+            targets=_to_positive_float_list(data.get("targets") or []),
             size_override_mode=str(data.get("size_override_mode", "") or ""),
             size_override_reason=str(data.get("size_override_reason", "") or ""),
             raw_child_text=raw_child,
@@ -163,6 +178,7 @@ class TradeSignal:
             "buy_range_max": self.buy_range_max,
             "stop_loss": self.stop_loss,
             "target": self.target,
+            "targets": list(self.targets or []),
             "is_trade": True,
             "size_override_mode": self.size_override_mode,
             "size_override_reason": self.size_override_reason,

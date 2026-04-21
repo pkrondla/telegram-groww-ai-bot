@@ -616,7 +616,22 @@ class Trader:
                 )
             raise
         new_id = self._extract_smart_order_id(resp, fallback=rearm_ref)
-        self._save_active_trade(symbol, new_id, stop_loss=raw_sl, target=raw_tgt)
+        self._save_active_trade(
+            symbol,
+            new_id,
+            stop_loss=raw_sl,
+            target=raw_tgt,
+            oco_legs=[
+                {
+                    "smart_order_id": str(new_id or ""),
+                    "qty": int(qty),
+                    "target_signal": float(raw_tgt),
+                    "target_broker": float(eff_tgt),
+                    "target_index": 1,
+                    "status": "ACTIVE",
+                }
+            ],
+        )
         trades = self._load_active_trades()
         nrec = self._normalize_active_trade_record(trades.get(symbol))
         nrec["protection_armed_date"] = today
@@ -689,6 +704,73 @@ class Trader:
                 stats["alerts"].append(f"❌ OCO re-arm failed for {symbol}: {e}")
         return stats
 
+    def admin_rearm_protection_for_active_trades(self) -> str:
+        """
+        Admin-triggered OCO re-arm sweep.
+        Tries to re-arm protection for all locally active trades that still have
+        an open broker position. Safe to run multiple times.
+        """
+        if self.client is None:
+            return "⚠️ REARM skipped: Groww client not initialized."
+
+        local = self._load_active_trades()
+        if not local:
+            return "ℹ️ REARM: no active trades in local book."
+
+        positions_map = self._active_positions_map()
+        if not positions_map:
+            return "ℹ️ REARM: no open broker positions found."
+
+        rearmed = 0
+        already = 0
+        skipped = 0
+        failed = 0
+        details: list[str] = []
+
+        for symbol, raw in local.items():
+            rec = self._normalize_active_trade_record(raw)
+            if rec.get("smart_order_id") == self.DRY_RUN_PLACEHOLDER_ORDER_ID:
+                skipped += 1
+                details.append(f"• {symbol}: skipped (dry-run placeholder)")
+                continue
+            pos = positions_map.get(symbol)
+            if not pos:
+                skipped += 1
+                details.append(f"• {symbol}: skipped (not open on broker)")
+                continue
+            try:
+                # Force an attempt now, regardless of today's protection_armed_date.
+                rec_force = dict(rec)
+                rec_force["protection_armed_date"] = ""
+                ok, alert = self._rearm_oco_for_open_position(symbol, rec_force, pos)
+                if ok:
+                    rearmed += 1
+                    details.append(f"• {symbol}: re-armed")
+                    continue
+                if alert and "already attached" in alert.lower():
+                    already += 1
+                    details.append(f"• {symbol}: protection already present")
+                elif alert:
+                    failed += 1
+                    details.append(f"• {symbol}: {alert}")
+                else:
+                    skipped += 1
+                    details.append(f"• {symbol}: no action")
+            except Exception as e:
+                failed += 1
+                details.append(f"• {symbol}: failed ({e})")
+
+        summary = (
+            "🛡️ REARM sweep completed\n"
+            f"Re-armed: {rearmed}\n"
+            f"Already protected: {already}\n"
+            f"Skipped: {skipped}\n"
+            f"Failed: {failed}"
+        )
+        if details:
+            return summary + "\n\n" + "\n".join(details[:25])
+        return summary
+
     def reconcile_trade_symbol(self, symbol: str) -> bool:
         """
         Reconcile a single active-trade symbol against broker positions.
@@ -756,6 +838,41 @@ class Trader:
         if isinstance(record, dict):
             out = dict(record)
             out["smart_order_id"] = str(out.get("smart_order_id") or out.get("order_id") or "")
+            legs = out.get("oco_legs")
+            norm_legs = []
+            if isinstance(legs, list):
+                for item in legs:
+                    if not isinstance(item, dict):
+                        continue
+                    oid = str(item.get("smart_order_id") or item.get("order_id") or "")
+                    if not oid:
+                        continue
+                    try:
+                        qty = int(float(item.get("qty") or 0))
+                    except Exception:
+                        qty = 0
+                    try:
+                        tgt_sig = float(item.get("target_signal") or 0)
+                    except Exception:
+                        tgt_sig = 0.0
+                    try:
+                        tgt_b = float(item.get("target_broker") or 0)
+                    except Exception:
+                        tgt_b = 0.0
+                    norm_legs.append(
+                        {
+                            "smart_order_id": oid,
+                            "qty": max(0, qty),
+                            "target_signal": tgt_sig,
+                            "target_broker": tgt_b,
+                            "target_index": int(item.get("target_index") or 0),
+                            "status": str(item.get("status") or "ACTIVE").upper(),
+                        }
+                    )
+            if norm_legs:
+                out["oco_legs"] = norm_legs
+                if not out.get("smart_order_id"):
+                    out["smart_order_id"] = str(norm_legs[0].get("smart_order_id") or "")
             if "stop_loss" in out:
                 try:
                     out["stop_loss"] = float(out.get("stop_loss") or 0)
@@ -826,6 +943,7 @@ class Trader:
         opened_at_ist: str | None = None,
         entry_order_id: str | None = None,
         spread_group_id: str | None = None,
+        oco_legs: list[dict] | None = None,
     ):
         trades = self._load_active_trades()
         current = self._normalize_active_trade_record(trades.get(symbol))
@@ -853,6 +971,26 @@ class Trader:
             current["entry_order_id"] = str(entry_order_id)
         if spread_group_id is not None:
             current["spread_group_id"] = str(spread_group_id)
+        if oco_legs is not None:
+            current["oco_legs"] = []
+            for leg in oco_legs:
+                if not isinstance(leg, dict):
+                    continue
+                oid_leg = str(leg.get("smart_order_id") or "")
+                if not oid_leg:
+                    continue
+                current["oco_legs"].append(
+                    {
+                        "smart_order_id": oid_leg,
+                        "qty": int(float(leg.get("qty") or 0)),
+                        "target_signal": float(leg.get("target_signal") or 0),
+                        "target_broker": float(leg.get("target_broker") or 0),
+                        "target_index": int(leg.get("target_index") or 0),
+                        "status": str(leg.get("status") or "ACTIVE").upper(),
+                    }
+                )
+            if current.get("oco_legs") and not current.get("smart_order_id"):
+                current["smart_order_id"] = str(current["oco_legs"][0].get("smart_order_id") or "")
         if oid and oid != self.DRY_RUN_PLACEHOLDER_ORDER_ID:
             current["protection_armed_date"] = self._today_ist_iso()
         trades[symbol] = current
@@ -869,6 +1007,24 @@ class Trader:
         if not rec:
             return None
         return rec.get("smart_order_id")
+
+    @staticmethod
+    def _oco_ids_from_record(rec: dict | None) -> list[str]:
+        if not rec:
+            return []
+        ids: list[str] = []
+        legs = rec.get("oco_legs")
+        if isinstance(legs, list):
+            for leg in legs:
+                if not isinstance(leg, dict):
+                    continue
+                oid = str(leg.get("smart_order_id") or "")
+                if oid and oid not in ids:
+                    ids.append(oid)
+        primary = str(rec.get("smart_order_id") or "")
+        if primary and primary not in ids:
+            ids.append(primary)
+        return ids
 
     def _update_active_trade_levels(
         self,
@@ -892,6 +1048,10 @@ class Trader:
             rec["stop_loss"] = float(stop_loss)
         if target is not None:
             rec["target"] = float(target)
+            if isinstance(rec.get("oco_legs"), list):
+                for leg in rec["oco_legs"]:
+                    if isinstance(leg, dict):
+                        leg["target_signal"] = float(target)
         if sl_true is not None:
             rec["sl_true"] = float(sl_true)
         if sl_widened is not None:
@@ -934,16 +1094,35 @@ class Trader:
         )
         return float(sl)
 
+    def _modify_oco_target(self, order_id: str, new_target: float) -> float:
+        if not self.client:
+            raise RuntimeError("Groww client not initialized")
+        tgt = self._round_price_to_tick(new_target, mode="down")
+        if tgt <= 0:
+            raise RuntimeError(f"Invalid target after tick-rounding: {new_target}")
+        self.client.modify_smart_order(
+            smart_order_id=order_id,
+            smart_order_type=self.client.SMART_ORDER_TYPE_OCO,
+            segment=self.SMART_SEGMENT,
+            target={
+                "trigger_price": float(tgt),
+                "price": float(tgt),
+                "order_type": "LIMIT",
+            },
+        )
+        return float(tgt)
+
     def restore_channel_sl(self, symbol: str, *, source: str) -> str:
         """
         Restore broker OCO SL to persisted sl_true (Policy 1 source of truth).
         Marks scheduled restore idempotency for today when source is admin/channel restore.
         """
-        order_id = self._get_order_id(symbol)
+        rec = self._get_active_trade_record(symbol) or {}
+        order_ids = self._oco_ids_from_record(rec)
+        order_id = order_ids[0] if order_ids else None
         if not order_id:
             return f"⚠️ NO ACTIVE TRADE: Could not find an open Order ID for {symbol}."
         if order_id == self.DRY_RUN_PLACEHOLDER_ORDER_ID:
-            rec = self._get_active_trade_record(symbol) or {}
             sl_true = float(rec.get("sl_true") or rec.get("stop_loss") or 0)
             if sl_true <= 0:
                 return f"⚠️ RESTORE_SL skipped for {symbol}: missing sl_true in local book."
@@ -965,13 +1144,57 @@ class Trader:
         if not self.client:
             return f"⚠️ NO GROWW CLIENT: Cannot RESTORE_SL for {symbol}. Configure GROWW_API_KEY."
 
-        rec = self._get_active_trade_record(symbol) or {}
         sl_true = float(rec.get("sl_true") or rec.get("stop_loss") or 0)
         if sl_true <= 0:
             return f"⚠️ RESTORE_SL skipped for {symbol}: missing sl_true in local book."
 
-        logger.info(f"[STAGE 4] RESTORE_SL ({source}): modify_smart_order {symbol} → sl_true={sl_true}.")
-        sl_true = self._modify_oco_sl(symbol, order_id, sl_true)
+        logger.info(
+            f"[STAGE 4] RESTORE_SL ({source}): modify_smart_order {symbol} "
+            f"ids={order_ids} → sl_true={sl_true}."
+        )
+        try:
+            for oid in order_ids:
+                sl_true = self._modify_oco_sl(symbol, oid, sl_true)
+        except Exception as e:
+            err = str(e or "")
+            low = err.lower()
+            # Broker-side OCO can be cancelled/expired overnight while position remains open.
+            # In that case, create a fresh OCO for the live position instead of failing restore.
+            if (
+                "cannot be modified" in low
+                or "does not exist" in low
+                or "not exist" in low
+                or "not found" in low
+            ):
+                pos, qty = self._get_open_position_for_symbol(symbol)
+                if qty == 0:
+                    return (
+                        f"⚠️ RESTORE_SL failed for {symbol}: broker order is stale and no open position exists. "
+                        f"Error: {err}"
+                    )
+                rec_rearm = dict(rec)
+                rec_rearm["stop_loss"] = float(sl_true)
+                # Force immediate re-arm regardless of today's armed date.
+                rec_rearm["protection_armed_date"] = ""
+                ok, alert = self._rearm_oco_for_open_position(symbol, rec_rearm, pos or {})
+                if ok:
+                    today = self._today_ist_iso()
+                    self._update_active_trade_levels(
+                        symbol,
+                        stop_loss=sl_true,
+                        sl_true=sl_true,
+                        sl_mode="NORMAL",
+                        sl_widened=0.0,
+                        vol_sl_needs_restore=False,
+                        vol_sl_restore_done_for=today,
+                    )
+                    return (
+                        f"🔁 RESTORE_SL RE-ARMED: {symbol} had no modifiable OCO; "
+                        f"created fresh protection at sl_true={sl_true} ({source})."
+                    )
+                if alert:
+                    return f"⚠️ RESTORE_SL re-arm attempt for {symbol}: {alert}"
+            raise
         today = self._today_ist_iso()
         self._update_active_trade_levels(
             symbol,
@@ -1097,6 +1320,91 @@ class Trader:
                 if v:
                     return str(v)
         return fallback
+
+    @staticmethod
+    def _parse_split_config(raw: str, expected_parts: int) -> list[int]:
+        parts = [p.strip() for p in str(raw or "").split(":") if p.strip()]
+        if len(parts) != expected_parts:
+            raise ValueError(f"Expected {expected_parts} ratio parts, got {len(parts)}")
+        vals = [int(p) for p in parts]
+        if any(v <= 0 for v in vals):
+            raise ValueError("Ratio values must be positive")
+        if sum(vals) != 100:
+            raise ValueError("Ratio values must sum to 100")
+        return vals
+
+    @classmethod
+    def _signal_targets(cls, trade_data: dict) -> list[float]:
+        out: list[float] = []
+        raw_many = trade_data.get("targets")
+        if isinstance(raw_many, list):
+            for x in raw_many:
+                try:
+                    v = float(x)
+                except Exception:
+                    continue
+                if v > 0:
+                    out.append(v)
+        if not out:
+            try:
+                single = float(trade_data.get("target") or 0)
+                if single > 0:
+                    out = [single]
+            except Exception:
+                out = []
+        return out[:3]
+
+    @classmethod
+    def _build_oco_legs_plan(
+        cls,
+        *,
+        total_qty: int,
+        lot_size: int,
+        signal_targets: list[float],
+    ) -> list[dict]:
+        qty = int(total_qty or 0)
+        if qty <= 0:
+            return []
+        targets = [float(t) for t in (signal_targets or []) if float(t or 0) > 0][:3]
+        if not targets:
+            return []
+        if not Config.MULTI_TARGET_ENABLED or len(targets) == 1:
+            return [{"qty": qty, "target_signal": float(targets[0]), "target_index": 1}]
+
+        unit = int(lot_size or 0)
+        if unit <= 0:
+            unit = 1
+        total_lots = max(1, qty // unit)
+        if len(targets) == 2:
+            ratios = cls._parse_split_config(Config.TARGET_SPLIT_2, 2)
+            t1 = min(int(math.ceil(total_lots * ratios[0] / 100.0)), total_lots)
+            t2 = total_lots - t1
+            lot_splits = [t1, t2]
+        else:
+            ratios = cls._parse_split_config(Config.TARGET_SPLIT_3, 3)
+            t1 = min(int(math.ceil(total_lots * ratios[0] / 100.0)), total_lots)
+            rem = total_lots - t1
+            t2 = min(int(math.ceil(total_lots * ratios[1] / 100.0)), rem)
+            t3 = total_lots - (t1 + t2)
+            lot_splits = [t1, t2, t3]
+
+        plans: list[dict] = []
+        used_qty = 0
+        for i, lots in enumerate(lot_splits):
+            q = int(lots) * unit
+            if q <= 0:
+                continue
+            plans.append({"qty": q, "target_signal": float(targets[i]), "target_index": i + 1})
+            used_qty += q
+        if not plans:
+            return [{"qty": qty, "target_signal": float(targets[0]), "target_index": 1}]
+        if used_qty < qty:
+            plans[0]["qty"] = int(plans[0]["qty"]) + int(qty - used_qty)
+        elif used_qty > qty:
+            overflow = used_qty - qty
+            plans[-1]["qty"] = max(0, int(plans[-1]["qty"]) - int(overflow))
+            plans = [p for p in plans if int(p.get("qty") or 0) > 0]
+        return plans
 
     def _load_pending_management(self) -> list[dict]:
         if not os.path.exists(self.pending_management_file):
@@ -1670,44 +1978,74 @@ class Trader:
     ) -> str | None:
         if not self._should_attach_oco(trade_data):
             return None
-        raw_tgt = float(trade_data["target"])
-        eff_tgt = self._take_profit_order_price(raw_tgt)
-        logger.info(
-            f"OCO target: signal {raw_tgt} → broker {eff_tgt} (TARGET_BUFFER_PCT={Config.TARGET_BUFFER_PCT})"
-        )
+        signal_targets = self._signal_targets(trade_data)
+        if not signal_targets:
+            return None
         broker_sl = self._round_price_to_tick(float(trade_data["stop_loss"]), mode="nearest")
         if broker_sl <= 0:
             raise RuntimeError(f"Invalid stop loss after tick-rounding: {trade_data.get('stop_loss')}")
-        oco_ref = str(uuid.uuid4())[:15]
-        quantity = self._compute_order_quantity(trade_data)
-        oco_resp = self.client.create_smart_order(
-            smart_order_type=self.client.SMART_ORDER_TYPE_OCO,
-            reference_id=oco_ref,
-            segment=segment,
-            trading_symbol=symbol,
-            quantity=quantity,
-            net_position_quantity=quantity,
-            transaction_type="SELL",
-            product_type=product_type,
-            exchange=exchange,
-            duration="DAY",
-            target={
-                "trigger_price": eff_tgt,
-                "price": eff_tgt,
-                "order_type": "LIMIT",
-            },
-            stop_loss={
-                "trigger_price": float(broker_sl),
-                "price": float(broker_sl),
-                "order_type": "SL",
-            },
-        )
-        smart_order_id = self._extract_smart_order_id(oco_resp, fallback=oco_ref)
+        quantity = int(trade_data.get("quantity") or self._compute_order_quantity(trade_data))
+        lot_size = int(trade_data.get("lot_size") or 0)
+        try:
+            plan = self._build_oco_legs_plan(total_qty=quantity, lot_size=lot_size, signal_targets=signal_targets)
+        except Exception as e:
+            logger.warning(f"Multi-target split config invalid; falling back to single target OCO: {e}")
+            plan = [{"qty": quantity, "target_signal": float(signal_targets[0]), "target_index": 1}]
+        if not plan:
+            return None
+
+        created_legs: list[dict] = []
+        for leg in plan:
+            leg_qty = int(leg["qty"])
+            leg_tgt_signal = float(leg["target_signal"])
+            eff_tgt = self._take_profit_order_price(leg_tgt_signal)
+            if eff_tgt <= 0:
+                raise RuntimeError(f"Invalid buffered target for leg target={leg_tgt_signal}")
+            oco_ref = str(uuid.uuid4())[:15]
+            logger.info(
+                f"OCO leg create {symbol}: qty={leg_qty}, target(signal={leg_tgt_signal}, broker={eff_tgt}), "
+                f"sl={broker_sl}"
+            )
+            oco_resp = self.client.create_smart_order(
+                smart_order_type=self.client.SMART_ORDER_TYPE_OCO,
+                reference_id=oco_ref,
+                segment=segment,
+                trading_symbol=symbol,
+                quantity=leg_qty,
+                net_position_quantity=leg_qty,
+                transaction_type="SELL",
+                product_type=product_type,
+                exchange=exchange,
+                duration="DAY",
+                target={
+                    "trigger_price": eff_tgt,
+                    "price": eff_tgt,
+                    "order_type": "LIMIT",
+                },
+                stop_loss={
+                    "trigger_price": float(broker_sl),
+                    "price": float(broker_sl),
+                    "order_type": "SL",
+                },
+            )
+            smart_order_id = self._extract_smart_order_id(oco_resp, fallback=oco_ref)
+            created_legs.append(
+                {
+                    "smart_order_id": str(smart_order_id or ""),
+                    "qty": leg_qty,
+                    "target_signal": leg_tgt_signal,
+                    "target_broker": eff_tgt,
+                    "target_index": int(leg.get("target_index") or 0),
+                    "status": "ACTIVE",
+                }
+            )
+
+        primary_order_id = str(created_legs[0]["smart_order_id"])
         self._save_active_trade(
             symbol,
-            smart_order_id,
+            primary_order_id,
             stop_loss=float(broker_sl),
-            target=float(raw_tgt),
+            target=float(signal_targets[0]),
             entry_side=str(trade_data.get("action") or "BUY").upper(),
             entry_qty=int(trade_data.get("quantity") or 0),
             lot_size=int(trade_data.get("lot_size") or 0),
@@ -1715,10 +2053,13 @@ class Trader:
             opened_at_ist=self._now_ist_iso(),
             entry_order_id=str(entry_order_id or ""),
             spread_group_id=str(trade_data.get("spread_group_id") or ""),
+            oco_legs=created_legs,
         )
-        return (
-            f"Targets: signal {raw_tgt} → broker {eff_tgt} | SL: {trade_data['stop_loss']}"
-        )
+        leg_lines = [
+            f"T{i+1} qty={int(l['qty'])}: signal {float(l['target_signal'])} → broker {float(l['target_broker'])}"
+            for i, l in enumerate(created_legs)
+        ]
+        return "Targets:\n" + "\n".join(leg_lines) + f"\nSL: {trade_data['stop_loss']}"
 
     def _finalize_option_order(
         self,
@@ -2393,8 +2734,10 @@ class Trader:
                             f"⏳ {action} queued for {symbol}: market is {market_state} (IST). "
                             f"Queue id={qid}."
                         )
-                order_id = self._get_order_id(symbol)
-                logger.info(f"[STAGE 4] Order ID for {symbol}: {order_id}")
+                rec_active = self._get_active_trade_record(symbol) or {}
+                order_ids = self._oco_ids_from_record(rec_active)
+                order_id = order_ids[0] if order_ids else None
+                logger.info(f"[STAGE 4] Order IDs for {symbol}: {order_ids}")
                 if not order_id:
                     logger.warning(f"[STAGE 4] No order ID found for {symbol} in active_trades.json.")
                     return f"⚠️ NO ACTIVE TRADE: Could not find an open Order ID for {symbol}."
@@ -2466,18 +2809,21 @@ class Trader:
                 if action == "EXIT_ALL":
                     rec_before = self._get_active_trade_record(symbol) or {}
                     # 1) Cancel OCO protection (best effort).
-                    try:
-                        logger.info(
-                            f"[STAGE 4] Calling Groww cancel_smart_order for {symbol} "
-                            f"(segment={self.SMART_SEGMENT}, smart_order_type=OCO, id={order_id})."
-                        )
-                        self.client.cancel_smart_order(
-                            segment=self.SMART_SEGMENT,
-                            smart_order_type=self.client.SMART_ORDER_TYPE_OCO,
-                            smart_order_id=order_id,
-                        )
-                    except Exception as e:
-                        logger.warning(f"[STAGE 4] EXIT_ALL cancel_smart_order warning for {symbol}: {e}")
+                    for oid in order_ids:
+                        try:
+                            logger.info(
+                                f"[STAGE 4] Calling Groww cancel_smart_order for {symbol} "
+                                f"(segment={self.SMART_SEGMENT}, smart_order_type=OCO, id={oid})."
+                            )
+                            self.client.cancel_smart_order(
+                                segment=self.SMART_SEGMENT,
+                                smart_order_type=self.client.SMART_ORDER_TYPE_OCO,
+                                smart_order_id=oid,
+                            )
+                        except Exception as e:
+                            logger.warning(
+                                f"[STAGE 4] EXIT_ALL cancel_smart_order warning for {symbol} id={oid}: {e}"
+                            )
 
                     # 2) Flatten any remaining net position with MARKET order.
                     pos, qty = self._get_open_position_for_symbol(symbol)
@@ -2571,7 +2917,8 @@ class Trader:
                         f"[STAGE 4] Calling Groww modify_smart_order for {symbol}: "
                         f"sl_true={new_sl} broker_sl={broker_sl}."
                     )
-                    broker_sl = self._modify_oco_sl(symbol, order_id, broker_sl)
+                    for oid in order_ids:
+                        broker_sl = self._modify_oco_sl(symbol, oid, broker_sl)
                     self._update_active_trade_levels(
                         symbol,
                         stop_loss=broker_sl,
@@ -2598,16 +2945,30 @@ class Trader:
                         f"[STAGE 4] Calling Groww modify_smart_order for {symbol}: "
                         f"target signal {raw_tgt} → broker {eff_tgt}."
                     )
-                    self.client.modify_smart_order(
-                        smart_order_id=order_id,
-                        smart_order_type=self.client.SMART_ORDER_TYPE_OCO,
-                        segment=self.SMART_SEGMENT,
-                        target={
-                            "trigger_price": eff_tgt,
-                            "price": eff_tgt,
-                            "order_type": "LIMIT",
-                        },
-                    )
+                    rec_live = self._get_active_trade_record(symbol) or {}
+                    legs = rec_live.get("oco_legs")
+                    if isinstance(legs, list) and legs:
+                        for leg in legs:
+                            if not isinstance(leg, dict):
+                                continue
+                            oid = str(leg.get("smart_order_id") or "")
+                            if not oid:
+                                continue
+                            leg_target_signal = float(leg.get("target_signal") or raw_tgt)
+                            leg_target_broker = self._take_profit_order_price(leg_target_signal)
+                            if leg_target_broker <= 0:
+                                leg_target_broker = eff_tgt
+                            self._modify_oco_target(oid, leg_target_broker)
+                            leg["target_broker"] = float(leg_target_broker)
+                        self._save_active_trade(
+                            symbol,
+                            order_id,
+                            target=raw_tgt,
+                            oco_legs=legs,
+                        )
+                    else:
+                        for oid in order_ids:
+                            self._modify_oco_target(oid, eff_tgt)
                     self._update_active_trade_levels(symbol, target=raw_tgt)
                     logger.info(
                         f"[STAGE 4] UPDATE_TGT SUCCESS: {symbol} broker target {eff_tgt} (signal {raw_tgt})."

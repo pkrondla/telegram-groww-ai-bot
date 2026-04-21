@@ -79,6 +79,10 @@ class Assistant:
         "RESTORE STOP",
         "RESTORE STOPLOSS",
         "RESTORE STOP LOSS",
+        "KEEP SL/TSL NOW IN SYSTEM",
+        "KEEP SL TSL NOW IN SYSTEM",
+        "KEEP SL NOW IN SYSTEM",
+        "KEEP TSL NOW IN SYSTEM",
         "RESET SL",
         "RESET STOP",
         "REVERT SL",
@@ -183,6 +187,7 @@ class Assistant:
             "SELL",
             "TRAIL_SL",
             "RESTORE_SL",
+            "RESTORE_ALL",
             "EXIT_ALL",
             "EXTEND_RANGE",
             "UPDATE_TGT",
@@ -282,13 +287,13 @@ class Assistant:
             if not n:
                 continue
             for phrase in self._EXIT_PHRASES:
-                if phrase in n:
+                if self._normalize_for_match(phrase) in n:
                     return ("EXIT_ALL", None)
             for phrase in self._RESTORE_SL_PHRASES:
-                if phrase in n:
+                if self._normalize_for_match(phrase) in n:
                     return ("RESTORE_SL", None)
             for phrase in self._TRAIL_PHRASES:
-                if phrase in n:
+                if self._normalize_for_match(phrase) in n:
                     sl = self._extract_trail_sl_price(chunk)
                     return ("TRAIL_SL", sl)
         return None
@@ -303,13 +308,13 @@ class Assistant:
         if not n:
             return False
         for phrase in cls._EXIT_PHRASES:
-            if phrase in n:
+            if cls._normalize_for_match(phrase) in n:
                 return True
         for phrase in cls._TRAIL_PHRASES:
-            if phrase in n:
+            if cls._normalize_for_match(phrase) in n:
                 return True
         for phrase in cls._RESTORE_SL_PHRASES:
-            if phrase in n:
+            if cls._normalize_for_match(phrase) in n:
                 return True
         return False
 
@@ -468,6 +473,32 @@ class Assistant:
             except ValueError:
                 return None
         return None
+
+    @staticmethod
+    def _extract_signal_targets(text: str) -> list[float]:
+        """
+        Extract explicit multi-target ladder from signal text.
+        Examples: "TARGETS: 68, 88" or "TGT : 18/24/36+".
+        """
+        raw = str(text or "")
+        if not raw.strip():
+            return []
+        out: list[float] = []
+        seen: set[float] = set()
+        for line in raw.replace("\r", "\n").split("\n"):
+            m = re.search(r"\b(?:TARGETS?|TGT)\b\s*[:\-]?\s*(.+)$", line, flags=re.IGNORECASE)
+            if not m:
+                continue
+            for num in re.findall(r"(\d+(?:\.\d+)?)\+?", m.group(1)):
+                try:
+                    value = float(num)
+                except ValueError:
+                    continue
+                if value <= 0 or value in seen:
+                    continue
+                out.append(value)
+                seen.add(value)
+        return out
 
     @classmethod
     def _detect_update_tgt(cls, tail: str) -> float | None:
@@ -1127,6 +1158,27 @@ Rules:
             return data
 
         if forced and forced[0] == "RESTORE_SL":
+            # Broadcast re-arm phrase without symbol/reply context:
+            # route as RESTORE_ALL over current active book.
+            if not has_context and not self._has_option_hint(text):
+                logger.info("[STAGE 2] Signal ready: RESTORE_ALL (broadcast restore phrase without symbol).")
+                return {
+                    "is_trade": True,
+                    "action": "RESTORE_ALL",
+                    "official_symbol": "",
+                    "stock": "ALL",
+                    "trading_symbol": "ALL",
+                    "strike": "",
+                    "option_type": "",
+                    "expiry_day": "",
+                    "expiry_month": "",
+                    "expiry_year": "",
+                    "entry_range": [0, 0],
+                    "buy_range_min": 0.0,
+                    "buy_range_max": 0.0,
+                    "stop_loss": 0,
+                    "target": 0,
+                }
             logger.info("[STAGE 2] Path: forced RESTORE_SL — calling LLM for symbol extraction only.")
             data = self._llm_parse_forced(
                 text,
@@ -1537,6 +1589,19 @@ Return is_trade: false for:
             logger.info(f"[STAGE 2] Validator passed: {reason}")
             data = self._apply_alias_to_data(data)
             data = self._apply_symbol_factory(data)
+            if str(data.get("action") or "").upper() == "BUY":
+                ladder_source = " ".join(
+                    [
+                        str(text or ""),
+                        str(parent_text or ""),
+                        str(child_text or ""),
+                        str(tail or ""),
+                    ]
+                )
+                signal_targets = self._extract_signal_targets(ladder_source)
+                if len(signal_targets) >= 2:
+                    data["targets"] = signal_targets[:3]
+                    data["target"] = float(signal_targets[0])
 
             logger.info(f"[STAGE 2] Signal ready: {data['action']} {data['stock']} "
                         f"strike={data.get('strike')} {data.get('option_type')} "

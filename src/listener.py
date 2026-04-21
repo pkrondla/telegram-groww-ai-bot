@@ -403,11 +403,11 @@ class BotListener:
                 "• `DRYRUN ON` — no live entry orders\n"
                 "• `DRYRUN OFF` — live entry orders enabled\n\n"
                 "**Single-trade management (no reply context needed)**\n"
-                "• `EXIT ALL <TRADING_SYMBOL>`\n"
+                "• `EXIT <TRADING_SYMBOL>`\n"
                 "• `TSL TO <PRICE> <TRADING_SYMBOL>`\n"
                 "• `CHANGE TARGET TO <PRICE> <TRADING_SYMBOL>`\n"
                 "• `RESTORE SL <TRADING_SYMBOL>`\n\n"
-                "Example: `EXIT ALL NIFTY26424300PE`"
+                "Example: `EXIT NIFTY26424300PE`"
             )
         elif command == "dryrun_on":
             self.trader.execute_orders = False

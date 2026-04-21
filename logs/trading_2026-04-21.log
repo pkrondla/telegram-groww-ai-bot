@@ -657,3 +657,85 @@ TARGETS : 52, 80 [2x,3x]
 2026-04-21 16:04:03 [INFO] :: Pending entry watcher started (every 30s).
 2026-04-21 16:04:03 [INFO] :: Management queue watcher started (every 10s).
 2026-04-21 16:04:03 [INFO] :: Active trade reconciler started (every 900s).
+2026-04-21 16:12:17 [INFO] :: Bot Process Terminated.
+2026-04-21 16:12:17 [INFO] :: Bot Manually Stopped by User.
+2026-04-21 16:12:24 [INFO] :: Initializing Industrial-Standard Trading Bot...
+2026-04-21 16:12:29 [INFO] :: Startup active-trade maintenance: active=6 removed=0 rearmed=0
+2026-04-21 16:12:31 [INFO] :: SymbolManager: cache is fresh, loading from symbol_map.json
+2026-04-21 16:12:31 [INFO] :: SymbolManager: cache loaded — 220 symbols, 363 aliases.
+2026-04-21 16:12:31 [INFO] :: Connected to Telegram as: Praveen
+2026-04-21 16:12:31 [INFO] :: 📡 LISTENING TO: CHARTIANS [ FNO ] PREMIUM CHANNEL (-1002153367077)
+2026-04-21 16:12:31 [INFO] :: 🔔 NOTIFYING ADMIN: Praveen Rondla (1447109810)
+2026-04-21 16:12:32 [INFO] :: Bot Connection Established.
+2026-04-21 16:12:33 [INFO] :: Market Alert Scheduler Started.
+2026-04-21 16:12:33 [INFO] :: Volatility SL scheduler started (every 30s, IST widen/restore).
+2026-04-21 16:12:33 [INFO] :: EOD summary scheduler started (every 1500s).
+2026-04-21 16:12:33 [INFO] :: Pending entry watcher started (every 30s).
+2026-04-21 16:12:33 [INFO] :: Management queue watcher started (every 10s).
+2026-04-21 16:12:33 [INFO] :: Active trade reconciler started (every 900s).
+2026-04-21 16:13:51 [INFO] :: [STAGE 1] Admin override command: help
+2026-04-21 16:14:51 [INFO] :: Bot Process Terminated.
+2026-04-21 16:14:51 [INFO] :: Bot Manually Stopped by User.
+2026-04-21 16:15:12 [INFO] :: Initializing Industrial-Standard Trading Bot...
+2026-04-21 16:15:17 [INFO] :: Startup active-trade maintenance: active=6 removed=0 rearmed=0
+2026-04-21 16:15:19 [INFO] :: SymbolManager: cache is fresh, loading from symbol_map.json
+2026-04-21 16:15:19 [INFO] :: SymbolManager: cache loaded — 220 symbols, 363 aliases.
+2026-04-21 16:15:20 [INFO] :: Connected to Telegram as: Praveen
+2026-04-21 16:15:20 [INFO] :: 📡 LISTENING TO: CHARTIANS [ FNO ] PREMIUM CHANNEL (-1002153367077)
+2026-04-21 16:15:20 [INFO] :: 🔔 NOTIFYING ADMIN: Praveen Rondla (1447109810)
+2026-04-21 16:15:21 [INFO] :: Bot Connection Established.
+2026-04-21 16:15:23 [INFO] :: Market Alert Scheduler Started.
+2026-04-21 16:15:23 [INFO] :: Volatility SL scheduler started (every 30s, IST widen/restore).
+2026-04-21 16:15:23 [INFO] :: EOD summary scheduler started (every 1500s).
+2026-04-21 16:15:23 [INFO] :: Pending entry watcher started (every 30s).
+2026-04-21 16:15:23 [INFO] :: Management queue watcher started (every 10s).
+2026-04-21 16:15:23 [INFO] :: Active trade reconciler started (every 900s).
+2026-04-21 16:15:27 [INFO] :: [STAGE 1] Admin override command: help
+2026-04-21 16:30:23 [INFO] :: [RECONCILE] Polling broker for 1 active trade(s)...
+2026-04-21 16:45:24 [INFO] :: [RECONCILE] Polling broker for 1 active trade(s)...
+2026-04-21 17:00:24 [INFO] :: [RECONCILE] Polling broker for 1 active trade(s)...
+2026-04-21 17:01:03 [INFO] :: ────────────────────────────────────────────────────────────
+2026-04-21 17:01:03 [INFO] :: [STAGE 1] MESSAGE RECEIVED
+2026-04-21 17:01:03 [INFO] :: [STAGE 1] is_reply=True | child_len=123 | parent_len=62
+2026-04-21 17:01:03 [INFO] :: [STAGE 1] child : TARGET 1 👍 : 9.5 HITS ✅ ✨
+
+TSL TO 7.15 COST
+HOLD FOR 15
+
+#DELHIVERY 480 CE
+7.15 TO 9.5 | GAINS : ₹ 4876.25 / LOT [+32.9%] 💰
+2026-04-21 17:01:03 [INFO] :: [STAGE 1] parent: BUY #DELHIVERY 480 CE APRIL
+
+CMP 6.8-7.5
+SL 5
+
+TGT : 10/15/21+
+2026-04-21 17:01:03 [INFO] :: [STAGE 2] AI parser started.
+2026-04-21 17:01:03 [INFO] :: [STAGE 2] Symbol hint: SYMBOL RESOLUTION HINT (use these exact values for official_symbol):
+  "DELHIVERY" → exact Groww symbol: DELHIVERY
+2026-04-21 17:01:03 [INFO] :: [STAGE 2] Deterministic intent: TRAIL_SL
+2026-04-21 17:01:03 [INFO] :: [STAGE 2] Path: forced TRAIL_SL — calling LLM for symbol extraction only.
+2026-04-21 17:01:07 [INFO] :: [STAGE 2] LLM raw (forced): {'official_symbol': 'DELHIVERY', 'stock': 'DELHIVERY', 'strike': '480', 'option_type': 'CE', 'expiry_day': '01', 'expiry_month': 'APR', 'expiry_year': '2026', 'entry_range': [0, 0], 'stop_loss': 7.15, 'target': 0, 'is_trade': True, 'action': 'TRAIL_SL'}
+2026-04-21 17:01:07 [INFO] :: [STAGE 2] TRAIL_SL companion target detected from HOLD phrase: 15.0
+2026-04-21 17:01:07 [INFO] :: [STAGE 2] Trail SL price: 7.15
+2026-04-21 17:01:07 [INFO] :: [STAGE 2] Expiry 01/APR/2026 is in the past — rolling forward to 01/APR/2026.
+2026-04-21 17:01:07 [INFO] :: [STAGE 2] Signal ready: TRAIL_SL DELHIVERY26APR480CE @ sl=7.15
+2026-04-21 17:01:07 [INFO] :: [STAGE 2] Signal: action=TRAIL_SL | symbol=DELHIVERY26APR480CE | range=0-0 | sl=7.15 | tgt=15.0
+2026-04-21 17:01:07 [INFO] :: [STAGE 3] StateEngine.process: action=TRAIL_SL symbol=DELHIVERY26APR480CE bot_status=ACTIVE
+2026-04-21 17:01:07 [INFO] :: [STAGE 3] TRAIL_SL requested for: DELHIVERY26APR480CE
+2026-04-21 17:01:07 [INFO] :: [STAGE 3] Active book: ['GMRAIRPORT26APR100CE']
+2026-04-21 17:01:07 [INFO] :: [STAGE 3] No active trade matched for 'DELHIVERY26APR480CE' — cannot exit/trail.
+2026-04-21 17:01:07 [INFO] :: [STAGE 4] RESULT: ⚠️ NO ACTIVE TRADE: Could not find an open position for DELHIVERY26APR480CE.
+2026-04-21 17:01:08 [INFO] :: ────────────────────────────────────────────────────────────
+2026-04-21 17:10:32 [INFO] :: ────────────────────────────────────────────────────────────
+2026-04-21 17:10:32 [INFO] :: [STAGE 1] MESSAGE RECEIVED
+2026-04-21 17:10:32 [INFO] :: [STAGE 1] is_reply=False | child_len=24 | parent_len=0
+2026-04-21 17:10:32 [INFO] :: [STAGE 1] child : ACTIVE STOCK OPTIONS NOW
+2026-04-21 17:10:32 [INFO] :: [STAGE 2] AI parser started.
+2026-04-21 17:10:32 [INFO] :: [STAGE 2] Symbol hint: (none matched)
+2026-04-21 17:10:32 [INFO] :: [STAGE 2] Deterministic intent: none
+2026-04-21 17:10:32 [INFO] :: [STAGE 2] Calling LLM (gpt-4o-mini)...
+2026-04-21 17:10:35 [INFO] :: [STAGE 2] LLM raw: is_trade=False action=None symbol=None strike=None type=None expiry=None/None/None entry=None sl=None tgt=None
+2026-04-21 17:10:35 [INFO] :: [STAGE 2] Decision: IGNORE — LLM says not a trade.
+2026-04-21 17:10:35 [INFO] :: [STAGE 2] Parser returned no signal — message ignored.
+2026-04-21 17:10:35 [INFO] :: ────────────────────────────────────────────────────────────

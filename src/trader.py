@@ -1121,11 +1121,11 @@ class Trader:
         order_ids = self._oco_ids_from_record(rec)
         order_id = order_ids[0] if order_ids else None
         if not order_id:
-            return f"⚠️ NO ACTIVE TRADE: Could not find an open Order ID for {symbol}."
+            return f"⚠️ NO ACTIVE TRADE: Could not find an open Order ID for {symbol}.{self._ltp_suffix_for_symbol(symbol)}"
         if order_id == self.DRY_RUN_PLACEHOLDER_ORDER_ID:
             sl_true = float(rec.get("sl_true") or rec.get("stop_loss") or 0)
             if sl_true <= 0:
-                return f"⚠️ RESTORE_SL skipped for {symbol}: missing sl_true in local book."
+                return f"⚠️ RESTORE_SL skipped for {symbol}: missing sl_true in local book.{self._ltp_suffix_for_symbol(symbol)}"
             today = self._today_ist_iso()
             self._update_active_trade_levels(
                 symbol,
@@ -1142,11 +1142,11 @@ class Trader:
             )
 
         if not self.client:
-            return f"⚠️ NO GROWW CLIENT: Cannot RESTORE_SL for {symbol}. Configure GROWW_API_KEY."
+            return f"⚠️ NO GROWW CLIENT: Cannot RESTORE_SL for {symbol}. Configure GROWW_API_KEY.{self._ltp_suffix_for_symbol(symbol)}"
 
         sl_true = float(rec.get("sl_true") or rec.get("stop_loss") or 0)
         if sl_true <= 0:
-            return f"⚠️ RESTORE_SL skipped for {symbol}: missing sl_true in local book."
+            return f"⚠️ RESTORE_SL skipped for {symbol}: missing sl_true in local book.{self._ltp_suffix_for_symbol(symbol)}"
 
         logger.info(
             f"[STAGE 4] RESTORE_SL ({source}): modify_smart_order {symbol} "
@@ -1170,7 +1170,7 @@ class Trader:
                 if qty == 0:
                     return (
                         f"⚠️ RESTORE_SL failed for {symbol}: broker order is stale and no open position exists. "
-                        f"Error: {err}"
+                        f"Error: {err}{self._ltp_suffix_for_symbol(symbol)}"
                     )
                 rec_rearm = dict(rec)
                 rec_rearm["stop_loss"] = float(sl_true)
@@ -1190,10 +1190,10 @@ class Trader:
                     )
                     return (
                         f"🔁 RESTORE_SL RE-ARMED: {symbol} had no modifiable OCO; "
-                        f"created fresh protection at sl_true={sl_true} ({source})."
+                        f"created fresh protection at sl_true={sl_true} ({source}).{self._ltp_suffix_for_symbol(symbol)}"
                     )
                 if alert:
-                    return f"⚠️ RESTORE_SL re-arm attempt for {symbol}: {alert}"
+                    return f"⚠️ RESTORE_SL re-arm attempt for {symbol}: {alert}{self._ltp_suffix_for_symbol(symbol)}"
             raise
         today = self._today_ist_iso()
         self._update_active_trade_levels(
@@ -1205,7 +1205,7 @@ class Trader:
             vol_sl_needs_restore=False,
             vol_sl_restore_done_for=today,
         )
-        return f"🔁 RESTORE_SL SUCCESS: {symbol} broker SL restored to sl_true={sl_true} ({source})."
+        return f"🔁 RESTORE_SL SUCCESS: {symbol} broker SL restored to sl_true={sl_true} ({source}).{self._ltp_suffix_for_symbol(symbol)}"
 
     def run_volatility_sl_schedule_tick(self) -> list[str]:
         """
@@ -1858,6 +1858,21 @@ class Trader:
             logger.warning(f"get_ltp failed for {exchange}_{trading_symbol} ({segment}): {e}")
             return 0.0
 
+    def _ltp_suffix_for_symbol(self, symbol: str) -> str:
+        """Best-effort LTP suffix for order-related user alerts."""
+        if not symbol or self.client is None:
+            return ""
+        try:
+            pos, _ = self._get_open_position_for_symbol(symbol)
+            exchange = str((pos or {}).get("exchange") or "NSE")
+            segment = str((pos or {}).get("segment") or self.SMART_SEGMENT)
+            ltp = self._fetch_ltp(exchange, symbol, segment)
+            if ltp > 0:
+                return f" | LTP={ltp:.2f}"
+        except Exception:
+            return ""
+        return ""
+
     def _ltp_in_range(self, trade_data: dict, ltp: float) -> bool:
         if not ltp:
             return False
@@ -2189,7 +2204,15 @@ class Trader:
             return f"✅ LIMIT BUY filled {symbol} @ ~{ltp}. (No OCO.)"
         return f"✅ LIMIT {action} filled {symbol} @ ~{ltp}."
 
-    def _place_limit_and_queue(self, trade_data: dict, exchange: str, trading_symbol: str, segment: str) -> str:
+    def _place_limit_and_queue(
+        self,
+        trade_data: dict,
+        exchange: str,
+        trading_symbol: str,
+        segment: str,
+        *,
+        observed_ltp: float | None = None,
+    ) -> str:
         """Resting LIMIT on broker; pending worker polls order status."""
         action = (trade_data.get("action") or "BUY").upper()
         lim = self._limit_price_for_single_entry(trade_data)
@@ -2256,8 +2279,9 @@ class Trader:
             "limit_price": lim,
         }
         self._append_pending(item)
+        ltp_text = f" | LTP={float(observed_ltp):.2f}" if observed_ltp is not None else ""
         return (
-            f"📌 LIMIT {action} placed {trading_symbol} @ {lim} (range {low}-{high}). "
+            f"📌 LIMIT {action} placed {trading_symbol} @ {lim} (range {low}-{high}{ltp_text}). "
             f"Polling order status every {Config.ENTRY_QUEUE_POLL_SEC}s; max {Config.ENTRY_QUEUE_MAX_WAIT_MIN} min."
         )
 
@@ -2397,7 +2421,15 @@ class Trader:
         self._save_pending(kept)
         return out
 
-    def _queue_single(self, trade_data: dict, exchange: str, trading_symbol: str, segment: str) -> str:
+    def _queue_single(
+        self,
+        trade_data: dict,
+        exchange: str,
+        trading_symbol: str,
+        segment: str,
+        *,
+        observed_ltp: float | None = None,
+    ) -> str:
         low, high = trade_data.get("entry_range", [0, 0])
         action = (trade_data.get("action") or "BUY").upper()
         item = {
@@ -2411,8 +2443,9 @@ class Trader:
             "segment": segment,
         }
         self._append_pending(item)
+        ltp_text = f" (LTP={float(observed_ltp):.2f})" if observed_ltp is not None else ""
         return (
-            f"⏳ Queued {action} {trading_symbol}: LTP not in range {low}-{high} yet. "
+            f"⏳ Queued {action} {trading_symbol}: LTP not in range {low}-{high} yet{ltp_text}. "
             f"Will retry every {Config.ENTRY_QUEUE_POLL_SEC}s for up to {Config.ENTRY_QUEUE_MAX_WAIT_MIN} min."
         )
 
@@ -2653,9 +2686,13 @@ class Trader:
                 and not trade_data.get("spread_leg")
                 and self.place_entry_orders
             ):
-                return self._place_limit_and_queue(trade_data, exchange, found_symbol, segment)
+                return self._place_limit_and_queue(
+                    trade_data, exchange, found_symbol, segment, observed_ltp=float(ltp)
+                )
             if Config.ENTRY_QUEUE_ENABLED:
-                return self._queue_single(trade_data, exchange, found_symbol, segment)
+                return self._queue_single(
+                    trade_data, exchange, found_symbol, segment, observed_ltp=float(ltp)
+                )
             return (
                 f"⏳ SKIP: BUY {found_symbol} @ {ltp} is above signal max {high}. "
                 "Queue/limit disabled."
@@ -2669,9 +2706,13 @@ class Trader:
                 and not trade_data.get("spread_leg")
                 and self.place_entry_orders
             ):
-                return self._place_limit_and_queue(trade_data, exchange, found_symbol, segment)
+                return self._place_limit_and_queue(
+                    trade_data, exchange, found_symbol, segment, observed_ltp=float(ltp)
+                )
             if Config.ENTRY_QUEUE_ENABLED:
-                return self._queue_single(trade_data, exchange, found_symbol, segment)
+                return self._queue_single(
+                    trade_data, exchange, found_symbol, segment, observed_ltp=float(ltp)
+                )
             return (
                 f"⏳ SKIP: SELL {found_symbol} @ {ltp} is below signal min {low}. "
                 "Queue/limit disabled."
@@ -2684,9 +2725,13 @@ class Trader:
                 and not trade_data.get("spread_leg")
                 and self.place_entry_orders
             ):
-                return self._place_limit_and_queue(trade_data, exchange, found_symbol, segment)
+                return self._place_limit_and_queue(
+                    trade_data, exchange, found_symbol, segment, observed_ltp=float(ltp)
+                )
             if Config.ENTRY_QUEUE_ENABLED:
-                return self._queue_single(trade_data, exchange, found_symbol, segment)
+                return self._queue_single(
+                    trade_data, exchange, found_symbol, segment, observed_ltp=float(ltp)
+                )
             return f"⏳ SKIP: {action} {found_symbol} @ {ltp} is outside range ({low}-{high})."
 
         logger.info(f"[STAGE 4] LTP {ltp} is IN range {low}-{high} — placing order.")
@@ -2732,7 +2777,7 @@ class Trader:
                     if qid:
                         return (
                             f"⏳ {action} queued for {symbol}: market is {market_state} (IST). "
-                            f"Queue id={qid}."
+                            f"Queue id={qid}.{self._ltp_suffix_for_symbol(symbol)}"
                         )
                 rec_active = self._get_active_trade_record(symbol) or {}
                 order_ids = self._oco_ids_from_record(rec_active)
@@ -2740,7 +2785,7 @@ class Trader:
                 logger.info(f"[STAGE 4] Order IDs for {symbol}: {order_ids}")
                 if not order_id:
                     logger.warning(f"[STAGE 4] No order ID found for {symbol} in active_trades.json.")
-                    return f"⚠️ NO ACTIVE TRADE: Could not find an open Order ID for {symbol}."
+                    return f"⚠️ NO ACTIVE TRADE: Could not find an open Order ID for {symbol}.{self._ltp_suffix_for_symbol(symbol)}"
 
                 # Simulated book row from dry-run entry — nothing exists on the broker to exit/modify.
                 if order_id == self.DRY_RUN_PLACEHOLDER_ORDER_ID:
@@ -2757,7 +2802,7 @@ class Trader:
                         logger.info(f"[STAGE 4] DRY RUN book: EXIT_ALL {symbol} — cleared local book only.")
                         return (
                             f"🧪 [DRY RUN] EXIT_ALL for {symbol}: removed from local active book "
-                            f"(no broker order was placed)."
+                            f"(no broker order was placed).{self._ltp_suffix_for_symbol(symbol)}"
                         )
                     if action == "TRAIL_SL":
                         new_sl = float(trade_data["stop_loss"])
@@ -2770,7 +2815,7 @@ class Trader:
                             if widened is None:
                                 return (
                                     f"⚠️ TRAIL_SL skipped for {symbol}: could not compute widened broker SL "
-                                    f"from sl_true={new_sl}."
+                                    f"from sl_true={new_sl}.{self._ltp_suffix_for_symbol(symbol)}"
                                 )
                             broker_sl = float(widened)
                         self._update_active_trade_levels(
@@ -2787,7 +2832,7 @@ class Trader:
                         )
                         return (
                             f"🧪 [DRY RUN] TRAIL_SL for {symbol}: sl_true={new_sl}, broker_sl={broker_sl} "
-                            f"(simulated; no OCO on broker for this symbol)."
+                            f"(simulated; no OCO on broker for this symbol).{self._ltp_suffix_for_symbol(symbol)}"
                         )
                     if action == "RESTORE_SL":
                         return self.restore_channel_sl(symbol, source="signal")
@@ -2800,11 +2845,11 @@ class Trader:
                     )
                     return (
                         f"🧪 [DRY RUN] UPDATE_TGT for {symbol}: signal {raw_tgt} → would place {eff_tgt} "
-                        f"(simulated; no OCO on broker for this symbol)."
+                        f"(simulated; no OCO on broker for this symbol).{self._ltp_suffix_for_symbol(symbol)}"
                     )
 
                 if not self.client:
-                    return f"⚠️ NO GROWW CLIENT: Cannot {action} for {symbol}. Configure GROWW_API_KEY."
+                    return f"⚠️ NO GROWW CLIENT: Cannot {action} for {symbol}. Configure GROWW_API_KEY.{self._ltp_suffix_for_symbol(symbol)}"
 
                 if action == "EXIT_ALL":
                     rec_before = self._get_active_trade_record(symbol) or {}
@@ -2839,7 +2884,7 @@ class Trader:
                         logger.info(
                             f"[STAGE 4] EXIT SUCCESS: {symbol} has no open position after cancel; removed from active book."
                         )
-                        return f"🚨 EXIT SUCCESS: {symbol} already flat; cleared local active trade."
+                        return f"🚨 EXIT SUCCESS: {symbol} already flat; cleared local active trade.{self._ltp_suffix_for_symbol(symbol)}"
 
                     tx = "SELL" if qty > 0 else "BUY"
                     flat_qty = abs(int(qty))
@@ -2875,7 +2920,7 @@ class Trader:
                         )
                         return (
                             f"⚠️ EXIT PARTIAL: Cancelled protection for {symbol}, but position still open "
-                            f"(remaining qty {qty_after})."
+                            f"(remaining qty {qty_after}).{self._ltp_suffix_for_symbol(symbol)}"
                         )
 
                     self._remove_active_trade(symbol)
@@ -2897,7 +2942,7 @@ class Trader:
                     logger.info(
                         f"[STAGE 4] EXIT SUCCESS: {symbol} flattened and removed from active book."
                     )
-                    return f"🚨 EXIT SUCCESS: Closed {symbol} position and cleared active trade."
+                    return f"🚨 EXIT SUCCESS: Closed {symbol} position and cleared active trade.{self._ltp_suffix_for_symbol(symbol)}"
                 
                 elif action == "TRAIL_SL":
                     new_sl = float(trade_data["stop_loss"])
@@ -2910,7 +2955,7 @@ class Trader:
                         if widened is None:
                             return (
                                 f"⚠️ TRAIL_SL skipped for {symbol}: could not compute widened broker SL "
-                                f"from sl_true={new_sl}."
+                                f"from sl_true={new_sl}.{self._ltp_suffix_for_symbol(symbol)}"
                             )
                         broker_sl = float(widened)
                     logger.info(
@@ -2928,7 +2973,7 @@ class Trader:
                         sl_widen_pct=float(rec0.get("sl_widen_pct") or Config.VOL_SL_WIDEN_PCT),
                     )
                     logger.info(f"[STAGE 4] TRAIL SUCCESS: {symbol} sl_true={new_sl} broker_sl={broker_sl}.")
-                    return f"📈 TRAIL SUCCESS: Updated {symbol} SL — sl_true={new_sl}, broker_sl={broker_sl}."
+                    return f"📈 TRAIL SUCCESS: Updated {symbol} SL — sl_true={new_sl}, broker_sl={broker_sl}.{self._ltp_suffix_for_symbol(symbol)}"
 
                 elif action == "RESTORE_SL":
                     return self.restore_channel_sl(symbol, source="signal")
@@ -2939,7 +2984,7 @@ class Trader:
                     if eff_tgt <= 0:
                         return (
                             f"⚠️ UPDATE_TGT skipped for {symbol}: buffered target must be > 0 "
-                            f"(signal {raw_tgt}, TARGET_BUFFER_PCT={Config.TARGET_BUFFER_PCT})."
+                            f"(signal {raw_tgt}, TARGET_BUFFER_PCT={Config.TARGET_BUFFER_PCT}).{self._ltp_suffix_for_symbol(symbol)}"
                         )
                     logger.info(
                         f"[STAGE 4] Calling Groww modify_smart_order for {symbol}: "
@@ -2974,7 +3019,7 @@ class Trader:
                         f"[STAGE 4] UPDATE_TGT SUCCESS: {symbol} broker target {eff_tgt} (signal {raw_tgt})."
                     )
                     return (
-                        f"🎯 UPDATE_TGT SUCCESS: {symbol} target {eff_tgt} (signal {raw_tgt})."
+                        f"🎯 UPDATE_TGT SUCCESS: {symbol} target {eff_tgt} (signal {raw_tgt}).{self._ltp_suffix_for_symbol(symbol)}"
                     )
 
             # BUY / SELL option entry (single leg)
@@ -2997,6 +3042,6 @@ class Trader:
                     if qid:
                         return (
                             f"⏳ {action} queued for retry on {symbol} after broker/transient error. "
-                            f"Queue id={qid}. Last error: {err_text}"
+                            f"Queue id={qid}. Last error: {err_text}{self._ltp_suffix_for_symbol(symbol)}"
                         )
-            return f"❌ ERROR for {symbol}: {str(e)}"
+            return f"❌ ERROR for {symbol}: {str(e)}{self._ltp_suffix_for_symbol(symbol)}"

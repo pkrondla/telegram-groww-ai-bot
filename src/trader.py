@@ -2070,10 +2070,28 @@ class Trader:
             spread_group_id=str(trade_data.get("spread_group_id") or ""),
             oco_legs=created_legs,
         )
-        leg_lines = [
-            f"T{i+1} qty={int(l['qty'])}: signal {float(l['target_signal'])} → broker {float(l['target_broker'])}"
-            for i, l in enumerate(created_legs)
-        ]
+        try:
+            entry_basis = float(entry_avg_price or 0.0)
+        except (TypeError, ValueError):
+            entry_basis = 0.0
+        try:
+            sl_true = float(trade_data.get("stop_loss") or 0.0)
+        except (TypeError, ValueError):
+            sl_true = 0.0
+        risk_pts = max(entry_basis - sl_true, 0.0)
+
+        leg_lines = []
+        for i, l in enumerate(created_legs):
+            tgt_signal = float(l["target_signal"])
+            tgt_broker = float(l["target_broker"])
+            rr_text = ""
+            if entry_basis > 0 and risk_pts > 0:
+                reward_pts = max(tgt_signal - entry_basis, 0.0)
+                rr = reward_pts / risk_pts
+                rr_text = f" | R:R {rr:.2f}"
+            leg_lines.append(
+                f"T{i+1} qty={int(l['qty'])}: signal {tgt_signal} → broker {tgt_broker}{rr_text}"
+            )
         return "Targets:\n" + "\n".join(leg_lines) + f"\nSL: {trade_data['stop_loss']}"
 
     def _finalize_option_order(

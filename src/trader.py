@@ -2166,6 +2166,13 @@ class Trader:
         items.append(item)
         self._save_pending(items)
 
+    def clear_pending_entries(self) -> int:
+        """Clear pending entry queue and return number of removed items."""
+        items = self._load_pending()
+        removed = len(items)
+        self._save_pending([])
+        return removed
+
     def _variant_list(self, symbol: str) -> list[str]:
         variants = [symbol]
         m = re.match(r"^(?P<underlying>[A-Z&_\-]+?)(?P<rest>\d.*)$", symbol)
@@ -2207,6 +2214,273 @@ class Trader:
                     break
         return list(dict.fromkeys(variants))
 
+    @staticmethod
+    def _parse_option_symbol_parts(symbol: str) -> dict | None:
+        """
+        Parse Groww option trading symbols into comparable components.
+        Supports:
+          - Index weekly: NIFTY2642823800PE  (yy + m + dd + strike + opt)
+          - Stock monthly: WIPRO26APR200PE   (yy + MON + strike + opt)
+        """
+        s = str(symbol or "").upper().strip()
+        if not s:
+            return None
+        m = re.match(
+            r"^(?P<underlying>[A-Z&_\-]+)"
+            r"(?P<yy>\d{2})"
+            r"(?P<month_num>\d{1,2})"
+            r"(?P<day>\d{2})"
+            r"(?P<strike>\d+)"
+            r"(?P<option_type>CE|PE)$",
+            s,
+        )
+        if m:
+            month_num = int(m.group("month_num"))
+            try:
+                expiry = datetime.date(2000 + int(m.group("yy")), month_num, int(m.group("day")))
+            except Exception:
+                expiry = None
+            return {
+                "underlying": m.group("underlying"),
+                "yy": m.group("yy"),
+                "month_num": month_num,
+                "day": int(m.group("day")),
+                "month_abbr": "",
+                "strike": m.group("strike"),
+                "option_type": m.group("option_type"),
+                "expiry": expiry,
+            }
+
+        m = re.match(
+            r"^(?P<underlying>[A-Z&_\-]+)"
+            r"(?P<yy>\d{2})"
+            r"(?P<month_abbr>JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)"
+            r"(?P<strike>\d+)"
+            r"(?P<option_type>CE|PE)$",
+            s,
+        )
+        if not m:
+            return None
+        month_map = {
+            "JAN": 1, "FEB": 2, "MAR": 3, "APR": 4, "MAY": 5, "JUN": 6,
+            "JUL": 7, "AUG": 8, "SEP": 9, "OCT": 10, "NOV": 11, "DEC": 12,
+        }
+        month_num = month_map.get(m.group("month_abbr"), 0)
+        return {
+            "underlying": m.group("underlying"),
+            "yy": m.group("yy"),
+            "month_num": month_num,
+            "day": None,
+            "month_abbr": m.group("month_abbr"),
+            "strike": m.group("strike"),
+            "option_type": m.group("option_type"),
+            "expiry": None,
+        }
+
+    def _fallback_option_candidates(self, symbol: str) -> list[str]:
+        """
+        Build nearest-match fallback symbols when direct lookup variants miss.
+        Matches by underlying + strike + option_type, then prefers closest expiry.
+        """
+        target = self._parse_option_symbol_parts(symbol)
+        if not target:
+            return []
+
+        self._load_local_instrument_cache()
+        if not self._instrument_cache:
+            return []
+
+        candidates: list[tuple[int, str]] = []
+        today = datetime.date.today()
+        is_index = str(target.get("underlying") or "").upper() in self.INDEX_UNDERLYINGS
+        for (_, trading_symbol), row in self._instrument_cache.items():
+            if str(row.get("segment") or "").upper() != self.SMART_SEGMENT:
+                continue
+            parsed = self._parse_option_symbol_parts(trading_symbol)
+            if not parsed:
+                continue
+            if (
+                parsed["underlying"] != target["underlying"]
+                or parsed["strike"] != target["strike"]
+                or parsed["option_type"] != target["option_type"]
+            ):
+                continue
+
+            score = 999999
+            tgt_exp = target.get("expiry")
+            got_exp = parsed.get("expiry")
+            if is_index:
+                # Index policy: only non-stale weeklies; prefer exact target expiry,
+                # else nearest future active expiry available in broker instruments.
+                if not isinstance(got_exp, datetime.date) or got_exp < today:
+                    continue
+                if isinstance(tgt_exp, datetime.date) and got_exp == tgt_exp:
+                    score = 0
+                else:
+                    score = (got_exp - today).days
+            else:
+                # Stock policy: only current-month active contracts.
+                if parsed.get("yy") != str(today.year)[-2:] or int(parsed.get("month_num") or 0) != int(today.month):
+                    continue
+                if isinstance(got_exp, datetime.date) and got_exp < today:
+                    continue
+                score = 1 if parsed.get("yy") == target.get("yy") else 2
+            candidates.append((score, trading_symbol))
+
+        candidates.sort(key=lambda x: (x[0], x[1]))
+        return [sym for _, sym in candidates[:20]]
+
+    @staticmethod
+    def _underlying_match(a: str, b: str) -> bool:
+        a0 = re.sub(r"[^A-Z0-9]", "", str(a or "").upper())
+        b0 = re.sub(r"[^A-Z0-9]", "", str(b or "").upper())
+        if not a0 or not b0:
+            return False
+        return a0 == b0 or a0.startswith(b0) or b0.startswith(a0)
+
+    def _active_contract_candidates(self, trade_data: dict, requested_symbol: str) -> list[str]:
+        """
+        Resolve active contracts from instrument chain using contract keys:
+        underlying + strike + option_type.
+        """
+        strike = re.sub(r"[^\d]", "", str(trade_data.get("strike") or ""))
+        option_type = str(trade_data.get("option_type") or "").upper().strip()
+        underlying_hint = str(
+            trade_data.get("official_symbol")
+            or trade_data.get("underlying")
+            or trade_data.get("stock")
+            or ""
+        ).upper()
+
+        req_parts = self._parse_option_symbol_parts(requested_symbol)
+        if not strike and req_parts:
+            strike = str(req_parts.get("strike") or "")
+        if option_type not in ("CE", "PE") and req_parts:
+            option_type = str(req_parts.get("option_type") or "").upper()
+        if not underlying_hint and req_parts:
+            underlying_hint = str(req_parts.get("underlying") or "")
+
+        if not strike or option_type not in ("CE", "PE") or not underlying_hint:
+            return []
+
+        self._load_local_instrument_cache()
+        if not self._instrument_cache:
+            return []
+
+        today = datetime.date.today()
+        is_index = self._is_index_option_trade(
+            {
+                "official_symbol": underlying_hint,
+                "stock": requested_symbol,
+                "trading_symbol": requested_symbol,
+            }
+        )
+        req_exp = req_parts.get("expiry") if req_parts else None
+
+        ranked: list[tuple[int, str]] = []
+        for (_, trading_symbol), row in self._instrument_cache.items():
+            if str(row.get("segment") or "").upper() != self.SMART_SEGMENT:
+                continue
+            parsed = self._parse_option_symbol_parts(trading_symbol)
+            if not parsed:
+                continue
+            if str(parsed.get("strike") or "") != strike:
+                continue
+            if str(parsed.get("option_type") or "") != option_type:
+                continue
+            if not self._underlying_match(parsed.get("underlying"), underlying_hint):
+                continue
+
+            exp = parsed.get("expiry")
+            if is_index:
+                # Index contracts can appear in two forms:
+                # - Weekly numeric: NIFTY2650523800PE (has explicit date)
+                # - Monthly alpha:   NIFTY26APR23800PE (month-only symbol)
+                if isinstance(exp, datetime.date):
+                    if exp < today:
+                        continue
+                    if isinstance(req_exp, datetime.date) and exp == req_exp:
+                        score = 0
+                    else:
+                        score = 10 + max((exp - today).days, 0)
+                else:
+                    # Month-only index contracts: accept current/next active months.
+                    yy = str(parsed.get("yy") or "")
+                    mm = int(parsed.get("month_num") or 0)
+                    if not yy or mm <= 0:
+                        continue
+                    cur_yy = int(str(today.year)[-2:])
+                    cur_mm = int(today.month)
+                    cand_yy = int(yy)
+                    month_delta = (cand_yy - cur_yy) * 12 + (mm - cur_mm)
+                    if month_delta < 0 or month_delta > 2:
+                        continue
+                    # Prefer current month monthly over farther monthlies.
+                    score = 40 + (month_delta * 31)
+            else:
+                # Stock monthly only: current month/year and non-stale.
+                if parsed.get("yy") != str(today.year)[-2:] or int(parsed.get("month_num") or 0) != int(today.month):
+                    continue
+                if isinstance(exp, datetime.date) and exp < today:
+                    continue
+                score = 100 + (0 if str(trading_symbol).upper() == str(requested_symbol).upper() else 1)
+            ranked.append((score, trading_symbol))
+
+        ranked.sort(key=lambda x: (x[0], x[1]))
+        return [sym for _, sym in ranked[:30]]
+
+    def _resolution_reason(self, requested_symbol: str, resolved_symbol: str) -> str:
+        req = self._parse_option_symbol_parts(requested_symbol)
+        got = self._parse_option_symbol_parts(resolved_symbol)
+        if not req or not got:
+            return "fallback_unparsed"
+        if str(requested_symbol).upper() == str(resolved_symbol).upper():
+            return "exact_match"
+        req_exp = req.get("expiry")
+        got_exp = got.get("expiry")
+        if isinstance(req_exp, datetime.date) and isinstance(got_exp, datetime.date):
+            if got_exp == req_exp:
+                return "same_expiry_variant"
+            return "nearest_future_weekly"
+        if isinstance(got_exp, datetime.date):
+            return "weekly_selected"
+        return "monthly_fallback_selected"
+
+    def _is_policy_compatible_contract(self, *, requested: str, candidate: str, is_index: bool) -> bool:
+        """
+        Enforce active-contract policy for fallback substitutions:
+          - Index options: candidate must be same expiry as requested and non-stale.
+          - Stock options: candidate must be in current month/year and non-stale.
+        """
+        req = self._parse_option_symbol_parts(requested)
+        got = self._parse_option_symbol_parts(candidate)
+        if not req or not got:
+            return False
+
+        today = datetime.date.today()
+        if is_index:
+            req_exp = req.get("expiry")
+            got_exp = got.get("expiry")
+            if not isinstance(req_exp, datetime.date) or not isinstance(got_exp, datetime.date):
+                return False
+            if got_exp < today:
+                return False
+            # Prefer Stage-2-selected expiry, but allow nearest future active
+            # weekly from broker instruments when exact contract is unavailable.
+            return True
+
+        # Stock options are monthly; enforce current active month.
+        year_now_2d = str(today.year)[-2:]
+        month_now = int(today.month)
+        got_month = int(got.get("month_num") or 0)
+        if got.get("yy") != year_now_2d or got_month != month_now:
+            return False
+        # If a day exists (non-monthly format), do not allow stale.
+        got_exp = got.get("expiry")
+        if isinstance(got_exp, datetime.date) and got_exp < today:
+            return False
+        return True
+
     def _resolve_option_instrument(self, trade_data: dict):
         """
         Returns (exchange, trading_symbol, segment, instrument_dict) or
@@ -2216,15 +2490,72 @@ class Trader:
         if not symbol:
             return None, None, None, None
         self.warm_instruments_cache()
+        is_index = self._is_index_option_trade(trade_data)
+
+        tried: set[tuple[str, str]] = set()
+
+        def exchanges_for_lookup() -> list[str]:
+            # Options are listed in derivative exchanges; keep cash exchanges only as fallback.
+            if is_index:
+                return ["NFO", "BFO", "NSE", "BSE"]
+            return ["NFO", "NSE", "BFO", "BSE"]
+
+        def try_symbols(candidates: list[str]):
+            exchanges = exchanges_for_lookup()
+            for sym_variant in candidates:
+                for ex in exchanges:
+                    key = (ex, sym_variant)
+                    if key in tried:
+                        continue
+                    tried.add(key)
+                    try:
+                        res = self._get_instrument(exchange=ex, trading_symbol=sym_variant)
+                        if res and res.get("segment"):
+                            return res["exchange"], sym_variant, res["segment"], res
+                    except Exception:
+                        continue
+            return None
+
         variants = self._variant_list(symbol)
-        for sym_variant in variants:
-            for ex in ["NSE", "BSE"]:
-                try:
-                    res = self._get_instrument(exchange=ex, trading_symbol=sym_variant)
-                    if res and res.get("segment"):
-                        return res["exchange"], sym_variant, res["segment"], res
-                except Exception:
-                    continue
+        active_candidates = self._active_contract_candidates(trade_data, symbol)
+        hit = try_symbols(active_candidates)
+        if hit:
+            reason = self._resolution_reason(symbol, hit[1])
+            logger.info(
+                f"[STAGE 4] Contract resolution: requested={symbol} resolved={hit[1]} "
+                f"exchange={hit[0]} segment={hit[2]} reason={reason}"
+            )
+            return hit
+
+        hit = try_symbols(variants)
+        if hit:
+            return hit
+
+        # Try broader, nearest-expiry candidates from local instruments fallback.
+        fallback_variants = [
+            s
+            for s in self._fallback_option_candidates(symbol)
+            if self._is_policy_compatible_contract(requested=symbol, candidate=s, is_index=is_index)
+        ]
+        hit = try_symbols(fallback_variants)
+        if hit:
+            logger.info(
+                f"[STAGE 4] Instrument resolved via fallback candidate: requested={symbol} resolved={hit[1]}"
+            )
+            return hit
+
+        # Last attempt: refresh Groww instrument dataframe and retry once.
+        if self.client is not None:
+            try:
+                self.client.get_all_instruments()
+            except Exception as e:
+                logger.debug(f"Groww instrument refresh on miss failed: {e}")
+            hit = try_symbols(variants + fallback_variants)
+            if hit:
+                logger.info(
+                    f"[STAGE 4] Instrument resolved after refresh: requested={symbol} resolved={hit[1]}"
+                )
+                return hit
         return None, None, None, None
 
     @staticmethod

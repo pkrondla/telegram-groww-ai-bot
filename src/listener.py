@@ -27,6 +27,7 @@ _OVERRIDE_COMMANDS = {
     "HELP":     "help",
     "DRYRUN ON":  "dryrun_on",
     "DRYRUN OFF": "dryrun_off",
+    "CLEAR PENDING": "clear_pending",
 }
 _SIZE_OVERRIDE_FIXED_PHRASES = (
     "RISKY TRADE",
@@ -432,28 +433,29 @@ class BotListener:
             await self.notifier.send(msg)
         elif command == "help":
             await self.notifier.send(
-                "📘 **Bot Command Help**\n\n"
-                "**Admin override commands**\n"
-                "• `HELP` — show this help\n"
-                "• `STATUS` — bot state, dry-run, active/pending counts\n"
-                "• `TRADES` — list all active trades\n"
-                "• `EXIT <TRADING_SYMBOL>` — close one active trade\n"
-                "• `EXIT ALL` — close all active trades\n"
-                "• `REARM` — re-arm missing OCO protection for active trades\n"
-                "• `SIZING` — show current position sizing mode\n"
-                "• `SIZING FIXED` — use configured fixed lots\n"
-                "• `SIZING RISK` — use risk-based sizing\n"
-                "• `PAUSE` — ignore all incoming signals\n"
-                "• `RESUME` — resume signal processing\n"
-                "• `KILL` — emergency stop (restart required)\n"
-                "• `DRYRUN ON` — no live entry orders\n"
-                "• `DRYRUN OFF` — live entry orders enabled\n\n"
-                "**Single-trade management (no reply context needed)**\n"
-                "• `EXIT <TRADING_SYMBOL>`\n"
-                "• `TSL TO <PRICE> <TRADING_SYMBOL>`\n"
-                "• `CHANGE TARGET TO <PRICE> <TRADING_SYMBOL>`\n"
-                "• `RESTORE SL <TRADING_SYMBOL>`\n\n"
-                "Example: `EXIT NIFTY26424300PE`"
+                "Bot Command Help\n\n"
+                "Admin override commands\n"
+                "- HELP — show this help\n"
+                "- STATUS — bot state, dry-run, active/pending counts\n"
+                "- TRADES — list all active trades\n"
+                "- EXIT <TRADING_SYMBOL> — close one active trade\n"
+                "- EXIT ALL — close all active trades\n"
+                "- REARM — re-arm missing OCO protection for active trades\n"
+                "- CLEAR PENDING — clear pending entry queue\n"
+                "- SIZING — show current position sizing mode\n"
+                "- SIZING FIXED — use configured fixed lots\n"
+                "- SIZING RISK — use risk-based sizing\n"
+                "- PAUSE — ignore all incoming signals\n"
+                "- RESUME — resume signal processing\n"
+                "- KILL — emergency stop (restart required)\n"
+                "- DRYRUN ON — no live entry orders\n"
+                "- DRYRUN OFF — live entry orders enabled\n\n"
+                "Single-trade management (no reply context needed)\n"
+                "- EXIT <TRADING_SYMBOL>\n"
+                "- TSL TO <PRICE> <TRADING_SYMBOL>\n"
+                "- CHANGE TARGET TO <PRICE> <TRADING_SYMBOL>\n"
+                "- RESTORE SL <TRADING_SYMBOL>\n\n"
+                "Example: EXIT NIFTY26424300PE"
             )
         elif command == "dryrun_on":
             self.trader.execute_orders = False
@@ -465,6 +467,13 @@ class BotListener:
         elif command == "dryrun_off":
             self.trader.execute_orders = True
             await self.notifier.send("🔴 **DRY RUN disabled.** LIVE entry orders are now active.")
+        elif command == "clear_pending":
+            removed = await asyncio.to_thread(self.trader.clear_pending_entries)
+            await self.notifier.send(
+                "Pending entry queue cleared\n"
+                f"Removed {removed} queued item(s)."
+            )
+            logger.info(f"[STAGE 1] Admin clear_pending executed: removed={removed}")
 
     # ------------------------------------------------------------------
     # Main signal handler

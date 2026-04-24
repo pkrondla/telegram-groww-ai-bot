@@ -363,6 +363,36 @@ class Assistant:
         raw = m.group("month").upper()
         return cls._MONTH_ABBR_MAP.get(raw, raw[:3])
 
+    @classmethod
+    def _detect_typo_correction(cls, child: str) -> tuple[str, str] | None:
+        """
+        Detects strike typo-correction replies such as:
+          - "23800 PE TYPO"
+          - "TYPO 23800 PE"
+          - "CORRECTION: 23800CE"
+        Returns (strike, option_type) when found.
+        """
+        text = str(child or "")
+        n = cls._normalize_for_match(text)
+        if not n:
+            return None
+        if not any(token in n for token in ("TYPO", "CORRECT", "CORRECTION", "WRONG STRIKE", "STRIKE TYPO")):
+            return None
+
+        m = re.search(r"\b(\d{3,6})\s*(CE|PE)\b", text, re.IGNORECASE)
+        if not m:
+            m = re.search(r"\b(CE|PE)\s*(\d{3,6})\b", text, re.IGNORECASE)
+            if not m:
+                m = re.search(r"\b(\d{3,6})(CE|PE)\b", text, re.IGNORECASE)
+                if not m:
+                    return None
+                strike, option_type = m.group(1), m.group(2)
+            else:
+                option_type, strike = m.group(1), m.group(2)
+        else:
+            strike, option_type = m.group(1), m.group(2)
+        return re.sub(r"[^\d]", "", strike), str(option_type).upper()
+
     @staticmethod
     def _extract_trail_sl_price(text: str) -> float | None:
         # "TSL TO 55", "NEW TSL 40", "SL TO 55", "STOP LOSS: 55", etc.
@@ -729,6 +759,17 @@ class Assistant:
         return str(datetime.datetime.now().year)[-2:]
 
     @classmethod
+    def _safe_year_4d(cls, raw_year) -> str:
+        s = str(raw_year or "")
+        m4 = re.search(r"\b(\d{4})\b", s)
+        if m4:
+            return m4.group(1)
+        m2 = re.search(r"\b(\d{2})\b", s)
+        if m2:
+            return f"20{m2.group(1)}"
+        return str(datetime.datetime.now().year)
+
+    @classmethod
     def _safe_month_abbr(cls, raw_month) -> str:
         s = str(raw_month or "").strip().upper()
         if s in cls._MONTH_NUM:
@@ -850,6 +891,7 @@ class Assistant:
         expiry_day = self._safe_day_2d(raw_day)
         expiry_month = self._safe_month_abbr(raw_month)
         yy = self._safe_year_yy(raw_year)
+        yyyy = self._safe_year_4d(raw_year)
 
         groww_symbol = f"{underlying}{yy}{expiry_month}{strike}{option_type}"
 
@@ -857,6 +899,10 @@ class Assistant:
             month_num = self._safe_month_num(raw_month)
             groww_symbol = f"{underlying}{yy}{month_num}{expiry_day}{strike}{option_type}"
 
+        # Keep normalized expiry fields in sync with the symbol factory output.
+        data["expiry_day"] = expiry_day
+        data["expiry_month"] = expiry_month
+        data["expiry_year"] = yyyy
         data["trading_symbol"] = groww_symbol
         data["stock"] = data["trading_symbol"]
         data["buy_range_min"] = float(data.get("entry_range", [0, 0])[0])
@@ -1027,6 +1073,52 @@ Rules:
         if has_context and self._is_ack_only_tail(tail):
             logger.info("[STAGE 2] Decision: IGNORE — reply is ack-only tail.")
             return None
+
+        # Typo correction: "23800 PE TYPO" on a reply should amend parent instrument.
+        if has_context and tail.strip():
+            strike_fix = self._detect_typo_correction(tail)
+            if strike_fix:
+                corrected_strike, corrected_opt = strike_fix
+                logger.info(
+                    f"[STAGE 2] Typo correction detected: strike={corrected_strike} type={corrected_opt}."
+                )
+                data = self._llm_parse_forced(
+                    context_inner or parent_text,
+                    "BUY",
+                    parent_text=context_inner or parent_text,
+                    child_text=tail or child_text,
+                    is_reply=has_context,
+                )
+                if data and data.get("is_trade"):
+                    data["strike"] = corrected_strike
+                    if corrected_opt in ("CE", "PE"):
+                        data["option_type"] = corrected_opt
+                    parent_forced = self._detect_forced_intent(
+                        context_inner or parent_text, context_inner or parent_text
+                    )
+                    corrected_action = parent_forced[0] if parent_forced else (data.get("action") or "BUY")
+                    data["action"] = corrected_action
+                    if corrected_action in ("TRAIL_SL", "RESTORE_SL", "EXIT_ALL"):
+                        data["entry_range"] = [0, 0]
+                    data, reason = self._validate_intent(
+                        data,
+                        child_text=tail or child_text,
+                        parent_text=context_inner or parent_text,
+                        is_reply=has_context,
+                        forced_action=corrected_action,
+                    )
+                    if not data:
+                        logger.info(f"[STAGE 2] Typo-corrected signal rejected by validator: {reason}")
+                        return None
+                    data = self._apply_alias_to_data(data)
+                    data = self._apply_symbol_factory(data)
+                    logger.info(
+                        f"[STAGE 2] Signal ready (typo-corrected): {data['action']} "
+                        f"{data.get('stock')} strike={data.get('strike')} {data.get('option_type')}"
+                    )
+                    return data
+                logger.info("[STAGE 2] Typo correction: could not resolve parent instrument — ignoring.")
+                return None
 
         # Expiry correction: "This is April Expiry not March."
         # Re-parse the parent signal with the corrected month and inherit its action.

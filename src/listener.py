@@ -73,6 +73,7 @@ class BotListener:
         self._pending_size_override_mode = ""
         self._pending_size_override_reason = ""
         self._pending_size_override_until_ts = 0.0
+        self._groww_ready_last_state: bool | None = None
 
     # ------------------------------------------------------------------
     # Background tasks
@@ -227,6 +228,51 @@ class BotListener:
                 raise
             except Exception as e:
                 logger.error(f"Management queue watcher error: {e}")
+                await asyncio.sleep(interval)
+
+    async def _groww_auth_watcher(self):
+        """
+        Keep probing Groww readiness in background so the bot can start before
+        daily manual approval/IP readiness and recover automatically when ready.
+        """
+        interval = max(15, int(getattr(Config, "GROWW_AUTH_POLL_SEC", 60)))
+        logger.info(f"Groww auth watcher started (every {interval}s).")
+        while True:
+            try:
+                await asyncio.sleep(interval)
+                conn_ok = await asyncio.to_thread(self.trader.check_connection, log_fail=False)
+                trade_ok = await asyncio.to_thread(self.trader.check_trading_access, log_fail=False) if conn_ok else False
+                ready = bool(conn_ok and trade_ok)
+                if self._groww_ready_last_state is None:
+                    self._groww_ready_last_state = ready
+                    if not ready:
+                        await self.notifier.send(
+                            "⚠️ Groww not ready yet. Bot is running and will retry automatically."
+                        )
+                    continue
+                if ready == self._groww_ready_last_state:
+                    continue
+                self._groww_ready_last_state = ready
+                if ready:
+                    await self.notifier.send(
+                        "✅ Groww connection and trading access restored. Broker actions are live."
+                    )
+                    try:
+                        boot_stats = await asyncio.to_thread(self.trader.maintain_active_trades)
+                        logger.info(
+                            f"[GROWW] Post-recovery maintenance: active={boot_stats.get('active', 0)} "
+                            f"removed={boot_stats.get('removed', 0)} rearmed={boot_stats.get('rearmed', 0)}"
+                        )
+                    except Exception as e:
+                        logger.error(f"[GROWW] Post-recovery maintenance failed: {e}")
+                else:
+                    await self.notifier.send(
+                        "⚠️ Groww became unavailable. Bot remains online and will keep retrying."
+                    )
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                logger.error(f"Groww auth watcher error: {e}")
                 await asyncio.sleep(interval)
 
     # ------------------------------------------------------------------
@@ -583,6 +629,7 @@ class BotListener:
         asyncio.create_task(self._pending_entry_watcher())
         asyncio.create_task(self._management_queue_watcher())
         asyncio.create_task(self._active_trade_reconciler())
+        asyncio.create_task(self._groww_auth_watcher())
 
         # Listen to both incoming and outgoing so admin commands typed from the
         # same logged-in account (Saved Messages / bot DM) are also captured.

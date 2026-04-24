@@ -19,25 +19,24 @@ async def run_bot():
 
     try:
         bot = BotListener()
-        
-        # 1. Verify Groww API before listening
-        if not bot.trader.check_connection():
-            logger.error("STOP: Groww Login Failed. Please check your .env key at 6 AM IST.")
-            return
 
-        # 2. Verify trading endpoint access/IP whitelist before listening
-        if not bot.trader.check_trading_access():
-            logger.error("STOP: Groww trading access check failed (likely static IP whitelist issue).")
-            return
+        # Non-blocking Groww checks: bot should still start and process Telegram messages.
+        groww_ok = bot.trader.check_connection(log_fail=True)
+        trading_ok = bot.trader.check_trading_access(log_fail=True) if groww_ok else False
+        if not (groww_ok and trading_ok):
+            logger.warning(
+                "Groww auth/trading access not ready at startup. "
+                "Bot will keep running and retry in background."
+            )
+        else:
+            # Active-trade maintenance on startup only when broker access is available.
+            boot_stats = bot.trader.maintain_active_trades()
+            logger.info(
+                f"Startup active-trade maintenance: active={boot_stats.get('active', 0)} "
+                f"removed={boot_stats.get('removed', 0)} rearmed={boot_stats.get('rearmed', 0)}"
+            )
 
-        # 3. Active-trade maintenance on startup (reconcile + protection rearm if needed)
-        boot_stats = bot.trader.maintain_active_trades()
-        logger.info(
-            f"Startup active-trade maintenance: active={boot_stats.get('active', 0)} "
-            f"removed={boot_stats.get('removed', 0)} rearmed={boot_stats.get('rearmed', 0)}"
-        )
-
-        # 4. Start the Telegram Listener
+        # Start Telegram listener regardless of Groww readiness.
         await bot.start()
     except Exception as e:
         logger.error(f"Bot Crash Encountered: {str(e)}")

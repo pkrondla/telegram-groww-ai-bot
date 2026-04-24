@@ -43,26 +43,35 @@ class Trader:
         self._instrument_cache = None  # lazy-loaded dict[(exchange,trading_symbol)] -> row dict
         self.place_entry_orders = not dry_run
         self._access_token = None
-        
-        self.client = None
-        if Config.GROWW_API_KEY:
-            try:
-                from growwapi import GrowwAPI
 
-                # Prefer exchanging API key + secret for an access token.
-                # growwapi expects Authorization: Bearer <token> for API calls.
-                token = None
-                if Config.GROWW_API_SECRET:
-                    try:
-                        token = GrowwAPI.get_access_token(
-                            api_key=Config.GROWW_API_KEY, secret=Config.GROWW_API_SECRET
-                        )
-                    except Exception as e:
+        self.client = None
+        self._initialize_groww_client(log_fail=True)
+
+    def _initialize_groww_client(self, *, log_fail: bool = True) -> bool:
+        if not Config.GROWW_API_KEY:
+            if log_fail:
+                logger.warning("GROWW_API_KEY missing. Groww client not initialized.")
+            self.client = None
+            return False
+        try:
+            from growwapi import GrowwAPI
+
+            # Prefer exchanging API key + secret for an access token.
+            # growwapi expects Authorization: Bearer <token> for API calls.
+            token = None
+            if Config.GROWW_API_SECRET:
+                try:
+                    token = GrowwAPI.get_access_token(
+                        api_key=Config.GROWW_API_KEY, secret=Config.GROWW_API_SECRET
+                    )
+                except Exception as e:
+                    if log_fail:
                         logger.error(f"Groww access token fetch failed: {e}")
 
-                # Fall back to using GROWW_API_KEY directly (some users store bearer tokens there)
-                self._access_token = token or Config.GROWW_API_KEY
-                self.client = GrowwAPI(self._access_token)
+            # Fall back to using GROWW_API_KEY directly (some users store bearer tokens there)
+            self._access_token = token or Config.GROWW_API_KEY
+            self.client = GrowwAPI(self._access_token)
+            if log_fail:
                 if self.place_entry_orders:
                     logger.info("Trader initialized in LIVE mode (entry orders enabled).")
                 else:
@@ -70,10 +79,12 @@ class Trader:
                         "Trader initialized in DRY RUN mode (entry BUY/SELL placement disabled; "
                         "quotes / LTP / exit-modify APIs still active if key is set)."
                     )
-            except Exception as e:
+            return True
+        except Exception as e:
+            if log_fail:
                 logger.error(f"Groww client init failed: {e}")
-        else:
-            logger.warning("GROWW_API_KEY missing. Groww client not initialized.")
+            self.client = None
+            return False
 
     @property
     def execute_orders(self) -> bool:
@@ -85,10 +96,12 @@ class Trader:
         self.place_entry_orders = bool(value)
         self.dry_run = not bool(value)
 
-    def check_connection(self):
+    def check_connection(self, *, log_fail: bool = True):
         """
         Verifies login with Groww.
         """
+        if self.client is None:
+            self._initialize_groww_client(log_fail=log_fail)
         if self.client is None:
             return False
         try:
@@ -97,16 +110,29 @@ class Trader:
             logger.info("Groww connection verified.")
             return True
         except Exception as e:
-            logger.error(f"Groww Connection Error: {str(e)}")
-            return False
+            if log_fail:
+                logger.error(f"Groww Connection Error: {str(e)}")
+            # Token could have become valid after manual approval; retry full client init once.
+            self._initialize_groww_client(log_fail=log_fail)
+            if self.client is None:
+                return False
+            try:
+                self.client.get_user_profile()
+                logger.info("Groww connection verified.")
+                return True
+            except Exception as e2:
+                if log_fail:
+                    logger.error(f"Groww Connection Error: {str(e2)}")
+                return False
 
-    def check_trading_access(self) -> bool:
+    def check_trading_access(self, *, log_fail: bool = True) -> bool:
         """
         Verifies that trading-related API endpoints are accessible from current IP.
         This catches static-IP whitelist issues early at startup.
         """
         if self.client is None:
-            logger.error("Groww trading access check failed: client not initialized.")
+            if log_fail:
+                logger.error("Groww trading access check failed: client not initialized.")
             return False
         try:
             # Read-only trading endpoint, but guarded by the same infra controls.
@@ -115,13 +141,14 @@ class Trader:
             return True
         except Exception as e:
             msg = str(e)
-            if "unregistered ip" in msg.lower():
-                logger.error(
-                    "Groww trading access denied: Request from unregistered IP address. "
-                    "Update static IP in Groww API dashboard (primary/secondary) and retry."
-                )
-            else:
-                logger.error(f"Groww trading access check failed: {msg}")
+            if log_fail:
+                if "unregistered ip" in msg.lower():
+                    logger.error(
+                        "Groww trading access denied: Request from unregistered IP address. "
+                        "Update static IP in Groww API dashboard (primary/secondary) and retry."
+                    )
+                else:
+                    logger.error(f"Groww trading access check failed: {msg}")
             return False
 
     def reconcile_trades(self):

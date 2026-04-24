@@ -94,3 +94,4 @@ class Config:
     MGMT_QUEUE_TTL_MIN = max(5, int(os.getenv("MGMT_QUEUE_TTL_MIN", "360")))
     MARKET_OPEN_TIME_IST = os.getenv("MARKET_OPEN_TIME_IST", "09:15")
     MARKET_CLOSE_TIME_IST = os.getenv("MARKET_CLOSE_TIME_IST", "15:30")
+    GROWW_AUTH_POLL_SEC = max(15, int(os.getenv("GROWW_AUTH_POLL_SEC", "60")))

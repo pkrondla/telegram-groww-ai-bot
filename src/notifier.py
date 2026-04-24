@@ -26,7 +26,7 @@ class Notifier:
     # Public API
     # ------------------------------------------------------------------
 
-    async def send(self, message: str, *, parse_mode: str = "Markdown"):
+    async def send(self, message: str, *, parse_mode: str | None = None):
         """Send a notification to the admin."""
         if Config.BOT_TOKEN:
             await self._send_via_bot(message, parse_mode=parse_mode)
@@ -50,11 +50,11 @@ class Notifier:
         symbol_text = str(symbol or "").strip()
         action_text = str(action or "").upper().strip()
         if symbol_text and symbol_text.upper() != "NONE":
-            # Keep symbol on a dedicated line so failures/skips still show context.
-            msg = f"{icon} **BOT ACTION:** `{action_text}`\n**SYMBOL:** `{symbol_text}`\n\n{result}"
+            # Send high-churn trade results as plain text to avoid Telegram entity parse failures.
+            msg = f"{icon} BOT ACTION: {action_text}\nSYMBOL: {symbol_text}\n\n{result}"
         else:
-            msg = f"{icon} **BOT ACTION:** `{action_text}`\n\n{result}"
-        await self.send(msg)
+            msg = f"{icon} BOT ACTION: {action_text}\n\n{result}"
+        await self.send(msg, parse_mode=None)
 
     async def send_status(self, status: str, detail: str = ""):
         """Send a bot status update (pause/resume/kill/startup)."""
@@ -65,32 +65,35 @@ class Notifier:
             "STARTED": "🚀",
         }
         icon = icons.get(status.upper(), "ℹ️")
-        msg = f"{icon} **Bot Status: {status}**"
+        msg = f"{icon} Bot Status: {status}"
         if detail:
             msg += f"\n{detail}"
-        await self.send(msg)
+        await self.send(msg, parse_mode=None)
 
     async def send_alert(self, title: str, body: str):
         """Generic scheduled alert (e.g. market close warnings)."""
-        msg = f"🔔 **{title}**\n\n{body}"
-        await self.send(msg)
+        msg = f"🔔 {title}\n\n{body}"
+        await self.send(msg, parse_mode=None)
 
     async def send_error(self, context: str, error: str):
         """Send an error notification."""
-        msg = f"❌ **Error in {context}**\n\n`{error}`"
-        await self.send(msg)
+        msg = f"❌ Error in {context}\n\n{error}"
+        await self.send(msg, parse_mode=None)
 
     # ------------------------------------------------------------------
     # Internal delivery
     # ------------------------------------------------------------------
 
-    async def _send_via_bot(self, message: str, *, parse_mode: str = "Markdown"):
+    async def _send_via_bot(self, message: str, *, parse_mode: str | None = "Markdown"):
         try:
             url = f"https://api.telegram.org/bot{Config.BOT_TOKEN}/sendMessage"
+            payload = {"chat_id": Config.ADMIN_ID, "text": message}
+            if parse_mode:
+                payload["parse_mode"] = str(parse_mode)
             resp = await asyncio.to_thread(
                 requests.post,
                 url,
-                data={"chat_id": Config.ADMIN_ID, "text": message, "parse_mode": parse_mode},
+                data=payload,
                 timeout=10,
             )
             if not resp.ok:

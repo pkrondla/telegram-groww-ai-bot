@@ -461,6 +461,25 @@ class Assistant:
         return None
 
     @staticmethod
+    def _extract_update_tgt_leg_index(text: str) -> int:
+        """
+        Extract explicit target leg selector from update-target text.
+        Returns 1/2/3 when explicitly requested (e.g. T1, TARGET 2), else 0 for "all legs".
+        """
+        raw = str(text or "")
+        if not raw.strip():
+            return 0
+        m = re.search(r"\b(?:T|TARGET)\s*([123])\b", raw, re.IGNORECASE)
+        if m:
+            try:
+                idx = int(m.group(1))
+                if idx in (1, 2, 3):
+                    return idx
+            except Exception:
+                return 0
+        return 0
+
+    @staticmethod
     def _extract_hold_target_price(text: str) -> float | None:
         """
         Extract runner target hints from phrases like:
@@ -1078,7 +1097,11 @@ Rules:
 
             update_tgt_price = self._detect_update_tgt(tail)
             if update_tgt_price is not None:
-                logger.info(f"[STAGE 2] Deterministic intent: UPDATE_TGT @ {update_tgt_price}")
+                target_leg_index = self._extract_update_tgt_leg_index(tail)
+                logger.info(
+                    f"[STAGE 2] Deterministic intent: UPDATE_TGT @ {update_tgt_price} "
+                    f"(target_leg_index={target_leg_index or 'ALL'})"
+                )
                 data = self._llm_parse_forced(
                     text,
                     "BUY",
@@ -1089,11 +1112,12 @@ Rules:
                 if data and data.get("is_trade"):
                     data["action"] = "UPDATE_TGT"
                     data["target"] = update_tgt_price
+                    data["target_leg_index"] = int(target_leg_index or 0)
                     data = self._apply_alias_to_data(data)
                     data = self._apply_symbol_factory(data)
                     logger.info(
                         f"[STAGE 2] Signal ready: UPDATE_TGT {data.get('stock')} "
-                        f"new_target={update_tgt_price}"
+                        f"new_target={update_tgt_price} target_leg_index={data.get('target_leg_index', 0) or 'ALL'}"
                     )
                     return data
                 else:

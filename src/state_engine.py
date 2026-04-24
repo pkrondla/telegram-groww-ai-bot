@@ -227,6 +227,7 @@ class StateEngine:
             legacy["stock"] = resolved
             legacy["action"] = "UPDATE_TGT"
             legacy["target"] = new_tgt
+            legacy["target_leg_index"] = int(signal.target_leg_index or 0)
             logger.info(f"[STAGE 3] Forwarding UPDATE_TGT {resolved} to executor.")
             return self._trader.execute_trade(legacy)
 

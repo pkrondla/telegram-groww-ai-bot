@@ -67,6 +67,7 @@ class TradeSignal:
     targets: list[float] = field(default_factory=list)
     size_override_mode: str = ""
     size_override_reason: str = ""
+    target_leg_index: int = 0
 
     # Parser metadata
     raw_child_text: str = ""
@@ -129,6 +130,7 @@ class TradeSignal:
             targets=_to_positive_float_list(data.get("targets") or []),
             size_override_mode=str(data.get("size_override_mode", "") or ""),
             size_override_reason=str(data.get("size_override_reason", "") or ""),
+            target_leg_index=int(float(data.get("target_leg_index", 0) or 0)),
             raw_child_text=raw_child,
             raw_parent_text=raw_parent,
             is_reply=is_reply,
@@ -182,4 +184,5 @@ class TradeSignal:
             "is_trade": True,
             "size_override_mode": self.size_override_mode,
             "size_override_reason": self.size_override_reason,
+            "target_leg_index": int(self.target_leg_index or 0),
         }

@@ -63,6 +63,9 @@ class Config:
     # Single-leg only: place a broker LIMIT at range edge and poll order status (spreads still use LTP queue)
     # BUY → limit price = range low; SELL → limit price = range low (minimum premium for short)
     ENTRY_SINGLE_LIMIT_ORDER = os.getenv("ENTRY_SINGLE_LIMIT_ORDER", "true").lower() == "true"
+    # Simple BUY chase policy: if LTP is above range max, allow market entry only when
+    # reward:risk at current LTP is >= CHASE_MIN_RR; otherwise place LIMIT at RR=CHASE_MIN_RR price.
+    CHASE_MIN_RR = max(0.0, float(os.getenv("CHASE_MIN_RR", "1.0")))
 
     # Active-trade reconciliation watcher (broker positions vs local active_trades.json)
     ACTIVE_RECONCILE_ENABLED = os.getenv("ACTIVE_RECONCILE_ENABLED", "true").lower() == "true"
@@ -81,7 +84,6 @@ class Config:
 
     # End-of-day completed-trades summary (IST).
     EOD_SUMMARY_ENABLED = os.getenv("EOD_SUMMARY_ENABLED", "true").lower() == "true"
-    EOD_SUMMARY_TIME_IST = os.getenv("EOD_SUMMARY_TIME_IST", "15:30")  # HH:MM
     EOD_SUMMARY_POLL_SEC = max(10, int(os.getenv("EOD_SUMMARY_POLL_SEC", "30")))
     EOD_SUMMARY_SKIP_WEEKENDS = os.getenv("EOD_SUMMARY_SKIP_WEEKENDS", "true").lower() == "true"
 

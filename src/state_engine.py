@@ -1,5 +1,4 @@
 from __future__ import annotations
-import re
 from .models import TradeSignal
 from .logger import logger
 
@@ -268,8 +267,15 @@ class StateEngine:
         if not resolved:
             return f"⚠️ NO ACTIVE TRADE: Could not find an open position for {symbol}."
 
+        # Immediate broker-validated progression sync for target-hit messages.
+        prog_msg = self._trader.sync_target_progression_for_symbol(resolved)
+        if prog_msg:
+            logger.info(f"[STAGE 3] RECONCILE progression sync: {prog_msg}")
+
         still_active = self._trader.reconcile_trade_symbol(resolved)
         if still_active:
+            if prog_msg:
+                return f"{prog_msg}\nℹ️ RECONCILE: {resolved} still active on broker."
             return f"ℹ️ RECONCILE: {resolved} still active on broker."
         return f"✅ RECONCILE: {resolved} no longer active on broker; removed from local active book."
 
@@ -398,43 +404,5 @@ class StateEngine:
         logger.info(f"[STAGE 3] Forwarding SPREAD entry ({len(signal.legs)} legs): {leg_summary}")
         return self._trader.execute_trade(signal.to_legacy_dict())
 
-    # ------------------------------------------------------------------
-    # Symbol reconciliation
-    # ------------------------------------------------------------------
-
-    @staticmethod
-    def _symbol_signature(symbol: str) -> tuple[str, str, str] | None:
-        s = str(symbol or "").upper()
-        m = re.search(r"(\d{2,6})(CE|PE)$", s)
-        if not m:
-            return None
-        strike = m.group(1)
-        opt = m.group(2)
-        prefix = s[: m.start()]
-        mu = re.match(r"([A-Z&_\-]+)", prefix)
-        if not mu:
-            return None
-        return mu.group(1), strike, opt
-
     def _resolve_active_symbol(self, symbol: str) -> str | None:
-        active = self._trader._load_active_trades()
-        if symbol in active:
-            return symbol
-        if not active:
-            return None
-
-        req = self._symbol_signature(symbol)
-        if not req:
-            return None
-        ru, rs, ro = req
-
-        candidates = []
-        for k in active:
-            sig = self._symbol_signature(k)
-            if not sig:
-                continue
-            ku, ks, ko = sig
-            if ks == rs and ko == ro and (ku == ru or ku.startswith(ru) or ru.startswith(ku)):
-                candidates.append(k)
-
-        return candidates[0] if len(candidates) == 1 else None
+        return self._trader.resolve_active_symbol(symbol)

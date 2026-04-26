@@ -264,6 +264,11 @@ class BotListener:
                             f"[GROWW] Post-recovery maintenance: active={boot_stats.get('active', 0)} "
                             f"removed={boot_stats.get('removed', 0)} rearmed={boot_stats.get('rearmed', 0)}"
                         )
+                        for alert in (boot_stats.get("alerts") or []):
+                            try:
+                                await self.notifier.send(f"🛡️ **Protection Maintenance**\n\n{alert}")
+                            except Exception as notify_err:
+                                logger.error(f"Post-recovery maintenance alert notify error: {notify_err}")
                     except Exception as e:
                         logger.error(f"[GROWW] Post-recovery maintenance failed: {e}")
                 else:
@@ -297,18 +302,23 @@ class BotListener:
         if t == "HELP" or t.startswith("HELP "):
             return "help"
         # Position sizing mode controls (runtime):
-        # SIZING / SIZING MODE                -> show current mode
-        # SIZING FIXED / SIZING RISK          -> set mode
-        # SIZING MODE FIXED / ... RISK        -> set mode
-        # POSITION SIZING FIXED / ... RISK    -> set mode
+        # SIZING / SIZING MODE                            -> show current modes
+        # SIZING INDEX FIXED|RISK / SIZING STOCK ...      -> set per segment
+        # SIZING FIXED|RISK                               -> set both segments
         if t in ("SIZING", "SIZING MODE", "POSITION SIZING", "POSITION_SIZING_MODE"):
             return "sizing_status"
+        m = re.fullmatch(
+            r"(?:SIZING|SIZING MODE|POSITION SIZING|POSITION_SIZING_MODE)\s+(INDEX|STOCK)\s+(FIXED|RISK)",
+            t,
+        )
+        if m:
+            return f"sizing_{m.group(1).lower()}_{m.group(2).lower()}"
         m = re.fullmatch(
             r"(?:SIZING|SIZING MODE|POSITION SIZING|POSITION_SIZING_MODE)\s+(FIXED|RISK)",
             t,
         )
         if m:
-            return f"sizing_{m.group(1).lower()}"
+            return f"sizing_all_{m.group(1).lower()}"
         # Admin fast exits:
         # - EXIT <TRADING_SYMBOL> : close one position
         # - EXIT ALL              : close every active position
@@ -355,35 +365,52 @@ class BotListener:
             pending = self.trader._load_pending()
             pending_mgmt = self.trader._load_pending_management()
             dry = "ON" if not self.trader.execute_orders else "OFF"
-            sizing_mode = str(Config.POSITION_SIZING_MODE or "fixed").strip().lower()
+            index_mode = str(Config.INDEX_POSITION_SIZING_MODE or "fixed").strip().lower()
+            stock_mode = str(Config.STOCK_POSITION_SIZING_MODE or "fixed").strip().lower()
             detail = (
                 f"State: {self.state_engine.status}\n"
                 f"Dry Run (entry orders only): {dry}\n"
-                f"Position sizing mode: {sizing_mode}\n"
+                f"Position sizing: index={index_mode}, stock={stock_mode}\n"
                 f"Active trades: {len(active)}\n"
                 f"Pending entry queue: {len(pending)}\n"
                 f"Pending management queue: {len(pending_mgmt)}"
             )
             await self.notifier.send_status(self.state_engine.status, detail)
         elif command == "sizing_status":
-            mode = str(Config.POSITION_SIZING_MODE or "fixed").strip().lower()
+            index_mode = str(Config.INDEX_POSITION_SIZING_MODE or "fixed").strip().lower()
+            stock_mode = str(Config.STOCK_POSITION_SIZING_MODE or "fixed").strip().lower()
             await self.notifier.send(
-                "⚙️ **Position Sizing Mode**\n"
-                f"Current: `{mode}`\n\n"
-                "Use `SIZING FIXED` or `SIZING RISK` to change."
+                "⚙️ **Position Sizing Modes**\n"
+                f"Index: `{index_mode}`\n"
+                f"Stock: `{stock_mode}`\n\n"
+                "Use `SIZING INDEX FIXED|RISK`, `SIZING STOCK FIXED|RISK`, or `SIZING FIXED|RISK` (both)."
             )
-        elif command == "sizing_fixed":
-            Config.POSITION_SIZING_MODE = "fixed"
+        elif command == "sizing_all_fixed":
+            Config.INDEX_POSITION_SIZING_MODE = "fixed"
+            Config.STOCK_POSITION_SIZING_MODE = "fixed"
             await self.notifier.send(
-                "⚙️ Position sizing mode set to `fixed`.\n"
+                "⚙️ Position sizing set to `fixed` for index and stock.\n"
                 "Applies immediately for new entries."
             )
-        elif command == "sizing_risk":
-            Config.POSITION_SIZING_MODE = "risk"
+        elif command == "sizing_all_risk":
+            Config.INDEX_POSITION_SIZING_MODE = "risk"
+            Config.STOCK_POSITION_SIZING_MODE = "risk"
             await self.notifier.send(
-                "⚙️ Position sizing mode set to `risk`.\n"
+                "⚙️ Position sizing set to `risk` for index and stock.\n"
                 "Applies immediately for new entries."
             )
+        elif command == "sizing_index_fixed":
+            Config.INDEX_POSITION_SIZING_MODE = "fixed"
+            await self.notifier.send("⚙️ Index position sizing set to `fixed`.")
+        elif command == "sizing_index_risk":
+            Config.INDEX_POSITION_SIZING_MODE = "risk"
+            await self.notifier.send("⚙️ Index position sizing set to `risk`.")
+        elif command == "sizing_stock_fixed":
+            Config.STOCK_POSITION_SIZING_MODE = "fixed"
+            await self.notifier.send("⚙️ Stock position sizing set to `fixed`.")
+        elif command == "sizing_stock_risk":
+            Config.STOCK_POSITION_SIZING_MODE = "risk"
+            await self.notifier.send("⚙️ Stock position sizing set to `risk`.")
         elif command == "trades":
             active = self.trader._load_active_trades()
             await self.notifier.send(self._format_active_trades(active))
@@ -442,9 +469,10 @@ class BotListener:
                 "- EXIT ALL — close all active trades\n"
                 "- REARM — re-arm missing OCO protection for active trades\n"
                 "- CLEAR PENDING — clear pending entry queue\n"
-                "- SIZING — show current position sizing mode\n"
-                "- SIZING FIXED — use configured fixed lots\n"
-                "- SIZING RISK — use risk-based sizing\n"
+                "- SIZING — show current position sizing modes\n"
+                "- SIZING INDEX FIXED|RISK — set index sizing mode\n"
+                "- SIZING STOCK FIXED|RISK — set stock sizing mode\n"
+                "- SIZING FIXED|RISK — set both index and stock modes\n"
                 "- PAUSE — ignore all incoming signals\n"
                 "- RESUME — resume signal processing\n"
                 "- KILL — emergency stop (restart required)\n"
@@ -480,7 +508,7 @@ class BotListener:
     # ------------------------------------------------------------------
 
     async def _handle_message(self, event):
-        child_text = event.raw_text
+        child_text = str(event.raw_text or "")
         parent_text = ""
         is_reply = False
         sender_id = getattr(event, "sender_id", None)
@@ -502,6 +530,11 @@ class BotListener:
 
         # Ignore own bot notifications to prevent feedback loop
         if child_text.startswith("🤖") or "BOT ACTION" in child_text:
+            return
+
+        # Ignore blank/non-text messages early to avoid unnecessary parser/LLM calls.
+        if not child_text.strip():
+            logger.info("[STAGE 1] Empty message body — skipping parse.")
             return
 
         # Admin override commands:

@@ -44,8 +44,9 @@ class Config:
     TARGET_SPLIT_3 = os.getenv("TARGET_SPLIT_3", "60:30:10").strip()
     # Price tick size used to sanitize OCO target/SL prices before broker API calls.
     TARGET_PRICE_TICK_SIZE = max(0.01, float(os.getenv("TARGET_PRICE_TICK_SIZE", "0.05")))
-    # Position sizing mode: fixed (configured lots) or risk (SL-distance based).
-    POSITION_SIZING_MODE = os.getenv("POSITION_SIZING_MODE", "fixed").strip().lower()
+    # Position sizing mode by segment: fixed (configured lots) or risk (SL-distance based).
+    INDEX_POSITION_SIZING_MODE = os.getenv("INDEX_POSITION_SIZING_MODE", "fixed").strip().lower()
+    STOCK_POSITION_SIZING_MODE = os.getenv("STOCK_POSITION_SIZING_MODE", "fixed").strip().lower()
     ACCOUNT_CAPITAL_INR = max(0.0, float(os.getenv("ACCOUNT_CAPITAL_INR", "0")))
     RISK_PCT_PER_TRADE = max(0.0, min(1.0, float(os.getenv("RISK_PCT_PER_TRADE", "0.01"))))
     MAX_TOTAL_OPEN_RISK_PCT = max(0.0, min(1.0, float(os.getenv("MAX_TOTAL_OPEN_RISK_PCT", "0.03"))))
@@ -95,3 +96,4 @@ class Config:
     MARKET_OPEN_TIME_IST = os.getenv("MARKET_OPEN_TIME_IST", "09:15")
     MARKET_CLOSE_TIME_IST = os.getenv("MARKET_CLOSE_TIME_IST", "15:30")
     GROWW_AUTH_POLL_SEC = max(15, int(os.getenv("GROWW_AUTH_POLL_SEC", "60")))
+

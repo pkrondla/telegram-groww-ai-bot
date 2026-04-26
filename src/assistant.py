@@ -290,7 +290,10 @@ class Assistant:
                 # Keep colon-style P&L summaries strict so generic commentary like
                 # "profit booking" does not become a forced EXIT_ALL.
                 if phrase in ("PROFIT :", "LOSS :"):
-                    if re.search(rf"\b{phrase.split(':')[0]}\s*:", chunk, re.IGNORECASE):
+                    # Guard against risk lines like "MAX LOSS: 5000" / "MAX PROFIT: ...",
+                    # which are not exit instructions.
+                    kw = phrase.split(":")[0]
+                    if re.search(rf"(?<!\bMAX\s)\b{kw}\s*:", chunk, re.IGNORECASE):
                         return ("EXIT_ALL", None)
                     continue
                 if self._normalize_for_match(phrase) in n:
@@ -1712,7 +1715,10 @@ Return is_trade: false for:
             data = self._apply_alias_to_data(data)
             data = self._apply_symbol_factory(data)
             if str(data.get("action") or "").upper() == "BUY":
-                ladder_source = " ".join(
+                # Preserve line boundaries so "TARGETS: ..." parsing does not
+                # bleed into the next appended message fragment (which can
+                # introduce strike values as fake extra targets).
+                ladder_source = "\n".join(
                     [
                         str(text or ""),
                         str(parent_text or ""),

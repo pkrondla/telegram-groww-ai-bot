@@ -355,7 +355,15 @@ class Trader:
             t_single = self._num_or(rec.get("target"), 0.0)
             if t_single > 0:
                 signal_targets = [float(t_single)]
-        signal_targets = [float(t) for t in signal_targets[:3] if self._num_or({"v": t}, "v", 0.0) > 0]
+        norm_targets: list[float] = []
+        for t in signal_targets[:3]:
+            try:
+                tv = float(t)
+            except Exception:
+                continue
+            if tv > 0:
+                norm_targets.append(tv)
+        signal_targets = norm_targets
 
         legs_raw = self._sorted_oco_legs(rec)
         oco_legs_snapshot: list[dict] = []
@@ -1069,6 +1077,77 @@ class Trader:
             # Fail-open: don't delete local trade on transient broker/API error.
             return True
 
+    def resolve_active_symbol(self, symbol: str) -> str | None:
+        """
+        Resolve a management symbol to an active-book symbol.
+        Single source of truth for symbol reconciliation across components.
+        """
+        s = str(symbol or "").upper().strip()
+        if not s:
+            return None
+        active = self._load_active_trades()
+        if s in active:
+            return s
+        if not active:
+            return None
+
+        # Fast-path variant matching (month-abbr/month-num and underlying aliases).
+        variant_hits = [v for v in self._variant_list(s) if v in active]
+        if len(variant_hits) == 1:
+            return variant_hits[0]
+        if len(variant_hits) > 1:
+            return variant_hits[0]
+
+        req = self._parse_option_symbol_parts(s)
+        if not req:
+            return None
+
+        candidates: list[str] = []
+        for k in active.keys():
+            got = self._parse_option_symbol_parts(str(k))
+            if not got:
+                continue
+            if (
+                str(req.get("strike") or "") == str(got.get("strike") or "")
+                and str(req.get("option_type") or "") == str(got.get("option_type") or "")
+                and self._underlying_match(str(req.get("underlying") or ""), str(got.get("underlying") or ""))
+            ):
+                candidates.append(str(k))
+
+        if len(candidates) == 1:
+            return candidates[0]
+        if not candidates:
+            return None
+
+        # If multiple candidates exist, prefer exact parsed expiry match when available.
+        req_exp = req.get("expiry")
+        if isinstance(req_exp, datetime.date):
+            exact = []
+            for c in candidates:
+                got = self._parse_option_symbol_parts(c)
+                if got and got.get("expiry") == req_exp:
+                    exact.append(c)
+            if len(exact) == 1:
+                return exact[0]
+
+        return candidates[0]
+
+    def sync_target_progression_for_symbol(self, symbol: str) -> str | None:
+        """
+        Immediate broker-validated progression check for one symbol.
+        Used by target-hit message flow to avoid waiting for periodic reconcile.
+        """
+        resolved = self.resolve_active_symbol(symbol)
+        if not resolved:
+            return None
+        rec = self._get_active_trade_record(resolved)
+        if not rec:
+            return None
+        pos, qty = self._get_open_position_for_symbol(resolved)
+        if qty <= 0:
+            return None
+        return self._sync_multi_target_progress_for_symbol(resolved, rec, pos or {})
+
     def _load_active_trades(self):
         if not os.path.exists(self.active_trades_file):
             return {}
@@ -1497,6 +1576,12 @@ class Trader:
         if not stage_advanced and not sl_changed:
             return None
 
+        logger.info(
+            f"[PROGRESS] {symbol}: stage {prev_stage} -> {new_stage}, "
+            f"sl_true {prev_true:.2f} -> {next_true:.2f} "
+            f"(open_qty={open_qty}, legs={len(legs)})"
+        )
+
         broker_sl = float(next_true)
         if bool(next_rec.get("vol_sl_needs_restore")):
             widened = self._widened_sl_from_true(
@@ -1512,6 +1597,7 @@ class Trader:
                     broker_sl = self._modify_oco_sl(symbol, oid, broker_sl)
                 except Exception as e:
                     if self._is_stale_oco_error(str(e)):
+                        logger.info(f"[PROGRESS] {symbol}: stale OCO leg skipped during SL progression (id={oid}).")
                         continue
                     logger.warning(f"[PROGRESS] SL sync failed for {symbol} id={oid}: {e}")
 
@@ -1530,6 +1616,10 @@ class Trader:
             sl_widened=(broker_sl if bool(next_rec.get("vol_sl_needs_restore")) else 0.0),
             sl_mode=("WIDENED" if bool(next_rec.get("vol_sl_needs_restore")) else "NORMAL"),
             sl_widen_pct=float(next_rec.get("sl_widen_pct") or Config.VOL_SL_WIDEN_PCT),
+        )
+        logger.info(
+            f"[PROGRESS] {symbol}: progression applied. broker_sl={broker_sl:.2f}, "
+            f"sl_true={next_true:.2f}, stage={new_stage}"
         )
         if new_stage == "T1_HIT":
             return f"🔐 SL progression for {symbol}: T1 filled, SL moved to entry ({next_true})."
@@ -2418,9 +2508,20 @@ class Trader:
                     # Prefer current month monthly over farther monthlies.
                     score = 40 + (month_delta * 31)
             else:
-                # Stock monthly only: current month/year and non-stale.
-                if parsed.get("yy") != str(today.year)[-2:] or int(parsed.get("month_num") or 0) != int(today.month):
-                    continue
+                # Stock monthly:
+                # 1) If signal carries explicit month/year, honor it.
+                # 2) If missing/invalid, fall back to current active month.
+                req_yy = str(req_parts.get("yy") or "") if req_parts else ""
+                req_mm = int(req_parts.get("month_num") or 0) if req_parts else 0
+                cand_yy = str(parsed.get("yy") or "")
+                cand_mm = int(parsed.get("month_num") or 0)
+
+                if req_yy and req_mm > 0:
+                    if cand_yy != req_yy or cand_mm != req_mm:
+                        continue
+                else:
+                    if cand_yy != str(today.year)[-2:] or cand_mm != int(today.month):
+                        continue
                 if isinstance(exp, datetime.date) and exp < today:
                     continue
                 score = 100 + (0 if str(trading_symbol).upper() == str(requested_symbol).upper() else 1)
@@ -2599,16 +2700,16 @@ class Trader:
         return str(trade_data.get("action") or "").upper().strip() == "BUY"
 
     def _entry_ref_for_risk(self, trade_data: dict) -> float:
-        # Conservative sizing for BUY: use worst-case entry in range (max).
+        # Sizing reference for BUY: use range minimum (best-case entry).
         er = trade_data.get("entry_range") or [0, 0]
         if isinstance(er, list) and len(er) >= 2:
             try:
-                hi = float(er[1])
-                if hi > 0:
-                    return hi
+                lo = float(er[0])
+                if lo > 0:
+                    return lo
             except Exception:
                 pass
-        return self._num_or(trade_data.get("buy_range_max"), 0.0)
+        return self._num_or(trade_data.get("buy_range_min"), 0.0)
 
     def _open_portfolio_risk_inr(self) -> float:
         trades = self._load_active_trades()
@@ -2706,8 +2807,13 @@ class Trader:
 
         lot_size = self._extract_lot_size(instrument)
         if lot_size:
+            is_index = self._is_index_option_trade(trade_data)
             force_fixed = str(trade_data.get("size_override_mode") or "").upper().strip() == "FIXED"
-            sizing_mode = str(Config.POSITION_SIZING_MODE or "fixed").strip().lower()
+            sizing_mode = (
+                str(Config.INDEX_POSITION_SIZING_MODE if is_index else Config.STOCK_POSITION_SIZING_MODE)
+                .strip()
+                .lower()
+            )
             if force_fixed:
                 sizing_mode = "fixed"
             if sizing_mode == "risk":
@@ -2724,7 +2830,7 @@ class Trader:
                     return 0
                 trade_data["sizing_mode_used"] = "fixed_fallback"
                 trade_data["sizing_diag"] = diag
-            if self._is_index_option_trade(trade_data):
+            if is_index:
                 lots = max(1, int(Config.INDEX_ORDER_LOTS_COUNT))
             else:
                 lots = max(1, int(Config.STOCK_ORDER_LOTS_COUNT))
@@ -2977,16 +3083,18 @@ class Trader:
         except (TypeError, ValueError):
             sl_true = 0.0
         risk_pts = max(entry_basis - sl_true, 0.0)
+        lot_size = int(trade_data.get("lot_size") or 0)
 
         leg_lines = []
         for i, l in enumerate(created_legs):
             tgt_signal = float(l["target_signal"])
             tgt_broker = float(l["target_broker"])
-            rr_text = ""
+            leg_qty = int(l.get("qty") or 0)
+            leg_lots = (float(leg_qty) / float(lot_size)) if lot_size > 0 else 0.0
+            lots_text = f"{leg_lots:.2f}".rstrip("0").rstrip(".") if leg_lots > 0 else "n/a"
             if entry_basis > 0 and risk_pts > 0:
                 reward_pts = max(tgt_signal - entry_basis, 0.0)
                 rr = reward_pts / risk_pts
-                leg_qty = int(l.get("qty") or 0)
                 risk_inr = risk_pts * float(leg_qty)
                 reward_inr = reward_pts * float(leg_qty)
                 rr_text = (
@@ -2994,8 +3102,10 @@ class Trader:
                     f", reward ₹{reward_inr:.2f} ({reward_pts:.2f} pts)"
                     f", R:R {rr:.2f}"
                 )
+            else:
+                rr_text = " | R:R n/a"
             leg_lines.append(
-                f"T{i+1} qty={int(l['qty'])}: signal {tgt_signal} → broker {tgt_broker}{rr_text}"
+                f"T{i+1} qty={leg_qty} (lots={lots_text}): signal {tgt_signal} → broker {tgt_broker}{rr_text}"
             )
         return "Targets:\n" + "\n".join(leg_lines) + f"\nSL: {trade_data['stop_loss']}"
 
@@ -3076,7 +3186,7 @@ class Trader:
             entry_avg_price=float(fill.get("avg_price") or 0.0),
         )
         if oco_line:
-            sizing_mode = str(trade_data.get("sizing_mode_used") or Config.POSITION_SIZING_MODE).upper()
+            sizing_mode = str(trade_data.get("sizing_mode_used") or "").upper() or "FIXED"
             override_reason = str(trade_data.get("size_override_reason") or "").strip()
             sizing_line = (
                 f"📦 Sizing: {sizing_mode}"
@@ -3539,6 +3649,9 @@ class Trader:
         try:
             sl = float(trade_data.get("stop_loss") or 0)
             tgt = float(trade_data.get("target") or 0)
+            lot_size = int(trade_data.get("lot_size") or 0)
+            lots = (float(qty) / float(lot_size)) if lot_size > 0 else 0.0
+            lots_text = f"{lots:.2f}".rstrip("0").rstrip(".") if lots > 0 else "n/a"
             er = trade_data.get("entry_range") or [0, 0]
             range_hi = float(er[1]) if isinstance(er, list) and len(er) > 1 else 0.0
             basis = float(entry_ref or range_hi or 0.0)
@@ -3550,7 +3663,8 @@ class Trader:
             reward_inr = reward_pts * float(qty or 0)
             rr = (reward_pts / risk_pts) if risk_pts > 0 else 0.0
             return (
-                f"📐 Risk/Reward: risk ₹{risk_inr:.2f} ({risk_pts:.2f} pts), "
+                f"📐 Risk/Reward: qty={int(qty or 0)} (lots={lots_text}), "
+                f"risk ₹{risk_inr:.2f} ({risk_pts:.2f} pts), "
                 f"reward ₹{reward_inr:.2f} ({reward_pts:.2f} pts), R:R {rr:.2f}"
             )
         except Exception:

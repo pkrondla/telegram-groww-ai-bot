@@ -60,6 +60,7 @@ class Config:
     ENTRY_QUEUE_ENABLED = os.getenv("ENTRY_QUEUE_ENABLED", "true").lower() == "true"
     ENTRY_QUEUE_POLL_SEC = int(os.getenv("ENTRY_QUEUE_POLL_SEC", "30"))
     ENTRY_QUEUE_MAX_WAIT_MIN = int(os.getenv("ENTRY_QUEUE_MAX_WAIT_MIN", "240"))
+    SIZE_ADVISORY_TTL_SEC = max(60, int(os.getenv("SIZE_ADVISORY_TTL_SEC", "900")))
 
     # Single-leg only: place a broker LIMIT at range edge and poll order status (spreads still use LTP queue)
     # BUY → limit price = range low; SELL → limit price = range low (minimum premium for short)

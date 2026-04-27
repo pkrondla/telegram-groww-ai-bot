@@ -560,7 +560,9 @@ class BotListener:
             self._pending_size_override_mode = advisory_mode
             self._pending_size_override_reason = advisory_reason
             self._pending_size_override_scope = advisory_scope
-            self._pending_size_override_until_ts = datetime.datetime.now().timestamp() + 900
+            self._pending_size_override_until_ts = (
+                datetime.datetime.now().timestamp() + int(Config.SIZE_ADVISORY_TTL_SEC)
+            )
             logger.info(
                 f"[STAGE 1] Size advisory armed for next signal: mode={advisory_mode} "
                 f"scope={advisory_scope} reason={advisory_reason}"

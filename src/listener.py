@@ -39,6 +39,7 @@ _SIZE_OVERRIDE_FIXED_PHRASES = (
     "REDUCE QTY",
     "TRADE SMALL",
 )
+_INDEX_UNDERLYINGS = frozenset({"NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX", "BANKEX"})
 
 
 def _startup_command_reference() -> str:
@@ -73,6 +74,7 @@ class BotListener:
         self.notifier = Notifier()
         self._pending_size_override_mode = ""
         self._pending_size_override_reason = ""
+        self._pending_size_override_scope = "ALL"
         self._pending_size_override_until_ts = 0.0
         self._groww_ready_last_state: bool | None = None
 
@@ -553,13 +555,15 @@ class BotListener:
                 parent_text = reply_msg.raw_text or ""
 
         raw_text = f"[CONTEXT: {parent_text}] {child_text}" if is_reply else child_text
-        advisory_mode, advisory_reason = self._detect_size_override_advisory(child_text)
+        advisory_mode, advisory_reason, advisory_scope = self._detect_size_override_advisory(child_text)
         if advisory_mode:
             self._pending_size_override_mode = advisory_mode
             self._pending_size_override_reason = advisory_reason
+            self._pending_size_override_scope = advisory_scope
             self._pending_size_override_until_ts = datetime.datetime.now().timestamp() + 900
             logger.info(
-                f"[STAGE 1] Size advisory armed for next signal: mode={advisory_mode} reason={advisory_reason}"
+                f"[STAGE 1] Size advisory armed for next signal: mode={advisory_mode} "
+                f"scope={advisory_scope} reason={advisory_reason}"
             )
         logger.info("─" * 60)
         logger.info(f"[STAGE 1] MESSAGE RECEIVED")
@@ -583,20 +587,35 @@ class BotListener:
             logger.info("─" * 60)
             return
 
-        if (
-            not signal.size_override_mode
-            and self._pending_size_override_mode
-            and datetime.datetime.now().timestamp() <= self._pending_size_override_until_ts
-        ):
-            signal.size_override_mode = self._pending_size_override_mode
-            signal.size_override_reason = self._pending_size_override_reason
-            logger.info(
-                f"[STAGE 2] Applied pending size override: {signal.size_override_mode} "
-                f"({signal.size_override_reason})"
-            )
-            self._pending_size_override_mode = ""
-            self._pending_size_override_reason = ""
-            self._pending_size_override_until_ts = 0.0
+        signal_scope = self._signal_trade_scope(signal)
+        # Guard direct in-message advisory against cross-scope application.
+        if signal.size_override_mode:
+            direct_mode, direct_reason, direct_scope = self._detect_size_override_advisory(child_text)
+            if direct_mode and not self._scope_matches_trade(direct_scope, signal_scope):
+                logger.info(
+                    f"[STAGE 2] Ignored direct size override due to scope mismatch: "
+                    f"scope={direct_scope} trade_scope={signal_scope}"
+                )
+                signal.size_override_mode = ""
+                signal.size_override_reason = ""
+
+        if self._pending_size_override_mode and datetime.datetime.now().timestamp() <= self._pending_size_override_until_ts:
+            if (not signal.size_override_mode) and self._scope_matches_trade(self._pending_size_override_scope, signal_scope):
+                signal.size_override_mode = self._pending_size_override_mode
+                signal.size_override_reason = self._pending_size_override_reason
+                logger.info(
+                    f"[STAGE 2] Applied pending size override: {signal.size_override_mode} "
+                    f"(scope={self._pending_size_override_scope}, reason={signal.size_override_reason})"
+                )
+                self._pending_size_override_mode = ""
+                self._pending_size_override_reason = ""
+                self._pending_size_override_scope = "ALL"
+                self._pending_size_override_until_ts = 0.0
+            elif not self._scope_matches_trade(self._pending_size_override_scope, signal_scope):
+                logger.info(
+                    f"[STAGE 2] Pending size override not applied (scope mismatch): "
+                    f"pending_scope={self._pending_size_override_scope} trade_scope={signal_scope}"
+                )
 
         if signal.is_spread:
             symbol_summary = ", ".join(f"{l.action} {l.trading_symbol}" for l in signal.legs)
@@ -625,12 +644,40 @@ class BotListener:
         logger.info("─" * 60)
 
     @staticmethod
-    def _detect_size_override_advisory(text: str) -> tuple[str, str]:
+    def _detect_size_override_advisory(text: str) -> tuple[str, str, str]:
         t = str(text or "").upper()
+        scope = "ALL"
+        has_index_hint = (" INDEX " in f" {t} ") or ("INDEX TRADES" in t) or ("INDEX OPTIONS" in t)
+        has_stock_hint = (" STOCK " in f" {t} ") or ("STOCK OPTIONS" in t)
+        if has_index_hint and not has_stock_hint:
+            scope = "INDEX"
+        elif has_stock_hint and not has_index_hint:
+            scope = "STOCK"
+        elif has_index_hint and has_stock_hint:
+            # Most mixed advisories in channels are "less qty in index, focus stocks".
+            scope = "INDEX"
         for phrase in _SIZE_OVERRIDE_FIXED_PHRASES:
             if phrase in t:
-                return "FIXED", phrase
-        return "", ""
+                return "FIXED", phrase, scope
+        return "", "", "ALL"
+
+    @staticmethod
+    def _signal_trade_scope(signal) -> str:
+        ts = str(getattr(signal, "trading_symbol", "") or "").upper()
+        if not ts:
+            return "UNKNOWN"
+        for idx in _INDEX_UNDERLYINGS:
+            if ts.startswith(idx):
+                return "INDEX"
+        return "STOCK"
+
+    @staticmethod
+    def _scope_matches_trade(scope: str, trade_scope: str) -> bool:
+        s = str(scope or "ALL").upper()
+        t = str(trade_scope or "UNKNOWN").upper()
+        if s == "ALL" or t == "UNKNOWN":
+            return True
+        return s == t
 
     # ------------------------------------------------------------------
     # Startup

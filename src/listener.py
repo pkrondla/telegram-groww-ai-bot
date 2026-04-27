@@ -44,7 +44,7 @@ _INDEX_UNDERLYINGS = frozenset({"NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", 
 
 def _startup_command_reference() -> str:
     """Compact admin command/help text shown in startup notification."""
-    return "Send `HELP` to view all available commands."
+    return "Send HELP to view all available commands."
 
 
 class BotListener:
@@ -100,7 +100,7 @@ class BotListener:
                 for msg in messages:
                     logger.info(f"PENDING: {msg}")
                     try:
-                        await self.notifier.send(f"⏳ **Pending entry**\n\n{msg}")
+                        await self.notifier.send(f"Pending entry\n\n{msg}")
                     except Exception as notify_err:
                         logger.error(f"Pending notify error: {notify_err}")
                         try:
@@ -202,7 +202,7 @@ class BotListener:
                     )
                 for alert in (stats.get("alerts") or []):
                     try:
-                        await self.notifier.send(f"🛡️ **Protection Maintenance**\n\n{alert}")
+                        await self.notifier.send(f"Protection Maintenance\n\n{alert}")
                     except Exception as notify_err:
                         logger.error(f"Active maintenance alert notify error: {notify_err}")
             except asyncio.CancelledError:
@@ -224,7 +224,7 @@ class BotListener:
                 for msg in messages:
                     logger.info(f"[MGMT_QUEUE] {msg}")
                     try:
-                        await self.notifier.send(f"🧠 **Management Queue**\n\n{msg}")
+                        await self.notifier.send(f"Management Queue\n\n{msg}")
                     except Exception as notify_err:
                         logger.error(f"Management queue notify error: {notify_err}")
             except asyncio.CancelledError:
@@ -268,7 +268,7 @@ class BotListener:
                         )
                         for alert in (boot_stats.get("alerts") or []):
                             try:
-                                await self.notifier.send(f"🛡️ **Protection Maintenance**\n\n{alert}")
+                                await self.notifier.send(f"Protection Maintenance\n\n{alert}")
                             except Exception as notify_err:
                                 logger.error(f"Post-recovery maintenance alert notify error: {notify_err}")
                     except Exception as e:
@@ -337,9 +337,9 @@ class BotListener:
     @staticmethod
     def _format_active_trades(active: dict) -> str:
         if not active:
-            return "📭 **Active Trades**\nNo active trades."
+            return "Active Trades\nNo active trades."
 
-        lines = [f"📊 **Active Trades ({len(active)})**"]
+        lines = [f"Active Trades ({len(active)})"]
         for symbol, info in active.items():
             data = info if isinstance(info, dict) else {}
             side = str(data.get("entry_side", "BUY")).upper()
@@ -348,7 +348,7 @@ class BotListener:
             sl = data.get("sl_true", data.get("stop_loss", "-"))
             tgt = data.get("target", "-")
             lines.append(
-                f"• `{symbol}` | {side} | qty={qty} | entry={entry} | sl={sl} | tgt={tgt}"
+                f"- {symbol} | {side} | qty={qty} | entry={entry} | sl={sl} | tgt={tgt}"
             )
         return "\n".join(lines)
 
@@ -382,37 +382,37 @@ class BotListener:
             index_mode = str(Config.INDEX_POSITION_SIZING_MODE or "fixed").strip().lower()
             stock_mode = str(Config.STOCK_POSITION_SIZING_MODE or "fixed").strip().lower()
             await self.notifier.send(
-                "⚙️ **Position Sizing Modes**\n"
-                f"Index: `{index_mode}`\n"
-                f"Stock: `{stock_mode}`\n\n"
-                "Use `SIZING INDEX FIXED|RISK`, `SIZING STOCK FIXED|RISK`, or `SIZING FIXED|RISK` (both)."
+                "Position Sizing Modes\n"
+                f"Index: {index_mode}\n"
+                f"Stock: {stock_mode}\n\n"
+                "Use SIZING INDEX FIXED|RISK, SIZING STOCK FIXED|RISK, or SIZING FIXED|RISK (both)."
             )
         elif command == "sizing_all_fixed":
             Config.INDEX_POSITION_SIZING_MODE = "fixed"
             Config.STOCK_POSITION_SIZING_MODE = "fixed"
             await self.notifier.send(
-                "⚙️ Position sizing set to `fixed` for index and stock.\n"
+                "Position sizing set to fixed for index and stock.\n"
                 "Applies immediately for new entries."
             )
         elif command == "sizing_all_risk":
             Config.INDEX_POSITION_SIZING_MODE = "risk"
             Config.STOCK_POSITION_SIZING_MODE = "risk"
             await self.notifier.send(
-                "⚙️ Position sizing set to `risk` for index and stock.\n"
+                "Position sizing set to risk for index and stock.\n"
                 "Applies immediately for new entries."
             )
         elif command == "sizing_index_fixed":
             Config.INDEX_POSITION_SIZING_MODE = "fixed"
-            await self.notifier.send("⚙️ Index position sizing set to `fixed`.")
+            await self.notifier.send("Index position sizing set to fixed.")
         elif command == "sizing_index_risk":
             Config.INDEX_POSITION_SIZING_MODE = "risk"
-            await self.notifier.send("⚙️ Index position sizing set to `risk`.")
+            await self.notifier.send("Index position sizing set to risk.")
         elif command == "sizing_stock_fixed":
             Config.STOCK_POSITION_SIZING_MODE = "fixed"
-            await self.notifier.send("⚙️ Stock position sizing set to `fixed`.")
+            await self.notifier.send("Stock position sizing set to fixed.")
         elif command == "sizing_stock_risk":
             Config.STOCK_POSITION_SIZING_MODE = "risk"
-            await self.notifier.send("⚙️ Stock position sizing set to `risk`.")
+            await self.notifier.send("Stock position sizing set to risk.")
         elif command == "trades":
             active = self.trader._load_active_trades()
             await self.notifier.send(self._format_active_trades(active))
@@ -437,9 +437,9 @@ class BotListener:
                     "is_trade": True,
                 }
                 msg = await asyncio.to_thread(self.trader.execute_trade, payload)
-                out.append(f"• `{symbol}`: {msg}")
+                out.append(f"- {symbol}: {msg}")
             await self.notifier.send(
-                "🚨 **EXIT ALL completed**\n"
+                "EXIT ALL completed\n"
                 f"Processed {len(symbols)} active trade(s).\n\n" + "\n".join(out)
             )
         elif command.startswith("exit_symbol:"):
@@ -456,7 +456,7 @@ class BotListener:
                 "is_trade": True,
             }
             msg = await asyncio.to_thread(self.trader.execute_trade, payload)
-            await self.notifier.send(f"🚨 **EXIT** `{symbol}`\n\n{msg}")
+            await self.notifier.send(f"EXIT {symbol}\n\n{msg}")
         elif command == "rearm":
             msg = await asyncio.to_thread(self.trader.admin_rearm_protection_for_active_trades)
             await self.notifier.send(msg)
@@ -490,13 +490,13 @@ class BotListener:
         elif command == "dryrun_on":
             self.trader.execute_orders = False
             await self.notifier.send(
-                "🧪 **DRY RUN enabled.** Entry BUY/SELL (market/limit) are not placed. "
+                "DRY RUN enabled. Entry BUY/SELL (market/limit) are not placed. "
                 "LTP/quotes still use Groww if configured. EXIT/trail/target use the broker only "
                 "for positions opened with a real order id; simulated trades stay local-only."
             )
         elif command == "dryrun_off":
             self.trader.execute_orders = True
-            await self.notifier.send("🔴 **DRY RUN disabled.** LIVE entry orders are now active.")
+            await self.notifier.send("DRY RUN disabled. LIVE entry orders are now active.")
         elif command == "clear_pending":
             removed = await asyncio.to_thread(self.trader.clear_pending_entries)
             await self.notifier.send(

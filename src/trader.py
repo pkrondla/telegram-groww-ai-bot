@@ -1890,8 +1890,8 @@ class Trader:
                         vol_sl_widen_done_for=today,
                     )
                     lines.append(
-                        f"🛡️ VOL_SL WIDEN: `{symbol}` broker SL → `{widened}` "
-                        f"(sl_true `{sl_true}`, pct `{pct}`)."
+                        f"VOL_SL WIDEN: {symbol} broker SL -> {widened} "
+                        f"(sl_true {sl_true}, pct {pct})."
                     )
                 except Exception as e:
                     if self._is_stale_oco_error(str(e)) and self.client:
@@ -1917,18 +1917,18 @@ class Trader:
                                     vol_sl_widen_done_for=today,
                                 )
                                 lines.append(
-                                    f"🛡️ VOL_SL WIDEN RE-ARMED: `{symbol}` broker SL → `{retry_widened}` "
-                                    f"(sl_true `{sl_true}`, pct `{pct}`)."
+                                    f"VOL_SL WIDEN RE-ARMED: {symbol} broker SL -> {retry_widened} "
+                                    f"(sl_true {sl_true}, pct {pct})."
                                 )
                             else:
                                 msg = alert or str(e)
-                                lines.append(f"❌ VOL_SL widen failed for `{symbol}`: {msg}")
+                                lines.append(f"VOL_SL widen failed for {symbol}: {msg}")
                         except Exception as rearm_err:
                             logger.error(f"[VOL_SL] Widen re-arm failed for {symbol}: {rearm_err}", exc_info=True)
-                            lines.append(f"❌ VOL_SL widen failed for `{symbol}`: {rearm_err}")
+                            lines.append(f"VOL_SL widen failed for {symbol}: {rearm_err}")
                     else:
                         logger.error(f"[VOL_SL] Widen failed for {symbol}: {e}", exc_info=True)
-                        lines.append(f"❌ VOL_SL widen failed for `{symbol}`: {e}")
+                        lines.append(f"VOL_SL widen failed for {symbol}: {e}")
                 rec = self._get_active_trade_record(symbol) or rec
 
             if want_restore:
@@ -1944,7 +1944,7 @@ class Trader:
                     lines.append(msg)
                 except Exception as e:
                     logger.error(f"[VOL_SL] Restore failed for {symbol}: {e}", exc_info=True)
-                    lines.append(f"❌ VOL_SL restore failed for `{symbol}`: {e}")
+                    lines.append(f"VOL_SL restore failed for {symbol}: {e}")
 
         return lines
 

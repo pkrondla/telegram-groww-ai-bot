@@ -78,6 +78,32 @@ class BotListener:
         self._pending_size_override_until_ts = 0.0
         self._groww_ready_last_state: bool | None = None
 
+    @staticmethod
+    def _parse_hhmm_ist(raw: str) -> tuple[int, int] | None:
+        s = str(raw or "").strip()
+        m = re.match(r"^(\d{1,2}):(\d{2})$", s)
+        if not m:
+            return None
+        hh, mm = int(m.group(1)), int(m.group(2))
+        if hh < 0 or hh > 23 or mm < 0 or mm > 59:
+            return None
+        return hh, mm
+
+    def _is_broker_window_open_ist(self) -> bool:
+        ist = pytz.timezone("Asia/Kolkata")
+        now = datetime.datetime.now(ist)
+        if now.weekday() >= 5:
+            return False
+        open_t = self._parse_hhmm_ist(Config.MARKET_OPEN_TIME_IST)
+        close_t = self._parse_hhmm_ist(Config.MARKET_CLOSE_TIME_IST)
+        if not open_t or not close_t:
+            return False
+        market_open = now.replace(hour=open_t[0], minute=open_t[1], second=0, microsecond=0)
+        market_close = now.replace(hour=close_t[0], minute=close_t[1], second=0, microsecond=0)
+        window_start = market_open - datetime.timedelta(minutes=int(Config.BROKER_WINDOW_PREOPEN_MIN))
+        window_end = market_close + datetime.timedelta(minutes=int(Config.BROKER_WINDOW_POSTCLOSE_MIN))
+        return window_start <= now <= window_end
+
     # ------------------------------------------------------------------
     # Background tasks
     # ------------------------------------------------------------------
@@ -91,6 +117,8 @@ class BotListener:
             try:
                 await asyncio.sleep(interval)
                 if not self.state_engine.is_active():
+                    continue
+                if not self._is_broker_window_open_ist():
                     continue
                 pending_items = await asyncio.to_thread(self.trader._load_pending)
                 pending_count = len(pending_items)
@@ -118,6 +146,9 @@ class BotListener:
         logger.info("Market Alert Scheduler Started.")
         while True:
             try:
+                if not self._is_broker_window_open_ist():
+                    await asyncio.sleep(30)
+                    continue
                 now = datetime.datetime.now(ist)
                 current_time = now.strftime("%H:%M")
                 if current_time in ["14:45", "15:15"]:
@@ -148,6 +179,8 @@ class BotListener:
                 await asyncio.sleep(interval)
                 if not self.state_engine.is_active():
                     continue
+                if not self._is_broker_window_open_ist():
+                    continue
                 lines = await asyncio.to_thread(self.trader.run_volatility_sl_schedule_tick)
                 for line in lines:
                     logger.info(f"[VOL_SL] {line}")
@@ -169,6 +202,8 @@ class BotListener:
         while True:
             try:
                 await asyncio.sleep(interval)
+                if not self._is_broker_window_open_ist():
+                    continue
                 msg = await asyncio.to_thread(self.trader.run_eod_summary_tick)
                 if msg:
                     logger.info("[EOD] Sending end-of-day summary alert.")
@@ -188,6 +223,8 @@ class BotListener:
             try:
                 await asyncio.sleep(interval)
                 if not self.state_engine.is_active():
+                    continue
+                if not self._is_broker_window_open_ist():
                     continue
                 active_trades = await asyncio.to_thread(self.trader._load_active_trades)
                 active_count = len(active_trades)
@@ -220,6 +257,8 @@ class BotListener:
                 await asyncio.sleep(interval)
                 if not self.state_engine.is_active():
                     continue
+                if not self._is_broker_window_open_ist():
+                    continue
                 messages = await asyncio.to_thread(self.trader.process_management_queue)
                 for msg in messages:
                     logger.info(f"[MGMT_QUEUE] {msg}")
@@ -243,6 +282,8 @@ class BotListener:
         while True:
             try:
                 await asyncio.sleep(interval)
+                if not self._is_broker_window_open_ist():
+                    continue
                 conn_ok = await asyncio.to_thread(self.trader.check_connection, log_fail=False)
                 trade_ok = await asyncio.to_thread(self.trader.check_trading_access, log_fail=False) if conn_ok else False
                 ready = bool(conn_ok and trade_ok)

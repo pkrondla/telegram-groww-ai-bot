@@ -68,6 +68,9 @@ class Config:
     # Simple BUY chase policy: if LTP is above range max, allow market entry only when
     # reward:risk at current LTP is >= CHASE_MIN_RR; otherwise place LIMIT at RR=CHASE_MIN_RR price.
     CHASE_MIN_RR = max(0.0, float(os.getenv("CHASE_MIN_RR", "1.0")))
+    # Which parsed target to use for chase R:R math (1-based index into target ladder).
+    # Example: 1 -> T1, 2 -> T2, 3 -> T3. Falls back to T1 when unavailable.
+    CHASE_RR_TARGET_INDEX = min(3, max(1, int(os.getenv("CHASE_RR_TARGET_INDEX", "1"))))
 
     # Active-trade reconciliation watcher (broker positions vs local active_trades.json)
     ACTIVE_RECONCILE_ENABLED = os.getenv("ACTIVE_RECONCILE_ENABLED", "true").lower() == "true"
@@ -96,5 +99,7 @@ class Config:
     MGMT_QUEUE_TTL_MIN = max(5, int(os.getenv("MGMT_QUEUE_TTL_MIN", "360")))
     MARKET_OPEN_TIME_IST = os.getenv("MARKET_OPEN_TIME_IST", "09:15")
     MARKET_CLOSE_TIME_IST = os.getenv("MARKET_CLOSE_TIME_IST", "15:30")
+    BROKER_WINDOW_PREOPEN_MIN = max(0, int(os.getenv("BROKER_WINDOW_PREOPEN_MIN", "15")))
+    BROKER_WINDOW_POSTCLOSE_MIN = max(0, int(os.getenv("BROKER_WINDOW_POSTCLOSE_MIN", "15")))
     GROWW_AUTH_POLL_SEC = max(15, int(os.getenv("GROWW_AUTH_POLL_SEC", "60")))
 

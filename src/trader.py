@@ -327,6 +327,74 @@ class Trader:
             logger.debug(f"Fill fetch failed for {groww_order_id}: {e}")
         return info
 
+    def _reconcile_exit_fill_from_positions(self, *, symbol: str, active_rec: dict | None) -> dict | None:
+        """
+        Best-effort exit fill inference for reconcile-close scenarios where no explicit
+        EXIT_ALL order id exists.
+        Priority:
+          1) OCO leg smart-order payloads saved in active_trades (best source)
+          2) Broker FNO positions averages/quantities (fallback)
+        """
+        if self.client is None:
+            return None
+        rec = self._normalize_active_trade_record(active_rec or {})
+        oco_fill = self._infer_exit_fill_from_oco_legs(symbol=symbol, active_rec=rec)
+        if oco_fill:
+            return oco_fill
+        side = str(rec.get("entry_side") or "BUY").upper()
+        try:
+            fno_positions = self.client.get_positions_for_user(segment="FNO")
+            positions = fno_positions.get("positions", []) if isinstance(fno_positions, dict) else []
+        except Exception as e:
+            logger.debug(f"[RECONCILE] Could not fetch positions for exit-fill inference {symbol}: {e}")
+            return None
+
+        rows = [p for p in positions if str(p.get("trading_symbol") or "") == str(symbol)]
+        if not rows:
+            return None
+
+        qty_candidates = (
+            {"sell_quantity", "sell_qty", "day_sell_qty", "day_sell_quantity", "sold_qty", "sellfilledqty"}
+            if side == "BUY"
+            else {"buy_quantity", "buy_qty", "day_buy_qty", "day_buy_quantity", "bought_qty", "buyfilledqty"}
+        )
+        avg_candidates = (
+            {
+                "sell_average_price",
+                "sell_avg_price",
+                "sell_avg",
+                "average_sell_price",
+                "day_sell_avg_price",
+                "day_sell_average_price",
+                "sell_price_avg",
+            }
+            if side == "BUY"
+            else {
+                "buy_average_price",
+                "buy_avg_price",
+                "buy_avg",
+                "average_buy_price",
+                "day_buy_avg_price",
+                "day_buy_average_price",
+                "buy_price_avg",
+            }
+        )
+
+        best: dict | None = None
+        for row in rows:
+            ex_qty = self._walk_for_numeric_key(row, qty_candidates) or 0.0
+            ex_avg = self._walk_for_numeric_key(row, avg_candidates) or 0.0
+            if ex_qty > 0 and ex_avg > 0:
+                cand = {
+                    "exit_price": float(ex_avg),
+                    "exit_qty": int(abs(ex_qty)),
+                    "source": "broker_positions",
+                    "order_id": "",
+                }
+                if best is None or int(cand["exit_qty"]) > int(best.get("exit_qty") or 0):
+                    best = cand
+        return best
+
     def _record_completed_trade(
         self,
         *,
@@ -376,6 +444,8 @@ class Trader:
                     "target_broker": float(self._num_or(leg.get("target_broker"), 0.0)),
                     "status": str(leg.get("status") or "UNKNOWN").upper(),
                     "smart_order_id": str(leg.get("smart_order_id") or ""),
+                    "target_order_id": str(leg.get("target_order_id") or ""),
+                    "stop_order_id": str(leg.get("stop_order_id") or ""),
                 }
             )
 
@@ -744,8 +814,8 @@ class Trader:
                     duration="DAY",
                     target={
                         "trigger_price": eff_tgt,
-                        "price": eff_tgt,
-                        "order_type": "LIMIT",
+                        "price": None,
+                        "order_type": "MARKET",
                     },
                     stop_loss={
                         "trigger_price": float(broker_sl),
@@ -768,6 +838,8 @@ class Trader:
                     )
                 raise
             new_id = self._extract_smart_order_id(resp, fallback=rearm_ref)
+            verify_payload = self._get_oco_order_payload(str(new_id or ""))
+            target_order_id, stop_order_id = self._extract_oco_leg_child_order_ids(verify_payload)
             created_legs.append(
                 {
                     "smart_order_id": str(new_id or ""),
@@ -776,6 +848,8 @@ class Trader:
                     "target_broker": float(eff_tgt),
                     "target_index": int(leg.get("target_index") or 1),
                     "status": "ACTIVE",
+                    "target_order_id": str(target_order_id or ""),
+                    "stop_order_id": str(stop_order_id or ""),
                 }
             )
         if not created_legs:
@@ -920,14 +994,31 @@ class Trader:
                 stats["removed"] += 1
                 try:
                     nrec = self._normalize_active_trade_record(rec)
-                    fallback_exit = self._num_or(nrec.get("entry_avg_price"), 0.0)
-                    fallback_qty = int(self._num_or(nrec.get("entry_qty"), 0))
+                    inferred = self._reconcile_exit_fill_from_positions(symbol=symbol, active_rec=nrec) or {}
+                    fallback_exit = (
+                        float(inferred.get("exit_price"))
+                        if float(self._num_or(inferred.get("exit_price"), 0.0)) > 0
+                        else self._num_or(nrec.get("entry_avg_price"), 0.0)
+                    )
+                    fallback_qty = (
+                        int(abs(self._num_or(inferred.get("exit_qty"), 0)))
+                        if int(abs(self._num_or(inferred.get("exit_qty"), 0))) > 0
+                        else int(self._num_or(nrec.get("entry_qty"), 0))
+                    )
+                    close_reason = (
+                        "RECONCILE_OCO_FILL"
+                        if inferred.get("source") == "oco_legs"
+                        else "RECONCILE_BROKER_FILL"
+                        if inferred.get("source") == "broker_positions"
+                        else "RECONCILE_FLAT"
+                    )
                     self._record_completed_trade(
                         symbol=symbol,
                         active_rec=nrec,
-                        close_reason="RECONCILE_FLAT",
+                        close_reason=close_reason,
                         exit_price=fallback_exit,
                         exit_qty=fallback_qty,
+                        close_order_id=str(inferred.get("order_id") or ""),
                     )
                 except Exception as e:
                     logger.warning(f"[RECONCILE] Could not journal closed trade for {symbol}: {e}")
@@ -1061,14 +1152,31 @@ class Trader:
             if symbol in active_symbols:
                 return True
             logger.info(f"Reconcile symbol: {symbol} is not active on broker. Removing local active trade row.")
-            fallback_exit = self._num_or(rec.get("entry_avg_price"), 0.0)
-            fallback_qty = int(self._num_or(rec.get("entry_qty"), 0))
+            inferred = self._reconcile_exit_fill_from_positions(symbol=symbol, active_rec=rec) or {}
+            fallback_exit = (
+                float(inferred.get("exit_price"))
+                if float(self._num_or(inferred.get("exit_price"), 0.0)) > 0
+                else self._num_or(rec.get("entry_avg_price"), 0.0)
+            )
+            fallback_qty = (
+                int(abs(self._num_or(inferred.get("exit_qty"), 0)))
+                if int(abs(self._num_or(inferred.get("exit_qty"), 0))) > 0
+                else int(self._num_or(rec.get("entry_qty"), 0))
+            )
+            close_reason = (
+                "RECONCILE_OCO_FILL"
+                if inferred.get("source") == "oco_legs"
+                else "RECONCILE_BROKER_FILL"
+                if inferred.get("source") == "broker_positions"
+                else "RECONCILE_FLAT"
+            )
             self._record_completed_trade(
                 symbol=symbol,
                 active_rec=rec,
-                close_reason="RECONCILE_FLAT",
+                close_reason=close_reason,
                 exit_price=fallback_exit,
                 exit_qty=fallback_qty,
+                close_order_id=str(inferred.get("order_id") or ""),
             )
             self._remove_active_trade(symbol)
             return False
@@ -1200,6 +1308,8 @@ class Trader:
                             "target_broker": tgt_b,
                             "target_index": int(item.get("target_index") or 0),
                             "status": str(item.get("status") or "ACTIVE").upper(),
+                            "target_order_id": str(item.get("target_order_id") or ""),
+                            "stop_order_id": str(item.get("stop_order_id") or ""),
                         }
                     )
             if norm_legs:
@@ -1427,6 +1537,8 @@ class Trader:
                         "target_broker": float(leg.get("target_broker") or 0),
                         "target_index": int(leg.get("target_index") or 0),
                         "status": str(leg.get("status") or "ACTIVE").upper(),
+                        "target_order_id": str(leg.get("target_order_id") or ""),
+                        "stop_order_id": str(leg.get("stop_order_id") or ""),
                     }
                 )
             if current.get("oco_legs") and not current.get("smart_order_id"):
@@ -1707,11 +1819,21 @@ class Trader:
             segment=self.SMART_SEGMENT,
             target={
                 "trigger_price": float(tgt),
-                "price": float(tgt),
-                "order_type": "LIMIT",
             },
         )
         return float(tgt)
+
+    @staticmethod
+    def _is_transient_update_tgt_error(err: str) -> bool:
+        low = str(err or "").lower()
+        return (
+            "unexpected error occurred while processing your request" in low
+            or "internal server error" in low
+            or "service unavailable" in low
+            or "gateway timeout" in low
+            or "temporarily unavailable" in low
+            or "try again" in low
+        )
 
     @staticmethod
     def _is_stale_oco_error(err: str) -> bool:
@@ -1968,14 +2090,179 @@ class Trader:
                     return str(v)
         return fallback
 
+    def _get_oco_order_payload(self, smart_order_id: str) -> dict:
+        if not self.client or not smart_order_id:
+            return {}
+        try:
+            res = self.client.get_smart_order(
+                segment=self.client.SEGMENT_FNO,
+                smart_order_type=self.client.SMART_ORDER_TYPE_OCO,
+                smart_order_id=str(smart_order_id),
+            )
+            if isinstance(res, dict):
+                payload = res.get("payload")
+                if isinstance(payload, dict):
+                    return payload
+                return res
+        except Exception as e:
+            logger.warning(f"OCO verify get_smart_order failed for id={smart_order_id}: {e}")
+        return {}
+
+    @staticmethod
+    def _iter_dict_nodes(payload):
+        if isinstance(payload, dict):
+            yield payload
+            for v in payload.values():
+                yield from Trader._iter_dict_nodes(v)
+        elif isinstance(payload, list):
+            for item in payload:
+                yield from Trader._iter_dict_nodes(item)
+
+    @staticmethod
+    def _extract_order_id_from_node(node: dict) -> str:
+        if not isinstance(node, dict):
+            return ""
+        for key in (
+            "groww_order_id",
+            "growwOrderId",
+            "order_id",
+            "orderId",
+            "id",
+            "oms_order_id",
+            "omsOrderId",
+        ):
+            val = node.get(key)
+            if val:
+                return str(val)
+        return ""
+
+    @classmethod
+    def _extract_oco_leg_child_order_ids(cls, payload: dict) -> tuple[str, str]:
+        """
+        Best-effort extraction of target-leg and stop-leg broker order ids from
+        smart-order payload. Field names can vary by API version.
+        """
+        target_id = ""
+        stop_id = ""
+        if not isinstance(payload, dict):
+            return target_id, stop_id
+        for node in cls._iter_dict_nodes(payload):
+            text = cls._order_status_upper_blob(node)
+            oid = cls._extract_order_id_from_node(node)
+            if not oid:
+                continue
+            if not target_id and any(k in text for k in ("TARGET", "TAKE_PROFIT", "PROFIT", "LIMIT_EXIT")):
+                target_id = oid
+            if not stop_id and any(k in text for k in ("STOP", "SL", "STOPLOSS", "STOP_LOSS")):
+                stop_id = oid
+        return target_id, stop_id
+
+    @classmethod
+    def _extract_oco_fill_from_payload(cls, payload: dict) -> dict | None:
+        """
+        Extract executed fill info from OCO smart-order payload.
+        Prefers filled/completed nodes and falls back to best-effort payload-level values.
+        """
+        if not isinstance(payload, dict):
+            return None
+        avg_keys = {
+            "average_price",
+            "avg_price",
+            "avgprice",
+            "traded_price",
+            "trade_price",
+            "executed_price",
+            "fill_price",
+            "price",
+        }
+        qty_keys = {
+            "filled_quantity",
+            "filled_qty",
+            "traded_quantity",
+            "traded_qty",
+            "executed_quantity",
+            "executed_qty",
+            "quantity",
+            "qty",
+        }
+        best: dict | None = None
+        for node in cls._iter_dict_nodes(payload):
+            text = cls._order_status_upper_blob(node)
+            status_good = any(k in text for k in ("FILLED", "COMPLETE", "COMPLETED", "EXECUTED", "DONE"))
+            if not status_good:
+                continue
+            avg = cls._walk_for_numeric_key(node, avg_keys) or 0.0
+            qty = cls._walk_for_numeric_key(node, qty_keys) or 0.0
+            if avg <= 0 or qty <= 0:
+                continue
+            cand = {
+                "exit_price": float(avg),
+                "exit_qty": int(abs(qty)),
+                "source": "oco_payload",
+                "order_id": cls._extract_order_id_from_node(node),
+            }
+            if best is None or int(cand["exit_qty"]) > int(best.get("exit_qty") or 0):
+                best = cand
+        if best:
+            return best
+        avg = cls._walk_for_numeric_key(payload, avg_keys) or 0.0
+        qty = cls._walk_for_numeric_key(payload, qty_keys) or 0.0
+        if avg > 0 and qty > 0:
+            return {
+                "exit_price": float(avg),
+                "exit_qty": int(abs(qty)),
+                "source": "oco_payload_fallback",
+                "order_id": "",
+            }
+        return None
+
+    def _infer_exit_fill_from_oco_legs(self, *, symbol: str, active_rec: dict | None) -> dict | None:
+        """
+        Query each saved OCO smart order id and aggregate any filled exit leg(s).
+        """
+        rec = self._normalize_active_trade_record(active_rec or {})
+        oids = self._oco_ids_from_record(rec)
+        if not oids or self.client is None:
+            return None
+        fills: list[dict] = []
+        for oid in oids:
+            payload = self._get_oco_order_payload(str(oid))
+            fill = self._extract_oco_fill_from_payload(payload)
+            if fill and float(fill.get("exit_price") or 0) > 0 and int(fill.get("exit_qty") or 0) > 0:
+                fill["smart_order_id"] = str(oid)
+                fills.append(fill)
+        if not fills:
+            return None
+        total_qty = sum(int(f.get("exit_qty") or 0) for f in fills)
+        if total_qty <= 0:
+            return None
+        weighted = sum(float(f.get("exit_price") or 0.0) * int(f.get("exit_qty") or 0) for f in fills) / float(total_qty)
+        order_ids = [str(f.get("order_id") or "") for f in fills if str(f.get("order_id") or "")]
+        return {
+            "exit_price": float(weighted),
+            "exit_qty": int(total_qty),
+            "source": "oco_legs",
+            "order_id": (order_ids[0] if order_ids else ""),
+        }
+
+    @staticmethod
+    def _oco_payload_has_target(payload: dict) -> bool:
+        if not isinstance(payload, dict):
+            return False
+        tgt = payload.get("target")
+        if not isinstance(tgt, dict):
+            return False
+        trig = tgt.get("triggerPrice", tgt.get("trigger_price"))
+        return trig not in (None, "", 0, "0", "0.0")
+
     @staticmethod
     def _parse_split_config(raw: str, expected_parts: int) -> list[int]:
         parts = [p.strip() for p in str(raw or "").split(":") if p.strip()]
         if len(parts) != expected_parts:
             raise ValueError(f"Expected {expected_parts} ratio parts, got {len(parts)}")
         vals = [int(p) for p in parts]
-        if any(v <= 0 for v in vals):
-            raise ValueError("Ratio values must be positive")
+        if any(v < 0 for v in vals):
+            raise ValueError("Ratio values must be non-negative")
         if sum(vals) != 100:
             raise ValueError("Ratio values must sum to 100")
         return vals
@@ -2022,6 +2309,10 @@ class Trader:
         if unit <= 0:
             unit = 1
         total_lots = max(1, qty // unit)
+        # Policy: for single-lot entries, prioritize runner capture by targeting T2.
+        # If T2 is unavailable, gracefully fall back to T1.
+        if total_lots == 1 and len(targets) >= 2:
+            return [{"qty": qty, "target_signal": float(targets[1]), "target_index": 2}]
         if len(targets) == 2:
             ratios = cls._parse_split_config(Config.TARGET_SPLIT_2, 2)
             t1 = min(int(math.ceil(total_lots * ratios[0] / 100.0)), total_lots)
@@ -3012,6 +3303,7 @@ class Trader:
             return None
 
         created_legs: list[dict] = []
+        oco_warnings: list[str] = []
         for leg in plan:
             leg_qty = int(leg["qty"])
             leg_tgt_signal = float(leg["target_signal"])
@@ -3036,8 +3328,8 @@ class Trader:
                 duration="DAY",
                 target={
                     "trigger_price": eff_tgt,
-                    "price": eff_tgt,
-                    "order_type": "LIMIT",
+                    "price": None,
+                    "order_type": "MARKET",
                 },
                 stop_loss={
                     "trigger_price": float(broker_sl),
@@ -3045,7 +3337,73 @@ class Trader:
                     "order_type": "SL",
                 },
             )
+            logger.info(
+                f"OCO leg response {symbol}: ref={oco_ref} target={eff_tgt} sl={broker_sl} "
+                f"resp={(str(oco_resp) or '')[:500]}"
+            )
+            blob = self._order_status_upper_blob(oco_resp)
+            if "TARGET" not in blob or "STOP" not in blob:
+                logger.warning(
+                    f"OCO leg response may be incomplete for {symbol}: ref={oco_ref} "
+                    f"(target/sl fields not clearly present in response)"
+                )
             smart_order_id = self._extract_smart_order_id(oco_resp, fallback=oco_ref)
+            verify_payload = self._get_oco_order_payload(str(smart_order_id or ""))
+            target_order_id, stop_order_id = self._extract_oco_leg_child_order_ids(verify_payload)
+            has_target = self._oco_payload_has_target(verify_payload)
+            if not has_target:
+                logger.warning(
+                    f"OCO leg verify failed (target missing) for {symbol} id={smart_order_id}. "
+                    "Retrying with MARKET target leg."
+                )
+                # Cancel potentially partial SL-only protection before re-create.
+                try:
+                    self.client.cancel_smart_order(
+                        segment=self.client.SEGMENT_FNO,
+                        smart_order_type=self.client.SMART_ORDER_TYPE_OCO,
+                        smart_order_id=str(smart_order_id or ""),
+                    )
+                except Exception as ce:
+                    logger.warning(f"OCO partial cancel failed for {symbol} id={smart_order_id}: {ce}")
+
+                retry_ref = str(uuid.uuid4())[:15]
+                retry_resp = self.client.create_smart_order(
+                    smart_order_type=self.client.SMART_ORDER_TYPE_OCO,
+                    reference_id=retry_ref,
+                    segment=segment,
+                    trading_symbol=symbol,
+                    quantity=leg_qty,
+                    net_position_quantity=leg_qty,
+                    transaction_type="SELL",
+                    product_type=product_type,
+                    exchange=exchange,
+                    duration="DAY",
+                    target={
+                        "trigger_price": eff_tgt,
+                        "price": None,
+                        "order_type": "MARKET",
+                    },
+                    stop_loss={
+                        "trigger_price": float(broker_sl),
+                        "price": float(broker_sl),
+                        "order_type": "SL",
+                    },
+                )
+                logger.info(
+                    f"OCO leg retry response {symbol}: ref={retry_ref} target={eff_tgt} sl={broker_sl} "
+                    f"resp={(str(retry_resp) or '')[:500]}"
+                )
+                smart_order_id = self._extract_smart_order_id(retry_resp, fallback=retry_ref)
+                verify_payload = self._get_oco_order_payload(str(smart_order_id or ""))
+                target_order_id, stop_order_id = self._extract_oco_leg_child_order_ids(verify_payload)
+                has_target = self._oco_payload_has_target(verify_payload)
+                if not has_target:
+                    warn = (
+                        f"Target leg missing on broker for {symbol} leg T{int(leg.get('target_index') or 1)} "
+                        f"after create+retry."
+                    )
+                    logger.error(f"[STAGE 4] {warn}")
+                    oco_warnings.append(warn)
             created_legs.append(
                 {
                     "smart_order_id": str(smart_order_id or ""),
@@ -3053,7 +3411,9 @@ class Trader:
                     "target_signal": leg_tgt_signal,
                     "target_broker": eff_tgt,
                     "target_index": int(leg.get("target_index") or 0),
-                    "status": "ACTIVE",
+                    "status": ("ACTIVE" if has_target else "SL_ONLY"),
+                    "target_order_id": str(target_order_id or ""),
+                    "stop_order_id": str(stop_order_id or ""),
                 }
             )
 
@@ -3107,7 +3467,10 @@ class Trader:
             leg_lines.append(
                 f"T{i+1} qty={leg_qty} (lots={lots_text}): signal {tgt_signal} → broker {tgt_broker}{rr_text}"
             )
-        return "Targets:\n" + "\n".join(leg_lines) + f"\nSL: {trade_data['stop_loss']}"
+        out = "Targets:\n" + "\n".join(leg_lines) + f"\nSL: {trade_data['stop_loss']}"
+        if oco_warnings:
+            out += "\n" + "\n".join([f"Warning: {w}" for w in oco_warnings])
+        return out
 
     def _finalize_option_order(
         self,
@@ -3176,6 +3539,28 @@ class Trader:
             fallback_price=float(ltp or 0.0),
             fallback_qty=int(quantity),
         )
+        # Persist the entry immediately even if OCO is not attached (e.g., SL=0).
+        # This keeps `active_trades.json` consistent with broker state and enables later
+        # management actions (EXIT/TRAIL/UPDATE_TGT) and reconciliation.
+        try:
+            self._save_active_trade(
+                symbol,
+                "",
+                stop_loss=float(trade_data.get("stop_loss") or 0),
+                target=float(trade_data.get("target") or 0),
+                entry_side=action,
+                entry_qty=int(quantity),
+                lot_size=int(trade_data.get("lot_size") or 0),
+                entry_avg_price=float(fill.get("avg_price") or ltp or 0.0),
+                opened_at_ist=self._now_ist_iso(),
+                entry_order_id=str(order_id or ""),
+                spread_group_id=str(trade_data.get("spread_group_id") or ""),
+                oco_legs=[],
+                signal_targets=list(self._signal_targets(trade_data) or []),
+                sl_progress_stage="NONE",
+            )
+        except Exception as e:
+            logger.warning(f"[STAGE 4] Failed to persist entry-only active trade for {symbol}: {e}")
         oco_line = self._attach_oco_after_buy(
             trade_data,
             exchange,
@@ -3195,7 +3580,28 @@ class Trader:
             )
             rr_line = self._risk_reward_line(trade_data, qty=quantity, entry_ref=float(ltp or 0.0))
             return f"✅ SUCCESS: {action} {symbol} @ {ltp}.\n{sizing_line}\n{oco_line}\n{rr_line}"
-        return f"✅ SUCCESS: {action} {symbol} @ {ltp}. (No OCO — spread leg or missing SL/target.)"
+        # More explicit operator message for why OCO wasn't attached.
+        reason = "OCO not attached"
+        if trade_data.get("spread_leg"):
+            reason = "spread leg"
+        elif str(trade_data.get("action") or "").upper() != "BUY":
+            reason = "non-BUY entry"
+        else:
+            try:
+                sl = float(trade_data.get("stop_loss") or 0.0)
+            except Exception:
+                sl = 0.0
+            try:
+                tgt = float(trade_data.get("target") or 0.0)
+            except Exception:
+                tgt = 0.0
+            if sl <= 0 and tgt <= 0:
+                reason = "missing/zero SL and target"
+            elif sl <= 0:
+                reason = "missing/zero SL"
+            elif tgt <= 0:
+                reason = "missing/zero target"
+        return f"✅ SUCCESS: {action} {symbol} @ {ltp}. (No OCO — {reason}.)"
 
     def _after_limit_order_filled(
         self,
@@ -3219,6 +3625,26 @@ class Trader:
                 fallback_price=float(ltp or 0.0),
                 fallback_qty=int(trade_data.get("quantity") or 0),
             )
+            # Persist the filled LIMIT entry immediately even if OCO is not attached.
+            try:
+                self._save_active_trade(
+                    symbol,
+                    "",
+                    stop_loss=float(trade_data.get("stop_loss") or 0),
+                    target=float(trade_data.get("target") or 0),
+                    entry_side=action,
+                    entry_qty=int(fill.get("filled_qty") or trade_data.get("quantity") or 0),
+                    lot_size=int(trade_data.get("lot_size") or 0),
+                    entry_avg_price=float(fill.get("avg_price") or ltp or 0.0),
+                    opened_at_ist=self._now_ist_iso(),
+                    entry_order_id=str(entry_order_id or ""),
+                    spread_group_id=str(trade_data.get("spread_group_id") or ""),
+                    oco_legs=[],
+                    signal_targets=list(self._signal_targets(trade_data) or []),
+                    sl_progress_stage="NONE",
+                )
+            except Exception as e:
+                logger.warning(f"[STAGE 4] Failed to persist limit entry-only active trade for {symbol}: {e}")
             oco_line = self._attach_oco_after_buy(
                 trade_data,
                 exchange,
@@ -3267,6 +3693,8 @@ class Trader:
                 f"reason={diag.get('reason', 'n/a')}."
             )
         trade_data["quantity"] = int(qty)
+        sizing_line = self._sizing_line(trade_data, qty=int(qty))
+        logger.info(f"[STAGE 4] {trading_symbol} limit sizing -> {sizing_line}")
         entry_response = None
         try:
             entry_response = self.client.place_order(
@@ -3315,7 +3743,8 @@ class Trader:
         ltp_text = f" | LTP={float(observed_ltp):.2f}" if observed_ltp is not None else ""
         return (
             f"📌 LIMIT {action} placed {trading_symbol} @ {lim} (range {low}-{high}{ltp_text}). "
-            f"Polling order status every {Config.ENTRY_QUEUE_POLL_SEC}s; max {Config.ENTRY_QUEUE_MAX_WAIT_MIN} min."
+            f"Polling order status every {Config.ENTRY_QUEUE_POLL_SEC}s; max {Config.ENTRY_QUEUE_MAX_WAIT_MIN} min.\n"
+            f"{sizing_line}"
         )
 
     @staticmethod
@@ -3465,6 +3894,13 @@ class Trader:
     ) -> str:
         low, high = trade_data.get("entry_range", [0, 0])
         action = (trade_data.get("action") or "BUY").upper()
+        qty = int(trade_data.get("quantity") or 0)
+        if qty <= 0:
+            qty = int(self._compute_order_quantity(trade_data))
+            if qty > 0:
+                trade_data["quantity"] = qty
+        sizing_line = self._sizing_line(trade_data, qty=qty) if qty > 0 else "📦 Sizing: n/a"
+        logger.info(f"[STAGE 4] {trading_symbol} queued sizing -> {sizing_line}")
         item = {
             "id": str(uuid.uuid4())[:12],
             "kind": "single",
@@ -3479,7 +3915,8 @@ class Trader:
         ltp_text = f" (LTP={float(observed_ltp):.2f})" if observed_ltp is not None else ""
         return (
             f"⏳ Queued {action} {trading_symbol}: LTP not in range {low}-{high} yet{ltp_text}. "
-            f"Will retry every {Config.ENTRY_QUEUE_POLL_SEC}s for up to {Config.ENTRY_QUEUE_MAX_WAIT_MIN} min."
+            f"Will retry every {Config.ENTRY_QUEUE_POLL_SEC}s for up to {Config.ENTRY_QUEUE_MAX_WAIT_MIN} min.\n"
+            f"{sizing_line}"
         )
 
     def _queue_spread(self, legs: list, start_index: int, resolved_legs: list) -> str:
@@ -3671,10 +4108,53 @@ class Trader:
             return "📐 Risk/Reward: n/a"
 
     @staticmethod
-    def _rr_at_entry(trade_data: dict, entry_price: float) -> float:
+    def _sizing_line(trade_data: dict, *, qty: int) -> str:
+        """Human-readable sizing summary for logs and operator alerts."""
+        mode = str(trade_data.get("sizing_mode_used") or "").upper() or "FIXED"
+        override_reason = str(trade_data.get("size_override_reason") or "").strip()
+        lot_size = int(trade_data.get("lot_size") or 0)
+        lots_text = "n/a"
+        if lot_size > 0 and qty > 0:
+            lots = float(qty) / float(lot_size)
+            lots_text = f"{lots:.2f}".rstrip("0").rstrip(".")
+        return (
+            f"📦 Sizing: {mode}"
+            + (f" (override: {override_reason})" if override_reason else "")
+            + f", qty={int(qty or 0)}, lot_size={lot_size if lot_size > 0 else 'n/a'}, lots={lots_text}"
+        )
+
+    @classmethod
+    def _chase_rr_target(cls, trade_data: dict) -> tuple[float, int]:
+        """Return (target_price, target_index_used) for chase R:R math."""
+        try:
+            idx = int(getattr(Config, "CHASE_RR_TARGET_INDEX", 1) or 1)
+        except Exception:
+            idx = 1
+        idx = max(1, min(3, idx))
+
+        targets = cls._signal_targets(trade_data)
+        if targets and len(targets) >= idx:
+            chosen = float(targets[idx - 1] or 0.0)
+            if chosen > 0:
+                return chosen, idx
+
+        # Fallback to first available target.
+        if targets:
+            first = float(targets[0] or 0.0)
+            if first > 0:
+                return first, 1
+
+        try:
+            t = float(trade_data.get("target") or 0.0)
+        except Exception:
+            t = 0.0
+        return (t if t > 0 else 0.0), 1
+
+    @classmethod
+    def _rr_at_entry(cls, trade_data: dict, entry_price: float) -> float:
         try:
             sl = float(trade_data.get("stop_loss") or 0.0)
-            tgt = float(trade_data.get("target") or 0.0)
+            tgt, _ = cls._chase_rr_target(trade_data)
             entry = float(entry_price or 0.0)
             if entry <= 0 or sl <= 0 or tgt <= 0 or entry <= sl:
                 return 0.0
@@ -3691,7 +4171,7 @@ class Trader:
         try:
             rr = max(0.0, float(min_rr))
             sl = float(trade_data.get("stop_loss") or 0.0)
-            tgt = float(trade_data.get("target") or 0.0)
+            tgt, _ = self._chase_rr_target(trade_data)
             if sl <= 0 or tgt <= 0:
                 return None
             # (tgt - e) / (e - sl) = rr  =>  e = (tgt + rr*sl) / (1+rr)
@@ -3749,29 +4229,34 @@ class Trader:
 
         if self._buy_ltp_above_range_max(trade_data, ltp):
             high = self._range_high(trade_data)
+            rr_tgt, rr_tgt_idx = self._chase_rr_target(trade_data)
             rr_now = self._rr_at_entry(trade_data, float(ltp))
             min_rr = float(getattr(Config, "CHASE_MIN_RR", 1.0) or 0.0)
             logger.info(
-                f"[STAGE 4] LTP {ltp} > max {high} for BUY. R:R(now)={rr_now:.2f} min_rr={min_rr:.2f}"
+                f"[STAGE 4] LTP {ltp} > max {high} for BUY. "
+                f"R:R(now)={rr_now:.2f} min_rr={min_rr:.2f} "
+                f"chase_target=T{rr_tgt_idx} ({rr_tgt:.2f})"
             )
             if min_rr > 0 and rr_now >= min_rr:
                 logger.info(
-                    f"[STAGE 4] BUY chase allowed for {found_symbol}: LTP {ltp} keeps R:R {rr_now:.2f} >= {min_rr:.2f}."
+                    f"[STAGE 4] BUY chase allowed for {found_symbol}: "
+                    f"LTP {ltp} keeps R:R {rr_now:.2f} >= {min_rr:.2f} "
+                    f"using T{rr_tgt_idx} ({rr_tgt:.2f})."
                 )
                 return self._finalize_option_order(trade_data, exchange, found_symbol, segment, ltp=float(ltp))
 
-            rr_limit = self._entry_price_for_rr(trade_data, min_rr)
-            if rr_limit and rr_limit > 0:
-                trade_data["limit_price_override"] = float(rr_limit)
+            chase_limit = float(self._round_price_to_tick(float(high), mode="down")) if high else 0.0
+            if chase_limit > 0:
+                trade_data["limit_price_override"] = chase_limit
                 logger.info(
                     f"[STAGE 4] BUY chase blocked for {found_symbol}: R:R {rr_now:.2f} < {min_rr:.2f}. "
-                    f"Using RR-based limit {rr_limit}."
+                    f"Using T{rr_tgt_idx} ({rr_tgt:.2f}) and range-max limit {chase_limit}."
                 )
             else:
                 trade_data.pop("limit_price_override", None)
                 logger.info(
                     f"[STAGE 4] BUY chase blocked for {found_symbol}: R:R {rr_now:.2f} < {min_rr:.2f}. "
-                    "RR-based limit unavailable; using default limit logic."
+                    "Range-max limit unavailable; using default limit logic."
                 )
             if (
                 Config.ENTRY_SINGLE_LIMIT_ORDER
@@ -3781,11 +4266,11 @@ class Trader:
                 base_msg = self._place_limit_and_queue(
                     trade_data, exchange, found_symbol, segment, observed_ltp=float(ltp)
                 )
-                if rr_limit and rr_limit > 0:
+                if chase_limit > 0:
                     return (
                         f"{base_msg}\n"
                         f"📐 Chase guard: current R:R={rr_now:.2f} (< {min_rr:.2f}); "
-                        f"placed RR={min_rr:.2f} limit at {rr_limit}."
+                        f"target=T{rr_tgt_idx} ({rr_tgt:.2f}); placed range-max limit at {chase_limit}."
                     )
                 return base_msg
             if Config.ENTRY_QUEUE_ENABLED:
@@ -4156,7 +4641,18 @@ class Trader:
                             if leg_target_broker <= 0:
                                 leg_target_broker = eff_tgt
                             try:
-                                self._modify_oco_target(oid, leg_target_broker)
+                                try:
+                                    self._modify_oco_target(oid, leg_target_broker)
+                                except Exception as e1:
+                                    em1 = str(e1)
+                                    if self._is_transient_update_tgt_error(em1):
+                                        logger.warning(
+                                            f"[STAGE 4] UPDATE_TGT transient error for {symbol} id={oid}; retrying once: {em1}"
+                                        )
+                                        time.sleep(0.8)
+                                        self._modify_oco_target(oid, leg_target_broker)
+                                    else:
+                                        raise
                                 leg["target_broker"] = float(leg_target_broker)
                                 leg["target_signal"] = float(leg_target_signal)
                                 success += 1
@@ -4172,17 +4668,29 @@ class Trader:
                                 logger.warning(
                                     f"[STAGE 4] UPDATE_TGT leg modify failed for {symbol} id={oid}: {em}"
                                 )
-                        self._save_active_trade(
-                            symbol,
-                            order_id,
-                            target=raw_tgt,
-                            oco_legs=legs,
-                        )
+                        if success > 0:
+                            self._save_active_trade(
+                                symbol,
+                                order_id,
+                                target=raw_tgt,
+                                oco_legs=legs,
+                            )
                     else:
                         for oid in order_ids:
                             attempted += 1
                             try:
-                                self._modify_oco_target(oid, eff_tgt)
+                                try:
+                                    self._modify_oco_target(oid, eff_tgt)
+                                except Exception as e1:
+                                    em1 = str(e1)
+                                    if self._is_transient_update_tgt_error(em1):
+                                        logger.warning(
+                                            f"[STAGE 4] UPDATE_TGT transient error for {symbol} id={oid}; retrying once: {em1}"
+                                        )
+                                        time.sleep(0.8)
+                                        self._modify_oco_target(oid, eff_tgt)
+                                    else:
+                                        raise
                                 success += 1
                             except Exception as e:
                                 em = str(e)
@@ -4211,14 +4719,14 @@ class Trader:
                             f"(attempted={attempted}, stale={skipped_stale}, failed={len(failed)}). "
                             f"Last error: {failed[-1]}{self._ltp_suffix_for_symbol(symbol)}"
                         )
-                    if isinstance(legs, list) and legs:
+                    if isinstance(legs, list) and legs and success > 0:
                         self._save_active_trade(
                             symbol,
                             order_id,
                             target=raw_tgt,
                             oco_legs=legs,
                         )
-                    if target_leg_index <= 0:
+                    if target_leg_index <= 0 and success > 0:
                         self._update_active_trade_levels(symbol, target=raw_tgt)
                     logger.info(
                         f"[STAGE 4] UPDATE_TGT SUCCESS: {symbol} broker target {eff_tgt} "

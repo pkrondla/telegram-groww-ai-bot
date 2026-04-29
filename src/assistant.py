@@ -1,6 +1,7 @@
 import json
 import re
 import datetime
+import pytz
 from openai import OpenAI
 from .config import Config
 from .logger import logger
@@ -547,7 +548,9 @@ class Assistant:
             m = re.search(r"\b(?:TARGETS?|TGT)\b\s*[:\-]?\s*(.+)$", line, flags=re.IGNORECASE)
             if not m:
                 continue
-            for num in re.findall(r"(\d+(?:\.\d+)?)\+?", m.group(1)):
+            # Ignore "2X/3X" style RR multipliers often written after targets, e.g.
+            # "TARGETS : 26, 48 [2X,3X]".
+            for num in re.findall(r"(\d+(?:\.\d+)?)(?!\s*[xX]\b)\+?", m.group(1)):
                 try:
                     value = float(num)
                 except ValueError:
@@ -750,6 +753,18 @@ class Assistant:
     }
     _MONTH_NUM = {v: k for k, v in _MONTH_ABBR.items()}
 
+    # Use broker timezone (IST) for all expiry/date decisions so running the bot
+    # from non-India locales (e.g. Sydney) does not skew weekly expiry roll logic.
+    _IST_TZ = pytz.timezone("Asia/Kolkata")
+
+    @classmethod
+    def _now_ist(cls) -> datetime.datetime:
+        return datetime.datetime.now(cls._IST_TZ)
+
+    @classmethod
+    def _today_ist(cls) -> datetime.date:
+        return cls._now_ist().date()
+
     @classmethod
     def _safe_year_yy(cls, raw_year) -> str:
         s = str(raw_year or "")
@@ -759,7 +774,7 @@ class Assistant:
         m2 = re.search(r"\b(\d{2})\b", s)
         if m2:
             return m2.group(1)
-        return str(datetime.datetime.now().year)[-2:]
+        return str(cls._now_ist().year)[-2:]
 
     @classmethod
     def _safe_year_4d(cls, raw_year) -> str:
@@ -770,7 +785,7 @@ class Assistant:
         m2 = re.search(r"\b(\d{2})\b", s)
         if m2:
             return f"20{m2.group(1)}"
-        return str(datetime.datetime.now().year)
+        return str(cls._now_ist().year)
 
     @classmethod
     def _safe_month_abbr(cls, raw_month) -> str:
@@ -784,12 +799,18 @@ class Assistant:
             v = str(int(m.group(0)))
             if v in cls._MONTH_ABBR:
                 return cls._MONTH_ABBR[v]
-        return datetime.datetime.now().strftime("%b").upper()
+        return cls._now_ist().strftime("%b").upper()
 
     @classmethod
     def _safe_month_num(cls, raw_month) -> str:
         abbr = cls._safe_month_abbr(raw_month)
-        return cls._MONTH_NUM.get(abbr, str(datetime.datetime.now().month))
+        # Index option symbols encode month as 2 digits (01-12). Ensure zero-padding
+        # so MAY -> "05" (not "5"), otherwise symbol resolution can drift.
+        mm = cls._MONTH_NUM.get(abbr, str(cls._now_ist().month))
+        mm = re.sub(r"[^\d]", "", str(mm or ""))
+        if not mm:
+            mm = str(cls._now_ist().month)
+        return str(int(mm)).zfill(2)
 
     @staticmethod
     def _safe_day_2d(raw_day) -> str:
@@ -811,9 +832,9 @@ class Assistant:
         rolls to the next occurrence of that weekday.
         """
         weekday = cls._INDEX_EXPIRY_WEEKDAY.get(underlying.upper(), 3)  # default Thursday
-        today = datetime.date.today()
+        today = cls._today_ist()
         days_ahead = (weekday - today.weekday()) % 7
-        if days_ahead == 0 and datetime.datetime.now().hour >= 15:
+        if days_ahead == 0 and cls._now_ist().hour >= 15:
             days_ahead = 7  # today's expiry has passed
         expiry = today + datetime.timedelta(days=days_ahead)
         month_abbr = expiry.strftime("%b").upper()
@@ -835,14 +856,20 @@ class Assistant:
             if not month_num:
                 return False
             year_str = str(raw_year or "").strip()
-            year = int(year_str) if len(year_str) == 4 else (2000 + int(year_str)) if len(year_str) == 2 else datetime.date.today().year
+            year = (
+                int(year_str)
+                if len(year_str) == 4
+                else (2000 + int(year_str))
+                if len(year_str) == 2
+                else cls._today_ist().year
+            )
             # For stock options, expiry is the last Thursday of the month —
             # treat the whole month as valid until the 1st of the next month.
             # For index options, the day matters; use day=1 as safe fallback.
             day_str = str(raw_day or "").strip()
             day = int(day_str) if day_str.isdigit() and 1 <= int(day_str) <= 31 else 28
             expiry_date = datetime.date(year, month_num, day)
-            return expiry_date < datetime.date.today()
+            return expiry_date < cls._today_ist()
         except Exception:
             return False  # If we can't parse it, don't roll
 
@@ -853,7 +880,7 @@ class Assistant:
         Day is set to "01" as stock options use monthly expiry (last Thursday),
         and the symbol factory only needs month+year for stock options.
         """
-        today = datetime.date.today()
+        today = Assistant._today_ist()
         return "01", today.strftime("%b").upper(), str(today.year)
 
     def _apply_symbol_factory(self, data: dict) -> dict:
@@ -968,7 +995,7 @@ class Assistant:
 
     @staticmethod
     def _current_date_context() -> str:
-        now = datetime.datetime.now()
+        now = Assistant._now_ist()
         month_name = now.strftime("%B").upper()
         month_num = now.month
         year = now.year
@@ -1727,9 +1754,11 @@ Return is_trade: false for:
                     ]
                 )
                 signal_targets = self._extract_signal_targets(ladder_source)
+                logger.info(f"[STAGE 2] Parsed ladder targets from message: {signal_targets}")
                 if len(signal_targets) >= 2:
                     data["targets"] = signal_targets[:3]
                     data["target"] = float(signal_targets[0])
+                    logger.info(f"[STAGE 2] Applied multi-target ladder: {data['targets']}")
 
             logger.info(f"[STAGE 2] Signal ready: {data['action']} {data['stock']} "
                         f"strike={data.get('strike')} {data.get('option_type')} "

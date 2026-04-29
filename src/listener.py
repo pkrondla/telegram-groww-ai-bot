@@ -24,6 +24,9 @@ _OVERRIDE_COMMANDS = {
     "SIZING":   "sizing_status",
     "SIZING MODE": "sizing_status",
     "REARM":   "rearm",
+    "DAY SUMMARY": "day_summary",
+    "EOD SUMMARY": "day_summary",
+    "MARKET CLOSING SUMMARY": "day_summary",
     "HELP":     "help",
     "DRYRUN ON":  "dryrun_on",
     "DRYRUN OFF": "dryrun_off",
@@ -501,6 +504,10 @@ class BotListener:
         elif command == "rearm":
             msg = await asyncio.to_thread(self.trader.admin_rearm_protection_for_active_trades)
             await self.notifier.send(msg)
+        elif command == "day_summary":
+            # On-demand summary uses the same formatter as scheduled market close alert.
+            msg = await asyncio.to_thread(self.trader._build_eod_summary_text)
+            await self.notifier.send_alert("Market Closing Summary", msg)
         elif command == "help":
             await self.notifier.send(
                 "Bot Command Help\n\n"
@@ -511,6 +518,7 @@ class BotListener:
                 "- EXIT <TRADING_SYMBOL> — close one active trade\n"
                 "- EXIT ALL — close all active trades\n"
                 "- REARM — re-arm missing OCO protection for active trades\n"
+                "- DAY SUMMARY — send current Market Closing Summary on demand\n"
                 "- CLEAR PENDING — clear pending entry queue\n"
                 "- SIZING — show current position sizing modes\n"
                 "- SIZING INDEX FIXED|RISK — set index sizing mode\n"

@@ -404,6 +404,8 @@ class Trader:
         exit_price: float,
         exit_qty: int,
         close_order_id: str = "",
+        exit_pending: bool = False,
+        exit_fill_source: str = "",
     ):
         rec = self._normalize_active_trade_record(active_rec or {})
         side = str(rec.get("entry_side") or "BUY").upper()
@@ -479,6 +481,10 @@ class Trader:
             )
 
         points_per_lot, pnl_inr = self._trade_pnl(side, entry_price, float(exit_price or 0), qty)
+        pending = bool(exit_pending)
+        if pending:
+            points_per_lot = 0.0
+            pnl_inr = 0.0
         entry = {
             "trade_id": str(uuid.uuid4())[:12],
             "group_id": group_id,
@@ -497,6 +503,11 @@ class Trader:
             "close_reason": str(close_reason),
             "entry_order_id": str(rec.get("entry_order_id") or ""),
             "exit_order_id": str(close_order_id or ""),
+            "exit_pending": pending,
+            "pnl_pending": pending,
+            "exit_fill_source": str(exit_fill_source or ("pending" if pending else "")),
+            "reconcile_attempts": 0,
+            "last_reconcile_try_ist": "",
             "smart_order_id": str(rec.get("smart_order_id") or ""),
             "exit_qty": int(abs(exit_qty or 0)),
             "signal_targets": [float(t) for t in signal_targets],
@@ -520,14 +531,99 @@ class Trader:
         book["trades"] = trades
         self._save_completed_trades_book(book)
 
+    @staticmethod
+    def _completed_row_active_record(row: dict) -> dict:
+        """Rebuild a minimal active-like record so reconcile fill inference can be reused."""
+        return {
+            "entry_side": str(row.get("side") or "BUY").upper(),
+            "entry_avg_price": float(row.get("entry_avg_price") or 0.0),
+            "entry_qty": int(row.get("quantity") or row.get("exit_qty") or 0),
+            "lot_size": int(row.get("lot_size") or 0),
+            "smart_order_id": str(row.get("smart_order_id") or ""),
+            "oco_legs": list(row.get("oco_legs") or []),
+            "signal_targets": list(row.get("signal_targets") or []),
+            "target": float(row.get("target_at_close") or 0.0),
+        }
+
+    def _backfill_pending_completed_trades(self, *, date_iso: str | None = None) -> int:
+        """
+        Auto-backfill pending completed trades with real broker exit fills.
+        Called from reconcile loop so no admin command is required.
+        """
+        if self.client is None:
+            return 0
+        d = str(date_iso or self._today_ist_iso())
+        book = self._load_completed_trades_book(d)
+        rows = list(book.get("trades") or [])
+        if not rows:
+            return 0
+
+        updated_count = 0
+        changed = False
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            pending = bool(row.get("exit_pending") or row.get("pnl_pending"))
+            if not pending:
+                # Backward compatibility for older journal rows that used entry-price fallback.
+                inferred_flat = str(row.get("close_reason") or "").upper().startswith("RECONCILE_")
+                zero_or_same_exit = (
+                    float(self._num_or(row.get("exit_avg_price"), 0.0)) <= 0
+                    or abs(
+                        float(self._num_or(row.get("exit_avg_price"), 0.0))
+                        - float(self._num_or(row.get("entry_avg_price"), 0.0))
+                    )
+                    < 1e-9
+                )
+                no_exit_id = not str(row.get("exit_order_id") or "").strip()
+                pending = bool(inferred_flat and zero_or_same_exit and no_exit_id)
+            if not pending:
+                continue
+            symbol = str(row.get("symbol") or "")
+            if not symbol:
+                continue
+
+            rec = self._completed_row_active_record(row)
+            inferred = self._reconcile_exit_fill_from_positions(symbol=symbol, active_rec=rec) or {}
+            exit_price = float(self._num_or(inferred.get("exit_price"), 0.0))
+            exit_qty = int(abs(self._num_or(inferred.get("exit_qty"), 0)))
+
+            row["reconcile_attempts"] = int(self._num_or(row.get("reconcile_attempts"), 0)) + 1
+            row["last_reconcile_try_ist"] = self._now_ist_iso()
+
+            if exit_price <= 0 or exit_qty <= 0:
+                continue
+
+            side = str(row.get("side") or "BUY").upper()
+            entry_price = float(self._num_or(row.get("entry_avg_price"), 0.0))
+            qty = int(self._num_or(row.get("quantity"), 0)) or exit_qty
+            points_per_lot, pnl_inr = self._trade_pnl(side, entry_price, exit_price, qty)
+
+            row["exit_avg_price"] = float(exit_price)
+            row["exit_qty"] = int(exit_qty)
+            row["exit_order_id"] = str(inferred.get("order_id") or row.get("exit_order_id") or "")
+            row["pnl_points_per_lot"] = float(points_per_lot)
+            row["pnl_inr"] = float(pnl_inr)
+            row["exit_pending"] = False
+            row["pnl_pending"] = False
+            row["exit_fill_source"] = str(inferred.get("source") or row.get("exit_fill_source") or "backfilled")
+            updated_count += 1
+            changed = True
+
+        if changed:
+            book["trades"] = rows
+            self._save_completed_trades_book(book, date_iso=d)
+        return updated_count
+
     def _build_eod_summary_text(self, *, date_iso: str | None = None) -> str:
         d = str(date_iso or self._today_ist_iso())
         book = self._load_completed_trades_book(d)
         rows = list(book.get("trades") or [])
-        active_count = len(self._load_active_trades())
 
-        singles = [r for r in rows if not r.get("is_spread_leg")]
-        spread_legs = [r for r in rows if r.get("is_spread_leg")]
+        settled_rows = [r for r in rows if not bool(r.get("pnl_pending"))]
+        pending_rows = [r for r in rows if bool(r.get("pnl_pending"))]
+        singles = [r for r in settled_rows if not r.get("is_spread_leg")]
+        spread_legs = [r for r in settled_rows if r.get("is_spread_leg")]
         spread_groups: dict[str, dict] = {}
         for r in spread_legs:
             gid = str(r.get("group_id") or "")
@@ -558,37 +654,23 @@ class Trader:
             for r in singles
         ] + spread_summaries
 
-        wins = sum(1 for r in all_trade_summaries if float(r.get("pnl_inr") or 0.0) > 0)
-        losses = sum(1 for r in all_trade_summaries if float(r.get("pnl_inr") or 0.0) < 0)
         total_inr = sum(float(r.get("pnl_inr") or 0.0) for r in all_trade_summaries)
         total_pts = sum(float(r.get("pnl_points_per_lot") or 0.0) for r in all_trade_summaries)
-
-        top_winner = max(all_trade_summaries, key=lambda x: float(x.get("pnl_inr") or 0.0), default=None)
-        top_loser = min(all_trade_summaries, key=lambda x: float(x.get("pnl_inr") or 0.0), default=None)
 
         lines = []
         for r in all_trade_summaries:
             lines.append(
                 f"• {r['label']}: INR {float(r['pnl_inr']):.2f} | {float(r['pnl_points_per_lot']):.2f} pts/lot"
             )
-        per_trade_section = "\n".join(lines) if lines else "• No completed trades."
+        per_trade_section = "\n".join(lines) if lines else "• No realized completed trades."
+        pending_section = ""
+        if pending_rows:
+            pending_lines = [f"• {str(r.get('symbol') or '?')}: exit fill pending" for r in pending_rows]
+            pending_section = "\n\nPending exit fill\n" + "\n".join(pending_lines)
 
-        winner_text = (
-            f"{top_winner['label']} (INR {float(top_winner['pnl_inr']):.2f})" if top_winner else "N/A"
-        )
-        loser_text = (
-            f"{top_loser['label']} (INR {float(top_loser['pnl_inr']):.2f})" if top_loser else "N/A"
-        )
         return (
             f"📊 EOD Trading Summary ({d} IST)\n\n"
-            f"Trades closed: {len(singles)} (single), {len(spread_summaries)} (spreads)\n"
-            f"Realized P&L INR: {total_inr:.2f}\n"
-            f"Premium points per lot: {total_pts:.2f} pts\n"
-            f"Wins/Losses: {wins}/{losses}\n"
-            f"Top winner: {winner_text}\n"
-            f"Top loser: {loser_text}\n"
-            f"Open carry-forward positions: {active_count}\n\n"
-            f"Per-trade P&L\n{per_trade_section}\n\n"
+            f"Per-trade P&L\n{per_trade_section}{pending_section}\n\n"
             f"Final day P/L: INR {total_inr:.2f} | {total_pts:.2f} pts/lot"
         )
 
@@ -973,6 +1055,14 @@ class Trader:
         if not local:
             return stats
 
+        # Keep completed-trade journal accurate by auto-backfilling any pending exits.
+        try:
+            backfilled = int(self._backfill_pending_completed_trades())
+            if backfilled > 0:
+                logger.info(f"[RECONCILE] Backfilled {backfilled} pending completed trade(s) with broker exit fills.")
+        except Exception as e:
+            logger.warning(f"[RECONCILE] Pending completed-trade backfill failed: {e}")
+
         positions_map = self._active_positions_map()
         stats["active"] = len(positions_map)
         active_symbols = set(positions_map.keys())
@@ -995,14 +1085,18 @@ class Trader:
                 try:
                     nrec = self._normalize_active_trade_record(rec)
                     inferred = self._reconcile_exit_fill_from_positions(symbol=symbol, active_rec=nrec) or {}
+                    has_fill = (
+                        float(self._num_or(inferred.get("exit_price"), 0.0)) > 0
+                        and int(abs(self._num_or(inferred.get("exit_qty"), 0))) > 0
+                    )
                     fallback_exit = (
                         float(inferred.get("exit_price"))
-                        if float(self._num_or(inferred.get("exit_price"), 0.0)) > 0
-                        else self._num_or(nrec.get("entry_avg_price"), 0.0)
+                        if has_fill
+                        else 0.0
                     )
                     fallback_qty = (
                         int(abs(self._num_or(inferred.get("exit_qty"), 0)))
-                        if int(abs(self._num_or(inferred.get("exit_qty"), 0))) > 0
+                        if has_fill
                         else int(self._num_or(nrec.get("entry_qty"), 0))
                     )
                     close_reason = (
@@ -1019,6 +1113,8 @@ class Trader:
                         exit_price=fallback_exit,
                         exit_qty=fallback_qty,
                         close_order_id=str(inferred.get("order_id") or ""),
+                        exit_pending=not has_fill,
+                        exit_fill_source=str(inferred.get("source") or ("pending" if not has_fill else "")),
                     )
                 except Exception as e:
                     logger.warning(f"[RECONCILE] Could not journal closed trade for {symbol}: {e}")
@@ -1153,14 +1249,18 @@ class Trader:
                 return True
             logger.info(f"Reconcile symbol: {symbol} is not active on broker. Removing local active trade row.")
             inferred = self._reconcile_exit_fill_from_positions(symbol=symbol, active_rec=rec) or {}
+            has_fill = (
+                float(self._num_or(inferred.get("exit_price"), 0.0)) > 0
+                and int(abs(self._num_or(inferred.get("exit_qty"), 0))) > 0
+            )
             fallback_exit = (
                 float(inferred.get("exit_price"))
-                if float(self._num_or(inferred.get("exit_price"), 0.0)) > 0
-                else self._num_or(rec.get("entry_avg_price"), 0.0)
+                if has_fill
+                else 0.0
             )
             fallback_qty = (
                 int(abs(self._num_or(inferred.get("exit_qty"), 0)))
-                if int(abs(self._num_or(inferred.get("exit_qty"), 0))) > 0
+                if has_fill
                 else int(self._num_or(rec.get("entry_qty"), 0))
             )
             close_reason = (
@@ -1177,6 +1277,8 @@ class Trader:
                 exit_price=fallback_exit,
                 exit_qty=fallback_qty,
                 close_order_id=str(inferred.get("order_id") or ""),
+                exit_pending=not has_fill,
+                exit_fill_source=str(inferred.get("source") or ("pending" if not has_fill else "")),
             )
             self._remove_active_trade(symbol)
             return False
@@ -1819,6 +1921,10 @@ class Trader:
             segment=self.SMART_SEGMENT,
             target={
                 "trigger_price": float(tgt),
+                # Keep shape aligned with create_smart_order target payload to avoid
+                # broker-side schema rejections like "Order type is required".
+                "price": None,
+                "order_type": "MARKET",
             },
         )
         return float(tgt)
@@ -2312,6 +2418,9 @@ class Trader:
         # Policy: for single-lot entries, prioritize runner capture by targeting T2.
         # If T2 is unavailable, gracefully fall back to T1.
         if total_lots == 1 and len(targets) >= 2:
+            logger.info(
+                f"[STAGE 4] Single-lot policy applied: total_lots=1, routing full qty={qty} to T2 ({float(targets[1]):.2f})."
+            )
             return [{"qty": qty, "target_signal": float(targets[1]), "target_index": 2}]
         if len(targets) == 2:
             ratios = cls._parse_split_config(Config.TARGET_SPLIT_2, 2)
@@ -3723,7 +3832,13 @@ class Trader:
             if Config.ENTRY_QUEUE_ENABLED:
                 return (
                     f"⚠️ LIMIT placement failed ({e}). Falling back to LTP queue.\n"
-                    + self._queue_single(trade_data, exchange, trading_symbol, segment)
+                    + self._queue_single(
+                        trade_data,
+                        exchange,
+                        trading_symbol,
+                        segment,
+                        observed_ltp=observed_ltp,
+                    )
                 )
             return f"❌ LIMIT order failed: {e}"
 

@@ -925,7 +925,13 @@ class Trader:
         return pos, self._position_quantity(pos)
 
     def _rearm_oco_for_open_position(
-        self, symbol: str, rec: dict, position: dict, *, force: bool = False
+        self,
+        symbol: str,
+        rec: dict,
+        position: dict,
+        *,
+        force: bool = False,
+        payload_cache: dict[str, dict] | None = None,
     ) -> tuple[bool, str | None]:
         """
         Recreate OCO once per day for carry-forward open positions.
@@ -946,7 +952,21 @@ class Trader:
         if qty <= 0:
             return False, None
         rec_norm = self._normalize_active_trade_record(rec)
+        rec_norm = self._sync_oco_snapshot_from_broker(symbol, rec_norm, payload_cache=payload_cache)
         rec_norm, _ = self._recompute_leg_progress(rec=rec_norm, open_qty=qty)
+        complete_before, reason_before = self._has_complete_oco_protection(
+            symbol, rec_norm, qty, payload_cache=payload_cache
+        )
+        if complete_before:
+            # Protection already has both SL and target legs on broker. No re-arm needed.
+            trades = self._load_active_trades()
+            nrec = self._normalize_active_trade_record(trades.get(symbol))
+            nrec["protection_armed_date"] = today
+            trades[symbol] = nrec
+            self._save_all_trades(trades)
+            logger.info(f"[REARM] Skip {symbol}: broker OCO already complete (SL + target present).")
+            return False, None
+
         raw_true_sl = float(self._num_or(rec_norm.get("sl_true"), rec_norm.get("stop_loss")))
         if raw_true_sl <= 0:
             logger.warning(f"[REARM] Skip {symbol}: invalid stored SL (sl_true={raw_true_sl}).")
@@ -1001,6 +1021,84 @@ class Trader:
         if not rebuilt_plan:
             return False, None
 
+        existing_ids = self._oco_ids_from_record(rec_norm)
+        if existing_ids:
+            # Prefer in-place repair to reduce broker cancel/create churn in order history.
+            # If an OCO leg has SL but missing target, attempt target modify first.
+            leg_by_id = {
+                str(leg.get("smart_order_id") or ""): leg
+                for leg in self._sorted_oco_legs(rec_norm)
+                if str(leg.get("smart_order_id") or "")
+            }
+            repaired = 0
+            for oid in existing_ids:
+                sid = str(oid or "")
+                if not sid or sid == self.DRY_RUN_PLACEHOLDER_ORDER_ID:
+                    continue
+                payload = self._get_oco_order_payload_cached(sid, payload_cache)
+                has_t = self._oco_payload_has_target(payload)
+                has_s = self._oco_payload_has_stop(payload)
+                # If both legs already exist, nothing to repair.
+                if has_t and has_s:
+                    continue
+                leg = leg_by_id.get(sid) or {}
+                try:
+                    if not has_t:
+                        target_broker = float(self._num_or(leg.get("target_broker"), 0.0))
+                        if target_broker > 0:
+                            eff_tgt = self._round_price_to_tick(target_broker, mode="down")
+                        else:
+                            target_signal = float(
+                                self._num_or(
+                                    leg.get("target_signal"),
+                                    rec_norm.get("target"),
+                                )
+                            )
+                            eff_tgt = self._take_profit_order_price(target_signal)
+                        if eff_tgt > 0:
+                            self._modify_oco_target(sid, eff_tgt)
+                    if not has_s and broker_sl > 0:
+                        self._modify_oco_sl(symbol, sid, broker_sl)
+                    repaired += 1
+                    if payload_cache is not None:
+                        payload_cache.pop(sid, None)
+                except Exception as me:
+                    logger.warning(f"[REARM] In-place leg repair failed for {symbol} id={sid}: {me}")
+
+            if repaired > 0:
+                rec_repaired = self._sync_oco_snapshot_from_broker(symbol, rec_norm, payload_cache=payload_cache)
+                complete_after_repair, reason_after_repair = self._has_complete_oco_protection(
+                    symbol, rec_repaired, qty, payload_cache=payload_cache
+                )
+                if complete_after_repair:
+                    trades = self._load_active_trades()
+                    nrec = self._normalize_active_trade_record(trades.get(symbol))
+                    nrec["protection_armed_date"] = today
+                    trades[symbol] = nrec
+                    self._save_all_trades(trades)
+                    logger.info(
+                        f"[REARM] {symbol}: repaired incomplete OCO in-place via modify "
+                        f"(legs_repaired={repaired}); skipped cancel/re-create."
+                    )
+                    return True, f"✅ OCO repaired in-place for {symbol} (legs={repaired}); no cancel/re-create needed."
+                logger.warning(
+                    f"[REARM] {symbol}: in-place OCO repair did not fully restore integrity "
+                    f"(reason={reason_after_repair}); falling back to cancel/re-create."
+                )
+
+            canceled, cancel_errors = self._cancel_oco_ids_for_symbol(symbol, rec_norm)
+            if payload_cache is not None:
+                for oid in existing_ids:
+                    payload_cache.pop(str(oid or ""), None)
+            logger.warning(
+                f"[REARM] {symbol}: existing OCO incomplete ({reason_before}); "
+                f"cancelled {canceled}/{len(existing_ids)} old OCO id(s) before re-arm."
+            )
+            if cancel_errors:
+                logger.warning(
+                    f"[REARM] {symbol}: OCO cancel warnings before re-arm: {' | '.join(cancel_errors[:5])}"
+                )
+
         exchange = str(position.get("exchange") or "NSE")
         segment = str(position.get("segment") or self.SMART_SEGMENT)
         product_type = str(
@@ -1011,20 +1109,16 @@ class Trader:
         ).upper()
 
         created_legs: list[dict] = []
+        rearm_warnings: list[str] = []
         for leg in rebuilt_plan:
             raw_tgt = float(leg.get("target_signal") or 0)
             eff_tgt = self._take_profit_order_price(raw_tgt)
             if eff_tgt <= 0:
                 continue
-            rearm_ref = str(uuid.uuid4())[:15]
-            logger.info(
-                f"[REARM] Creating OCO for {symbol}: qty={leg['qty']}, sl_true={raw_true_sl}, "
-                f"broker_sl={broker_sl}, target(signal={raw_tgt}, broker={eff_tgt})"
-            )
-            try:
+            def _create_rearm_leg(ref: str):
                 resp = self.client.create_smart_order(
                     smart_order_type=self.client.SMART_ORDER_TYPE_OCO,
-                    reference_id=rearm_ref,
+                    reference_id=ref,
                     segment=segment,
                     trading_symbol=symbol,
                     quantity=int(leg["qty"]),
@@ -1044,23 +1138,72 @@ class Trader:
                         "order_type": "SL",
                     },
                 )
+                logger.info(
+                    f"[REARM] OCO create response {symbol}: ref={ref} target={eff_tgt} sl={broker_sl} "
+                    f"resp={(str(resp) or '')[:800]}"
+                )
+                sid = self._extract_smart_order_id(resp, fallback=ref)
+                vp = self._get_oco_order_payload(str(sid or ""))
+                logger.info(
+                    f"[REARM] OCO verify payload {symbol}: id={sid} payload={(str(vp) or '')[:800]}"
+                )
+                t_id, s_id = self._extract_oco_leg_child_order_ids(vp)
+                has_t = self._oco_payload_has_target(vp)
+                has_s = self._oco_payload_has_stop(vp)
+                return sid, t_id, s_id, has_t, has_s
+
+            rearm_ref = str(uuid.uuid4())[:15]
+            logger.info(
+                f"[REARM] Creating OCO for {symbol}: qty={leg['qty']}, sl_true={raw_true_sl}, "
+                f"broker_sl={broker_sl}, target(signal={raw_tgt}, broker={eff_tgt})"
+            )
+            try:
+                new_id, target_order_id, stop_order_id, has_target, has_stop = _create_rearm_leg(rearm_ref)
             except Exception as e:
                 msg = str(e)
                 if "cannot exceed position quantity" in msg.lower():
-                    trades = self._load_active_trades()
-                    nrec = self._normalize_active_trade_record(trades.get(symbol))
-                    nrec["protection_armed_date"] = today
-                    trades[symbol] = nrec
-                    self._save_all_trades(trades)
-                    logger.info(f"[REARM] Skip {symbol}: broker reports protection already present.")
+                    logger.error(
+                        f"[REARM] Re-arm create rejected for {symbol} after cleanup "
+                        f"(reason='cannot exceed position quantity', raw_error={msg})."
+                    )
                     return (
                         False,
-                        f"ℹ️ OCO re-arm skipped for {symbol}: broker reports protection already attached.",
+                        f"⚠️ OCO re-arm failed for {symbol}: broker still reports quantity locked after cancel "
+                        f"(cannot exceed position quantity).",
                     )
                 raise
-            new_id = self._extract_smart_order_id(resp, fallback=rearm_ref)
-            verify_payload = self._get_oco_order_payload(str(new_id or ""))
-            target_order_id, stop_order_id = self._extract_oco_leg_child_order_ids(verify_payload)
+
+            if not (has_target and has_stop):
+                logger.warning(
+                    f"[REARM] OCO verify incomplete for {symbol} id={new_id} "
+                    f"(target={has_target}, stop={has_stop}). Retrying once."
+                )
+                try:
+                    self.client.cancel_smart_order(
+                        segment=self.client.SEGMENT_FNO,
+                        smart_order_type=self.client.SMART_ORDER_TYPE_OCO,
+                        smart_order_id=str(new_id or ""),
+                    )
+                    logger.info(f"[REARM] Partial OCO canceled for retry: {symbol} id={new_id}")
+                except Exception as ce:
+                    logger.warning(f"[REARM] Partial OCO cancel failed for {symbol} id={new_id}: {ce}")
+
+                retry_ref = str(uuid.uuid4())[:15]
+                try:
+                    new_id, target_order_id, stop_order_id, has_target, has_stop = _create_rearm_leg(retry_ref)
+                except Exception as re:
+                    logger.warning(f"[REARM] OCO retry create failed for {symbol}: {re}")
+                    has_target, has_stop = False, False
+                    target_order_id, stop_order_id = "", ""
+
+            if not (has_target and has_stop):
+                warn = (
+                    f"OCO re-arm partial for {symbol} T{int(leg.get('target_index') or 1)}: "
+                    f"target={has_target}, stop={has_stop}."
+                )
+                rearm_warnings.append(warn)
+                logger.error(f"[REARM] {warn}")
+
             created_legs.append(
                 {
                     "smart_order_id": str(new_id or ""),
@@ -1068,7 +1211,11 @@ class Trader:
                     "target_signal": float(raw_tgt),
                     "target_broker": float(eff_tgt),
                     "target_index": int(leg.get("target_index") or 1),
-                    "status": "ACTIVE",
+                    "status": (
+                        "ACTIVE"
+                        if (has_target and has_stop)
+                        else ("TARGET_ONLY" if has_target else "SL_ONLY" if has_stop else "BROKEN")
+                    ),
                     "target_order_id": str(target_order_id or ""),
                     "stop_order_id": str(stop_order_id or ""),
                 }
@@ -1095,10 +1242,17 @@ class Trader:
         )
         trades = self._load_active_trades()
         nrec = self._normalize_active_trade_record(trades.get(symbol))
-        nrec["protection_armed_date"] = today
+        all_legs_complete = all(
+            str(leg.get("status") or "").upper() == "ACTIVE"
+            for leg in created_legs
+        )
+        nrec["protection_armed_date"] = today if all_legs_complete else ""
         trades[symbol] = nrec
         self._save_all_trades(trades)
-        logger.info(f"[REARM] OCO re-armed for {symbol} with smart_order_id={new_id}.")
+        logger.info(
+            f"[REARM] OCO re-armed for {symbol} with smart_order_id={new_id} "
+            f"(all_legs_complete={all_legs_complete})."
+        )
         leg_lines = []
         for leg in created_legs:
             leg_lines.append(
@@ -1111,6 +1265,11 @@ class Trader:
             f"SL true: {raw_true_sl} | broker SL: {broker_sl}\n"
             + "\n".join(leg_lines)
         )
+        if rearm_warnings or not all_legs_complete:
+            msg += "\nWarnings:\n" + "\n".join(
+                rearm_warnings or [f"OCO re-arm incomplete for {symbol}: not all legs are ACTIVE."]
+            )
+            return False, msg
         return True, msg
 
     def _retry_management_after_stale_oco(
@@ -1158,33 +1317,456 @@ class Trader:
         """
         if self.client is None:
             return False
-        order_ids = self._oco_ids_from_record(rec)
-        if not order_ids:
+        rec_norm = self._normalize_active_trade_record(rec or {})
+        expected_legs = self._expected_oco_leg_count_for_open_qty(
+            rec_norm, int(self._num_or(rec_norm.get("entry_qty"), 0))
+        )
+        probe_ids: list[str] = []
+        if expected_legs > 1:
+            probe_ids = self._oco_ids_from_record(rec_norm)
+        probe_id = str(rec_norm.get("smart_order_id") or "")
+        if probe_id and probe_id not in probe_ids:
+            probe_ids.insert(0, probe_id)
+        if not probe_ids:
+            order_ids = self._oco_ids_from_record(rec)
+            if order_ids:
+                probe_ids = [str(order_ids[0] or "")]
+        if not probe_ids:
             return False
         raw_sl = float(self._num_or(rec.get("stop_loss"), 0.0))
         raw_true = float(self._num_or(rec.get("sl_true"), 0.0))
         probe_sl = raw_sl if raw_sl > 0 else raw_true
         if probe_sl <= 0:
             return False
-        probe_id = str(order_ids[0] or "")
-        if not probe_id or probe_id == self.DRY_RUN_PLACEHOLDER_ORDER_ID:
-            return False
-        try:
-            # Probe with current level so there is no effective price change.
-            self._modify_oco_sl(symbol, probe_id, probe_sl)
-            return True
-        except Exception as e:
-            if self._is_stale_oco_error(str(e)):
-                return False
-            # Non-stale broker errors should not trigger forced re-arm.
-            logger.warning(f"[REARM] OCO probe inconclusive for {symbol} id={probe_id}: {e}")
-            return True
+        for probe_id in probe_ids:
+            if not probe_id or probe_id == self.DRY_RUN_PLACEHOLDER_ORDER_ID:
+                continue
+            try:
+                # Probe with current level so there is no effective price change.
+                self._modify_oco_sl(symbol, probe_id, probe_sl)
+            except Exception as e:
+                if self._is_stale_oco_error(str(e)):
+                    return False
+                # Non-stale broker errors should not trigger forced re-arm.
+                logger.warning(f"[REARM] OCO probe inconclusive for {symbol} id={probe_id}: {e}")
+        return True
 
-    def maintain_active_trades(self) -> dict:
+    def _has_target_legs_on_broker(
+        self, symbol: str, rec: dict, *, payload_cache: dict[str, dict] | None = None
+    ) -> bool:
+        """
+        Verify broker-side OCO payloads still contain target legs.
+        This catches SL-only protection states where SL modify succeeds but target is missing.
+        """
+        if self.client is None:
+            return False
+        rec_norm = self._normalize_active_trade_record(rec or {})
+        expected_legs = self._expected_oco_leg_count_for_open_qty(
+            rec_norm, int(self._num_or(rec_norm.get("entry_qty"), 0))
+        )
+        if expected_legs > 1:
+            order_ids = self._oco_ids_from_record(rec_norm)
+        else:
+            sid = str(rec_norm.get("smart_order_id") or "")
+            if not sid:
+                order_ids = self._oco_ids_from_record(rec_norm)
+                sid = str(order_ids[0] or "") if order_ids else ""
+            else:
+                order_ids = [sid]
+        if not order_ids:
+            return False
+        for oid in order_ids:
+            sid = str(oid or "")
+            if not sid or sid == self.DRY_RUN_PLACEHOLDER_ORDER_ID:
+                continue
+            payload = self._get_oco_order_payload_cached(sid, payload_cache)
+            has_t = self._oco_payload_has_target(payload)
+            has_s = self._oco_payload_has_stop(payload)
+            if not has_t:
+                logger.warning(f"[REARM] Missing target leg on broker for {symbol} id={sid}.")
+                return False
+            if not has_s:
+                logger.warning(f"[REARM] Missing stop leg on broker for {symbol} id={sid}.")
+                return False
+        return True
+
+    def _expected_oco_leg_count_for_open_qty(self, rec: dict, open_qty: int) -> int:
+        """
+        Compute expected number of active OCO legs from current target/split policy.
+        """
+        qty = int(abs(open_qty or 0))
+        if qty <= 0:
+            return 0
+        rec_norm = self._normalize_active_trade_record(rec or {})
+        raw_targets = rec_norm.get("signal_targets")
+        signal_targets: list[float] = []
+        if isinstance(raw_targets, list):
+            for t in raw_targets:
+                try:
+                    tv = float(t)
+                except Exception:
+                    continue
+                if tv > 0:
+                    signal_targets.append(tv)
+        if not signal_targets:
+            fallback = float(self._num_or(rec_norm.get("target"), 0.0))
+            if fallback > 0:
+                signal_targets = [fallback]
+        if not signal_targets:
+            return 0
+        lot_size = int(self._num_or(rec_norm.get("lot_size"), 0))
+        plan = self._build_oco_legs_plan(
+            total_qty=qty,
+            lot_size=lot_size,
+            signal_targets=signal_targets,
+        )
+        return len([p for p in plan if int(self._num_or(p.get("qty"), 0)) > 0])
+
+    def _sync_oco_snapshot_from_broker(
+        self, symbol: str, rec: dict, *, payload_cache: dict[str, dict] | None = None
+    ) -> dict:
+        """
+        Refresh local oco_legs snapshot from broker smart-order payloads.
+        This keeps active_trades.json aligned with broker truth before integrity checks.
+        """
+        rec_norm = self._normalize_active_trade_record(rec or {})
+        if self.client is None:
+            return rec_norm
+        order_ids = self._oco_ids_from_record(rec_norm)
+        if not order_ids:
+            return rec_norm
+
+        prev_legs = self._sorted_oco_legs(rec_norm)
+        prev_by_id = {
+            str(leg.get("smart_order_id") or ""): leg
+            for leg in prev_legs
+            if str(leg.get("smart_order_id") or "")
+        }
+        synced_legs: list[dict] = []
+        for idx, oid in enumerate(order_ids):
+            sid = str(oid or "")
+            if not sid or sid == self.DRY_RUN_PLACEHOLDER_ORDER_ID:
+                continue
+            payload = self._get_oco_order_payload_cached(sid, payload_cache)
+            tgt_id, sl_id = self._extract_oco_leg_child_order_ids(payload)
+            # Some broker payloads expose leg IDs but not top-level target/stop keys.
+            has_t = bool(self._oco_payload_has_target(payload) or tgt_id)
+            has_s = bool(self._oco_payload_has_stop(payload) or sl_id)
+            prev = prev_by_id.get(sid) or {}
+            leg_status = (
+                "ACTIVE" if (has_t and has_s) else ("TARGET_ONLY" if has_t else "SL_ONLY" if has_s else "BROKEN")
+            )
+            synced_legs.append(
+                {
+                    "smart_order_id": sid,
+                    "qty": int(self._num_or(prev.get("qty"), 0)),
+                    "target_signal": float(self._num_or(prev.get("target_signal"), 0.0)),
+                    "target_broker": float(self._num_or(prev.get("target_broker"), 0.0)),
+                    "target_index": int(self._num_or(prev.get("target_index"), idx + 1)),
+                    "status": leg_status,
+                    "target_order_id": str(tgt_id or prev.get("target_order_id") or ""),
+                    "stop_order_id": str(sl_id or prev.get("stop_order_id") or ""),
+                }
+            )
+
+        if not synced_legs:
+            return rec_norm
+
+        # Preserve qty/index from existing local plan when available.
+        total_synced_qty = sum(int(self._num_or(x.get("qty"), 0)) for x in synced_legs)
+        if total_synced_qty <= 0:
+            base_qty = int(self._num_or(rec_norm.get("entry_qty"), 0))
+            if base_qty <= 0:
+                base_qty = len(synced_legs)
+            if base_qty > 0 and synced_legs:
+                per = max(1, base_qty // len(synced_legs))
+                used = 0
+                for i, leg in enumerate(synced_legs):
+                    if i == len(synced_legs) - 1:
+                        leg["qty"] = max(1, base_qty - used)
+                    else:
+                        leg["qty"] = per
+                        used += per
+
+        changed = self._sorted_oco_legs({"oco_legs": prev_legs}) != self._sorted_oco_legs({"oco_legs": synced_legs})
+        if not changed:
+            return rec_norm
+
+        trades = self._load_active_trades()
+        if symbol not in trades:
+            return rec_norm
+        live = self._normalize_active_trade_record(trades.get(symbol))
+        live["oco_legs"] = synced_legs
+        if synced_legs:
+            live["smart_order_id"] = str(synced_legs[0].get("smart_order_id") or live.get("smart_order_id") or "")
+        trades[symbol] = live
+        self._save_all_trades(trades)
+        logger.info(f"[REARM] Synced broker OCO snapshot for {symbol}: legs={len(synced_legs)}.")
+        return live
+
+    def _has_complete_oco_protection(
+        self, symbol: str, rec: dict, open_qty: int, *, payload_cache: dict[str, dict] | None = None
+    ) -> tuple[bool, str]:
+        """
+        Protection integrity check for active positions:
+        - Single-target: evaluate current smart_order_id.
+        - Multi-target: evaluate each expected OCO leg id from local plan.
+        """
+        rec_norm = self._normalize_active_trade_record(rec or {})
+        expected_legs = self._expected_oco_leg_count_for_open_qty(rec_norm, open_qty)
+        if expected_legs <= 0:
+            return False, "no expected target legs from current target configuration"
+
+        if expected_legs == 1:
+            sid = str(rec_norm.get("smart_order_id") or "")
+            if not sid:
+                order_ids = self._oco_ids_from_record(rec_norm)
+                sid = str(order_ids[0] or "") if order_ids else ""
+            if not sid:
+                return False, "missing smart_order_id"
+            if sid == self.DRY_RUN_PLACEHOLDER_ORDER_ID:
+                return False, "dry-run placeholder order id"
+            payload = self._get_oco_order_payload_cached(sid, payload_cache)
+            has_t = self._oco_payload_has_target(payload)
+            has_s = self._oco_payload_has_stop(payload)
+            if has_t and has_s:
+                return True, ""
+            logger.warning(
+                f"[REARM] Incomplete OCO protection for {symbol} id={sid}: target={has_t}, stop={has_s}."
+            )
+            return False, f"incomplete trigger legs (target={has_t}, stop={has_s})"
+
+        order_ids = self._oco_ids_from_record(rec_norm)
+        if len(order_ids) < expected_legs:
+            return False, f"insufficient OCO legs (expected={expected_legs}, present={len(order_ids)})"
+        complete = 0
+        for oid in order_ids:
+            sid = str(oid or "")
+            if not sid or sid == self.DRY_RUN_PLACEHOLDER_ORDER_ID:
+                continue
+            payload = self._get_oco_order_payload_cached(sid, payload_cache)
+            has_t = self._oco_payload_has_target(payload)
+            has_s = self._oco_payload_has_stop(payload)
+            if has_t and has_s:
+                complete += 1
+            else:
+                logger.warning(
+                    f"[REARM] Incomplete OCO protection for {symbol} id={sid}: target={has_t}, stop={has_s}."
+                )
+        if complete < expected_legs:
+            return False, f"incomplete OCO protection (expected={expected_legs}, complete={complete})"
+        return True, ""
+
+    def _cancel_oco_ids_for_symbol(self, symbol: str, rec: dict) -> tuple[int, list[str]]:
+        """
+        Cancel all known OCO smart-order ids for symbol. Best effort.
+        Returns (cancelled_count, errors).
+        """
+        if self.client is None:
+            return 0, ["Groww client not initialized"]
+        rec_norm = self._normalize_active_trade_record(rec or {})
+        order_ids = self._oco_ids_from_record(rec_norm)
+        cancelled = 0
+        errors: list[str] = []
+        for oid in order_ids:
+            sid = str(oid or "")
+            if not sid or sid == self.DRY_RUN_PLACEHOLDER_ORDER_ID:
+                continue
+            try:
+                self.client.cancel_smart_order(
+                    segment=self.client.SEGMENT_FNO,
+                    smart_order_type=self.client.SMART_ORDER_TYPE_OCO,
+                    smart_order_id=sid,
+                )
+                cancelled += 1
+            except Exception as e:
+                errors.append(f"{sid}: {e}")
+        return cancelled, errors
+
+    @staticmethod
+    def _rearm_alert_line(
+        *,
+        source: str,
+        symbol: str,
+        attempted: bool,
+        forced: bool,
+        retried: bool,
+        success: bool,
+        detail: str = "",
+    ) -> str | None:
+        """
+        Build a single human-readable rearm alert line.
+        Exactly one line should be emitted per symbol rearm attempt.
+        """
+        if not attempted:
+            return None
+        mode = "forced" if forced else "normal"
+        retry = " +retry" if retried else ""
+        status = "✅" if success else "❌"
+        msg = f"{status} REARM[{source}] {symbol}: {mode}{retry}"
+        if detail:
+            msg += f" ({detail})"
+        return msg
+
+    def _execute_rearm_for_symbol(
+        self,
+        *,
+        source: str,
+        symbol: str,
+        rec: dict,
+        pos: dict,
+        force_initial: bool,
+    ) -> dict:
+        """
+        Unified per-symbol rearm flow used by both scheduled maintenance and admin REARM.
+        Returns:
+          {
+            "rearmed": int,
+            "line": str|None,
+            "attempted": bool,
+            "success": bool,
+            "primary_alert": str,
+          }
+        """
+        payload_cache: dict[str, dict] = {}
+        rec_norm = self._normalize_active_trade_record(rec)
+        rec_norm = self._sync_oco_snapshot_from_broker(symbol, rec_norm, payload_cache=payload_cache)
+        pos = pos or {}
+        open_qty = abs(self._position_quantity(pos))
+
+        force_rearm = bool(force_initial)
+        force_reasons: list[str] = []
+        if force_initial:
+            force_reasons.append("manual_force")
+
+        if rec_norm.get("smart_order_id") != self.DRY_RUN_PLACEHOLDER_ORDER_ID and not force_rearm:
+            oco_ids = self._oco_ids_from_record(rec_norm)
+            if not oco_ids:
+                force_rearm = True
+                force_reasons.append("oco_missing")
+            elif not self._has_modifiable_oco(symbol, rec_norm):
+                force_rearm = True
+                force_reasons.append("oco_stale")
+            elif not self._has_target_legs_on_broker(symbol, rec_norm, payload_cache=payload_cache):
+                force_rearm = True
+                force_reasons.append("target_leg_missing")
+            else:
+                complete, reason = self._has_complete_oco_protection(
+                    symbol, rec_norm, open_qty, payload_cache=payload_cache
+                )
+                if not complete:
+                    force_rearm = True
+                    force_reasons.append(f"integrity:{reason}")
+
+        ok, alert = self._rearm_oco_for_open_position(
+            symbol, rec_norm, pos, force=force_rearm, payload_cache=payload_cache
+        )
+        attempted = bool(force_rearm or ok or alert)
+        retried = False
+        success = bool(ok)
+        rearmed_inc = 1 if ok else 0
+        detail_parts: list[str] = []
+        if force_reasons:
+            detail_parts.append("forced_by=" + ",".join(force_reasons))
+        if ok:
+            detail_parts.append("re-armed")
+        elif alert:
+            detail_parts.append(str(alert).replace("\n", " | "))
+
+        rec_after = self._get_active_trade_record(symbol) or rec_norm
+        complete_after, _ = self._has_complete_oco_protection(
+            symbol, rec_after, open_qty, payload_cache=payload_cache
+        )
+        if not complete_after:
+            rec_force = dict(rec_after)
+            rec_force["protection_armed_date"] = ""
+            ok2, alert2 = self._rearm_oco_for_open_position(
+                symbol, rec_force, pos, force=True, payload_cache=payload_cache
+            )
+            retried = True
+            if ok2:
+                rearmed_inc += 1
+                success = True
+                detail_parts.append("integrity_retry=ok")
+            elif alert2:
+                detail_parts.append("integrity_retry=" + str(alert2).replace("\n", " | "))
+            rec_final = self._get_active_trade_record(symbol) or rec_after
+            final_ok, final_reason = self._has_complete_oco_protection(
+                symbol, rec_final, open_qty, payload_cache=payload_cache
+            )
+            if not final_ok:
+                success = False
+                detail_parts.append(f"integrity_failed:{final_reason}")
+                logger.error(
+                    f"[REARM] Final integrity failure for {symbol} after {source} re-arm "
+                    f"(forced={force_rearm}, retried={retried}): {final_reason}"
+                )
+            else:
+                success = True
+                detail_parts.append("integrity=ok")
+        elif attempted:
+            detail_parts.append("integrity=ok")
+
+        line = self._rearm_alert_line(
+            source=source,
+            symbol=symbol,
+            attempted=attempted,
+            forced=force_rearm,
+            retried=retried,
+            success=success,
+            detail="; ".join(detail_parts),
+        )
+        return {
+            "rearmed": int(rearmed_inc),
+            "line": line,
+            "attempted": bool(attempted),
+            "success": bool(success),
+            "primary_alert": str(alert or ""),
+        }
+
+    def _run_scheduled_rearm_for_symbols(
+        self,
+        *,
+        source: str,
+        updated: dict,
+        positions_map: dict[str, dict],
+        stats: dict,
+    ) -> None:
+        for symbol, rec in list(updated.items()):
+            try:
+                pos = positions_map.get(symbol)
+                if not pos:
+                    continue
+                result = self._execute_rearm_for_symbol(
+                    source=source,
+                    symbol=symbol,
+                    rec=rec,
+                    pos=pos,
+                    force_initial=False,
+                )
+                stats["rearmed"] += int(result.get("rearmed") or 0)
+                line = result.get("line")
+                if line:
+                    stats["alerts"].append(str(line))
+            except Exception as e:
+                logger.warning(f"[REARM] Failed for {symbol}: {e}")
+                line = self._rearm_alert_line(
+                    source=source,
+                    symbol=symbol,
+                    attempted=True,
+                    forced=True,
+                    retried=False,
+                    success=False,
+                    detail=f"exception:{e}",
+                )
+                if line:
+                    stats["alerts"].append(line)
+
+    def maintain_active_trades(self, *, include_rearm: bool = True) -> dict:
         """
         Unified active-trade maintenance:
         1) Reconcile local active trades with broker open positions.
-        2) Optionally re-arm OCO once per day for carry-forward open positions.
+        2) Optionally re-arm OCO for carry-forward open positions.
         """
         stats = {"active": 0, "removed": 0, "rearmed": 0, "alerts": []}
         if self.client is None:
@@ -1260,36 +1842,37 @@ class Trader:
                 logger.info(f"[RECONCILE] Removing stale local trade {symbol} (not active on broker).")
         self._save_all_trades(updated)
 
-        if not Config.AUTO_REARM_PROTECTION:
+        if not (include_rearm and Config.AUTO_REARM_PROTECTION):
             return stats
 
         # Re-arm protection for carry-forward open positions.
-        for symbol, rec in list(updated.items()):
-            try:
-                rec_norm = self._normalize_active_trade_record(rec)
-                force_rearm = False
-                if rec_norm.get("smart_order_id") != self.DRY_RUN_PLACEHOLDER_ORDER_ID:
-                    oco_ids = self._oco_ids_from_record(rec_norm)
-                    if not oco_ids:
-                        force_rearm = True
-                        stats["alerts"].append(
-                            f"⚠️ OCO missing for active position {symbol}; forcing protection re-arm."
-                        )
-                    elif not self._has_modifiable_oco(symbol, rec_norm):
-                        force_rearm = True
-                        stats["alerts"].append(
-                            f"⚠️ OCO stale on broker for active position {symbol}; forcing protection re-arm."
-                        )
-                ok, alert = self._rearm_oco_for_open_position(
-                    symbol, rec_norm, positions_map[symbol], force=force_rearm
-                )
-                if ok:
-                    stats["rearmed"] += 1
-                if alert:
-                    stats["alerts"].append(alert)
-            except Exception as e:
-                logger.warning(f"[REARM] Failed for {symbol}: {e}")
-                stats["alerts"].append(f"❌ OCO re-arm failed for {symbol}: {e}")
+        self._run_scheduled_rearm_for_symbols(
+            source="schedule",
+            updated=updated,
+            positions_map=positions_map,
+            stats=stats,
+        )
+        return stats
+
+    def run_auto_rearm_protection_tick(self) -> dict:
+        """
+        Re-arm-only maintenance tick.
+        Intended for a dedicated scheduler separate from reconcile polling.
+        """
+        stats = {"active": 0, "removed": 0, "rearmed": 0, "alerts": []}
+        if self.client is None or not Config.AUTO_REARM_PROTECTION:
+            return stats
+        updated = self._load_active_trades()
+        if not updated:
+            return stats
+        positions_map = self._active_positions_map()
+        stats["active"] = len(positions_map)
+        self._run_scheduled_rearm_for_symbols(
+            source="schedule",
+            updated=updated,
+            positions_map=positions_map,
+            stats=stats,
+        )
         return stats
 
     def admin_rearm_protection_for_active_trades(self) -> str:
@@ -1327,26 +1910,38 @@ class Trader:
                 details.append(f"• {symbol}: skipped (not open on broker)")
                 continue
             try:
-                # Force an attempt now, regardless of today's protection_armed_date.
-                rec_force = dict(rec)
-                rec_force["protection_armed_date"] = ""
-                ok, alert = self._rearm_oco_for_open_position(symbol, rec_force, pos)
-                if ok:
-                    rearmed += 1
-                    details.append(f"• {symbol}: re-armed")
-                    continue
-                if alert and "already attached" in alert.lower():
+                result = self._execute_rearm_for_symbol(
+                    source="admin",
+                    symbol=symbol,
+                    rec=rec,
+                    pos=pos,
+                    force_initial=True,
+                )
+                rearmed += int(result.get("rearmed") or 0)
+                line = result.get("line")
+                if line:
+                    details.append(f"• {line}")
+                primary_alert = str(result.get("primary_alert") or "")
+                attempted = bool(result.get("attempted"))
+                success = bool(result.get("success"))
+                if primary_alert and "already attached" in primary_alert.lower():
                     already += 1
-                    details.append(f"• {symbol}: protection already present")
-                elif alert:
+                elif primary_alert and not success:
                     failed += 1
-                    details.append(f"• {symbol}: {alert}")
-                else:
+                elif not attempted:
                     skipped += 1
-                    details.append(f"• {symbol}: no action")
             except Exception as e:
                 failed += 1
-                details.append(f"• {symbol}: failed ({e})")
+                line = self._rearm_alert_line(
+                    source="admin",
+                    symbol=symbol,
+                    attempted=True,
+                    forced=True,
+                    retried=False,
+                    success=False,
+                    detail=f"exception:{e}",
+                )
+                details.append(f"• {line or f'{symbol}: failed ({e})'}")
 
         summary = (
             "🛡️ REARM sweep completed\n"
@@ -2353,6 +2948,19 @@ class Trader:
             logger.warning(f"OCO verify get_smart_order failed for id={smart_order_id}: {e}")
         return {}
 
+    def _get_oco_order_payload_cached(self, smart_order_id: str, payload_cache: dict[str, dict] | None) -> dict:
+        """
+        Fetch OCO payload once and reuse within a maintenance/rearm cycle.
+        """
+        sid = str(smart_order_id or "")
+        if not sid:
+            return {}
+        if payload_cache is None:
+            return self._get_oco_order_payload(sid)
+        if sid not in payload_cache:
+            payload_cache[sid] = self._get_oco_order_payload(sid)
+        return payload_cache.get(sid) or {}
+
     @staticmethod
     def _iter_dict_nodes(payload):
         if isinstance(payload, dict):
@@ -2498,6 +3106,16 @@ class Trader:
         if not isinstance(tgt, dict):
             return False
         trig = tgt.get("triggerPrice", tgt.get("trigger_price"))
+        return trig not in (None, "", 0, "0", "0.0")
+
+    @staticmethod
+    def _oco_payload_has_stop(payload: dict) -> bool:
+        if not isinstance(payload, dict):
+            return False
+        sl = payload.get("stop_loss", payload.get("stopLoss"))
+        if not isinstance(sl, dict):
+            return False
+        trig = sl.get("triggerPrice", sl.get("trigger_price"))
         return trig not in (None, "", 0, "0", "0.0")
 
     @staticmethod

@@ -234,8 +234,8 @@ class BotListener:
                 if not active_count:
                     continue
                 logger.info(f"[RECONCILE] Polling broker for {active_count} active trade(s)...")
-                stats = await asyncio.to_thread(self.trader.maintain_active_trades)
-                if stats.get("removed") or stats.get("rearmed"):
+                stats = await asyncio.to_thread(self.trader.maintain_active_trades, include_rearm=False)
+                if stats.get("removed"):
                     logger.info(
                         f"[RECONCILE] Maintenance result: active={stats.get('active', 0)} "
                         f"removed={stats.get('removed', 0)} rearmed={stats.get('rearmed', 0)}"
@@ -249,6 +249,38 @@ class BotListener:
                 raise
             except Exception as e:
                 logger.error(f"Active trade reconciler error: {e}")
+
+    async def _auto_rearm_scheduler(self):
+        if not Config.AUTO_REARM_PROTECTION:
+            return
+        interval = max(10, Config.AUTO_REARM_POLL_SEC)
+        logger.info(f"Auto re-arm scheduler started (every {interval}s).")
+        while True:
+            try:
+                await asyncio.sleep(interval)
+                if not self.state_engine.is_active():
+                    continue
+                if not self._is_broker_window_open_ist():
+                    continue
+                active_trades = await asyncio.to_thread(self.trader._load_active_trades)
+                if not active_trades:
+                    continue
+                logger.info(f"[REARM] Polling broker for {len(active_trades)} active trade(s)...")
+                stats = await asyncio.to_thread(self.trader.run_auto_rearm_protection_tick)
+                if stats.get("rearmed"):
+                    logger.info(
+                        f"[REARM] Maintenance result: active={stats.get('active', 0)} "
+                        f"rearmed={stats.get('rearmed', 0)}"
+                    )
+                for alert in (stats.get("alerts") or []):
+                    try:
+                        await self.notifier.send(f"Protection Maintenance\n\n{alert}")
+                    except Exception as notify_err:
+                        logger.error(f"Auto re-arm alert notify error: {notify_err}")
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                logger.error(f"Auto re-arm scheduler error: {e}")
 
     async def _management_queue_watcher(self):
         if not Config.MGMT_QUEUE_ENABLED:
@@ -305,7 +337,7 @@ class BotListener:
                         "✅ Groww connection and trading access restored. Broker actions are live."
                     )
                     try:
-                        boot_stats = await asyncio.to_thread(self.trader.maintain_active_trades)
+                        boot_stats = await asyncio.to_thread(self.trader.maintain_active_trades, include_rearm=False)
                         logger.info(
                             f"[GROWW] Post-recovery maintenance: active={boot_stats.get('active', 0)} "
                             f"removed={boot_stats.get('removed', 0)} rearmed={boot_stats.get('rearmed', 0)}"
@@ -769,6 +801,7 @@ class BotListener:
         asyncio.create_task(self._pending_entry_watcher())
         asyncio.create_task(self._management_queue_watcher())
         asyncio.create_task(self._active_trade_reconciler())
+        asyncio.create_task(self._auto_rearm_scheduler())
         asyncio.create_task(self._groww_auth_watcher())
 
         # Listen to both incoming and outgoing so admin commands typed from the

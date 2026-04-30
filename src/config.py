@@ -77,6 +77,7 @@ class Config:
     ACTIVE_RECONCILE_POLL_SEC = max(10, int(os.getenv("ACTIVE_RECONCILE_POLL_SEC", "60")))
     # Auto re-arm OCO for carry-forward positions. Keep FALSE when broker already carries OCO overnight.
     AUTO_REARM_PROTECTION = os.getenv("AUTO_REARM_PROTECTION", "false").lower() == "true"
+    AUTO_REARM_POLL_SEC = max(10, int(os.getenv("AUTO_REARM_POLL_SEC", "60")))
 
     # Volatility schedule: widen OCO SL before close, restore next morning (IST). Policy 1: admin TRAIL_SL
     # still updates broker SL immediately; sl_true in active_trades tracks the channel's true SL.

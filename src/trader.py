@@ -327,6 +327,134 @@ class Trader:
             logger.debug(f"Fill fetch failed for {groww_order_id}: {e}")
         return info
 
+    @classmethod
+    def _infer_exit_fill_from_history_payload(cls, *, symbol: str, entry_side: str, payload) -> dict | None:
+        """
+        Best-effort extraction of executed exit fills from broker order/trade history payloads.
+        Works on heterogeneous schemas by walking every dict node.
+        """
+        want_side = "SELL" if str(entry_side or "BUY").upper() == "BUY" else "BUY"
+        symbol_u = str(symbol or "").upper().strip()
+        avg_keys = {
+            "average_price",
+            "avg_price",
+            "avgprice",
+            "traded_price",
+            "trade_price",
+            "executed_price",
+            "fill_price",
+            "price",
+        }
+        qty_keys = {
+            "filled_quantity",
+            "filled_qty",
+            "traded_quantity",
+            "traded_qty",
+            "executed_quantity",
+            "executed_qty",
+            "quantity",
+            "qty",
+        }
+        side_keys = {"transaction_type", "transactiontype", "side", "order_side", "action", "type"}
+        sym_keys = {"trading_symbol", "tradingsymbol", "symbol", "exchange_trading_symbol", "instrument"}
+        status_keys = {"status", "order_status", "oms_order_status", "state", "order_state"}
+
+        fills: list[dict] = []
+        for node in cls._iter_dict_nodes(payload):
+            if not isinstance(node, dict):
+                continue
+            node_sym = ""
+            for k in sym_keys:
+                v = node.get(k)
+                if v:
+                    node_sym = str(v).upper().strip()
+                    break
+            if not node_sym or node_sym != symbol_u:
+                continue
+
+            node_side = ""
+            for k in side_keys:
+                v = node.get(k)
+                if v:
+                    node_side = str(v).upper().strip()
+                    break
+            if node_side and want_side not in node_side:
+                continue
+
+            # Prefer explicitly executed/filled rows when status exists.
+            good_status = False
+            for k in status_keys:
+                v = node.get(k)
+                if not v:
+                    continue
+                s = str(v).upper()
+                if any(x in s for x in ("FILLED", "COMPLETE", "COMPLETED", "EXECUTED", "DONE", "TRADED")):
+                    good_status = True
+                    break
+            if not good_status and status_keys.intersection(set(node.keys())):
+                continue
+
+            avg = cls._walk_for_numeric_key(node, avg_keys) or 0.0
+            qty = cls._walk_for_numeric_key(node, qty_keys) or 0.0
+            if avg <= 0 or qty <= 0:
+                continue
+            fills.append(
+                {
+                    "exit_price": float(avg),
+                    "exit_qty": int(abs(qty)),
+                    "order_id": cls._extract_order_id_from_node(node),
+                }
+            )
+
+        if not fills:
+            return None
+        total_qty = sum(int(f.get("exit_qty") or 0) for f in fills)
+        if total_qty <= 0:
+            return None
+        weighted = sum(float(f.get("exit_price") or 0.0) * int(f.get("exit_qty") or 0) for f in fills) / float(total_qty)
+        order_ids = [str(f.get("order_id") or "") for f in fills if str(f.get("order_id") or "")]
+        return {
+            "exit_price": float(weighted),
+            "exit_qty": int(total_qty),
+            "source": "broker_history",
+            "order_id": (order_ids[0] if order_ids else ""),
+        }
+
+    def _infer_exit_fill_from_order_history(self, *, symbol: str, active_rec: dict | None) -> dict | None:
+        """
+        Try broker order/trade history endpoints for already-closed symbols where
+        positions and OCO payloads may no longer carry fill details.
+        """
+        if self.client is None:
+            return None
+        rec = self._normalize_active_trade_record(active_rec or {})
+        side = str(rec.get("entry_side") or "BUY").upper()
+        method_candidates = (
+            "get_order_history",
+            "get_orders",
+            "get_all_orders",
+            "get_trade_history",
+            "get_trades",
+            "get_tradebook",
+            "get_orders_for_user",
+        )
+        for name in method_candidates:
+            fn = getattr(self.client, name, None)
+            if not callable(fn):
+                continue
+            for kwargs in ({"segment": "FNO"}, {}):
+                try:
+                    payload = fn(**kwargs) if kwargs else fn()
+                except TypeError:
+                    continue
+                except Exception as e:
+                    logger.debug(f"[RECONCILE] {name} failed for {symbol}: {e}")
+                    continue
+                inferred = self._infer_exit_fill_from_history_payload(symbol=symbol, entry_side=side, payload=payload)
+                if inferred:
+                    return inferred
+        return None
+
     def _reconcile_exit_fill_from_positions(self, *, symbol: str, active_rec: dict | None) -> dict | None:
         """
         Best-effort exit fill inference for reconcile-close scenarios where no explicit
@@ -341,6 +469,9 @@ class Trader:
         oco_fill = self._infer_exit_fill_from_oco_legs(symbol=symbol, active_rec=rec)
         if oco_fill:
             return oco_fill
+        history_fill = self._infer_exit_fill_from_order_history(symbol=symbol, active_rec=rec)
+        if history_fill:
+            return history_fill
         side = str(rec.get("entry_side") or "BUY").upper()
         try:
             fno_positions = self.client.get_positions_for_user(segment="FNO")
@@ -590,8 +721,13 @@ class Trader:
 
             row["reconcile_attempts"] = int(self._num_or(row.get("reconcile_attempts"), 0)) + 1
             row["last_reconcile_try_ist"] = self._now_ist_iso()
+            changed = True
 
             if exit_price <= 0 or exit_qty <= 0:
+                logger.info(
+                    f"[RECONCILE] Pending exit fill still unavailable for {symbol} "
+                    f"(attempt={int(row.get('reconcile_attempts') or 0)})."
+                )
                 continue
 
             side = str(row.get("side") or "BUY").upper()
@@ -608,7 +744,10 @@ class Trader:
             row["pnl_pending"] = False
             row["exit_fill_source"] = str(inferred.get("source") or row.get("exit_fill_source") or "backfilled")
             updated_count += 1
-            changed = True
+            logger.info(
+                f"[RECONCILE] Backfilled exit for {symbol}: price={exit_price}, qty={exit_qty}, "
+                f"source={row.get('exit_fill_source')}."
+            )
 
         if changed:
             book["trades"] = rows

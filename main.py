@@ -8,12 +8,7 @@ async def run_bot():
     Main entry point for the Industrial-Standard AI Trading Bot.
     """
     logger.info("Initializing Industrial-Standard Trading Bot...")
-    
-    # Check for critical secrets before starting
-    if not Config.OPENAI_API_KEY:
-        logger.error("CRITICAL: OPENAI_API_KEY is missing. AI parsing will fail.")
-        return
-        
+
     if not Config.GROWW_API_KEY or not Config.GROWW_API_SECRET:
         logger.warning("GROWW_API credentials missing. Groww client features may not work.")
 
@@ -44,7 +39,7 @@ async def run_bot():
         logger.info("Bot Process Terminated.")
 
 if __name__ == "__main__":
-    # Start the asyncio event loop
+    Config.validate()
     try:
         asyncio.run(run_bot())
     except KeyboardInterrupt:

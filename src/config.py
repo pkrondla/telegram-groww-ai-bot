@@ -1,4 +1,5 @@
 import os
+import sys
 from dotenv import load_dotenv
 
 # Load all environment variables from .env
@@ -9,22 +10,52 @@ class Config:
     Centralized configuration for the Trading Bot.
     All settings are loaded from environment variables for security.
     """
-    
-    # Telegram
-    API_ID = int(os.getenv("TELEGRAM_API_ID", 31871346))
-    API_HASH = os.getenv("TELEGRAM_API_HASH", "20dba7ad500de39e0290f55a1df0b8bb")
+
+    # Telegram — no defaults; all must be set in .env
+    API_ID = int(os.getenv("TELEGRAM_API_ID") or 0) or None
+    API_HASH = os.getenv("TELEGRAM_API_HASH")
     SESSION_NAME = os.getenv("TELEGRAM_SESSION_NAME", "session_name")
-    TARGET_CHAT_ID = int(os.getenv("TELEGRAM_TARGET_CHAT_ID", -1002153367077))
-    ADMIN_ID = int(os.getenv("TELEGRAM_ADMIN_ID", 1447109810))
+    TARGET_CHAT_ID = int(os.getenv("TELEGRAM_TARGET_CHAT_ID") or 0) or None
+    ADMIN_ID = int(os.getenv("TELEGRAM_ADMIN_ID") or 0) or None
     BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-    
+
     # OpenAI
     OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
     OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
-    
+
     # Groww
     GROWW_API_KEY = os.getenv("GROWW_API_KEY")
     GROWW_API_SECRET = os.getenv("GROWW_API_SECRET")
+
+    # Required at startup — bot will not start if any of these are missing.
+    _REQUIRED = {
+        "TELEGRAM_API_ID":      "API_ID",
+        "TELEGRAM_API_HASH":    "API_HASH",
+        "TELEGRAM_TARGET_CHAT_ID": "TARGET_CHAT_ID",
+        "TELEGRAM_ADMIN_ID":    "ADMIN_ID",
+        "OPENAI_API_KEY":       "OPENAI_API_KEY",
+    }
+
+    @classmethod
+    def validate(cls) -> None:
+        """
+        Call once at startup. Raises SystemExit listing every missing required
+        env var so the operator knows exactly what to set in .env.
+        """
+        missing = [
+            env_name
+            for env_name, attr in cls._REQUIRED.items()
+            if not getattr(cls, attr)
+        ]
+        if missing:
+            lines = "\n".join(f"  - {v}" for v in missing)
+            print(
+                f"\n[CONFIG] Bot cannot start — missing required environment variables:\n"
+                f"{lines}\n"
+                f"Copy .env.example to .env and fill in the missing values.\n",
+                file=sys.stderr,
+            )
+            sys.exit(1)
     
     # Bot Settings
     # When True: skip entry MARKET/LIMIT BUY/SELL placement; LTP/quotes still use Groww if key is set.

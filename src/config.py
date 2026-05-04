@@ -135,3 +135,7 @@ class Config:
     BROKER_WINDOW_POSTCLOSE_MIN = max(0, int(os.getenv("BROKER_WINDOW_POSTCLOSE_MIN", "15")))
     GROWW_AUTH_POLL_SEC = max(15, int(os.getenv("GROWW_AUTH_POLL_SEC", "60")))
 
+    # When False (default), EXTEND_RANGE for an unknown symbol is rejected instead of
+    # silently becoming a fresh BUY. Set True only if you intentionally want that behaviour.
+    EXTEND_RANGE_ALLOWS_ENTRY = os.getenv("EXTEND_RANGE_ALLOWS_ENTRY", "false").lower() == "true"
+

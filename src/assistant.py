@@ -1,5 +1,7 @@
 import json
 import re
+import time
+import hashlib
 import datetime
 import pytz
 from openai import OpenAI
@@ -7,6 +9,33 @@ from .config import Config
 from .logger import logger
 from .models import TradeSignal
 from .symbol_manager import symbol_manager
+from .metrics import metrics
+
+# ---------------------------------------------------------------------------
+# Module-level LLM response cache
+# ---------------------------------------------------------------------------
+_LLM_CACHE: dict[str, tuple[dict, float]] = {}
+_LLM_CACHE_TTL = 120.0   # seconds — covers typical burst windows
+_LLM_CACHE_MAX = 128     # evict oldest when full
+
+
+def _llm_cache_key(messages: list[dict]) -> str:
+    payload = json.dumps(messages, sort_keys=True, ensure_ascii=False)
+    return hashlib.sha256(payload.encode()).hexdigest()
+
+
+def _llm_cache_get(key: str) -> dict | None:
+    entry = _LLM_CACHE.get(key)
+    if entry and time.monotonic() - entry[1] < _LLM_CACHE_TTL:
+        return entry[0]
+    return None
+
+
+def _llm_cache_set(key: str, value: dict) -> None:
+    if len(_LLM_CACHE) >= _LLM_CACHE_MAX:
+        oldest = min(_LLM_CACHE, key=lambda k: _LLM_CACHE[k][1])
+        del _LLM_CACHE[oldest]
+    _LLM_CACHE[key] = (value, time.monotonic())
 
 
 class Assistant:
@@ -233,6 +262,63 @@ class Assistant:
 
         self.client = OpenAI(api_key=self.api_key) if self.api_key else None
         self.model = Config.OPENAI_MODEL
+
+    def _call_openai(self, messages: list[dict]) -> dict | None:
+        """
+        Call the OpenAI chat completions API with:
+        - A module-level LRU cache (120 s TTL, 128 entries) to skip duplicate calls.
+        - Up to 3 attempts with exponential backoff (2 s, 4 s) on transient errors.
+        Returns the parsed JSON dict on success, or None on failure.
+        """
+        if not self.client:
+            logger.error("[LLM] OpenAI client not initialised — skipping call.")
+            return None
+
+        metrics.increment("llm_calls")
+        cache_key = _llm_cache_key(messages)
+        cached = _llm_cache_get(cache_key)
+        if cached is not None:
+            logger.debug("[LLM] Cache hit — skipping API call.")
+            metrics.increment("llm_cache_hits")
+            return cached
+
+        last_err: Exception | None = None
+        for attempt in range(1, 4):
+            try:
+                response = self.client.chat.completions.create(
+                    model=self.model,
+                    messages=messages,
+                    response_format={"type": "json_object"},
+                )
+                data = self._extract_llm_json(response)
+                if data is None:
+                    logger.error("[LLM] Attempt %d: empty/invalid JSON in response.", attempt)
+                    metrics.increment("llm_parse_failed")
+                    return None
+                _llm_cache_set(cache_key, data)
+                return data
+            except Exception as e:
+                last_err = e
+                err_str = str(e)
+                is_transient = any(k in err_str.lower() for k in (
+                    "rate limit", "ratelimit", "429",
+                    "server error", "503", "502", "500",
+                    "timeout", "connection",
+                ))
+                if is_transient and attempt < 3:
+                    wait = 2 ** attempt  # 2s, 4s
+                    logger.warning(
+                        "[LLM] Attempt %d transient error (%s) — retrying in %ds.",
+                        attempt, err_str[:80], wait,
+                    )
+                    metrics.increment("llm_retries")
+                    time.sleep(wait)
+                else:
+                    break
+
+        logger.error("[LLM] All attempts failed: %s", last_err, exc_info=True)
+        metrics.increment("llm_failed")
+        return None
 
     @staticmethod
     def _apply_alias_to_data(data: dict) -> dict:
@@ -1042,24 +1128,15 @@ Rules:
     NIFTY → Tuesday | FINNIFTY → Tuesday | MIDCPNIFTY → Monday
     BANKNIFTY → Thursday | SENSEX → Thursday | BANKEX → Monday
 {symbol_hint}"""
-        try:
-            user_payload = self._build_llm_payload(parent_text, child_text, is_reply, text)
-            response = self.client.chat.completions.create(
-                model=self.model,
-                messages=[
-                    {"role": "system", "content": system},
-                    {"role": "user", "content": user_payload},
-                ],
-                response_format={"type": "json_object"},
-            )
-            data = self._extract_llm_json(response)
-            if not isinstance(data, dict):
-                logger.error("AI forced-parse error: empty/invalid model response")
-                return None
-            return data
-        except Exception as e:
-            logger.error(f"AI forced-parse error: {str(e)}")
+        user_payload = self._build_llm_payload(parent_text, child_text, is_reply, text)
+        data = self._call_openai([
+            {"role": "system", "content": system},
+            {"role": "user", "content": user_payload},
+        ])
+        if not isinstance(data, dict):
+            logger.error("AI forced-parse error: empty/invalid model response")
             return None
+        return data
 
     @staticmethod
     def _coerce_message_parts(message) -> tuple[str, str, bool, str]:
@@ -1646,16 +1723,10 @@ Return is_trade: false for:
                 text,
             )
             logger.info("[STAGE 2] Calling LLM (%s)...", self.model)
-            response = self.client.chat.completions.create(
-                model=self.model,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_payload},
-                ],
-                response_format={"type": "json_object"},
-            )
-
-            data = self._extract_llm_json(response)
+            data = self._call_openai([
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_payload},
+            ])
             if not isinstance(data, dict):
                 logger.error("[STAGE 2] LLM returned empty/invalid response.")
                 return None

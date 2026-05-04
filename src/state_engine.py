@@ -1,6 +1,9 @@
 from __future__ import annotations
 from .models import TradeSignal
 from .logger import logger
+from .config import Config
+from .metrics import metrics
+from .trade_fsm import TradeState, can_transition, state_from_record
 
 
 class StateEngine:
@@ -58,6 +61,7 @@ class StateEngine:
         Evaluate a parsed TradeSignal and decide what to execute.
         Returns a result message string, or None if signal was suppressed.
         """
+        metrics.increment("signals_received")
         logger.info(f"[STAGE 3] StateEngine.process: action={signal.action} symbol={signal.trading_symbol} "
                     f"bot_status={self.status}")
 
@@ -113,6 +117,7 @@ class StateEngine:
             return f"⚠️ DUPLICATE: {symbol} already has an open position. Signal ignored."
 
         logger.info(f"[STAGE 3] Forwarding {signal.action} {symbol} to executor.")
+        metrics.increment("trades_entered")
         return self._trader.execute_trade(signal.to_legacy_dict())
 
     # ------------------------------------------------------------------
@@ -178,10 +183,19 @@ class StateEngine:
             self._trader._save_pending(pending)
             return f"✅ EXTEND_RANGE: pending entry for {symbol} updated — new ceiling: {new_max}."
 
-        # 3. No active trade and not in pending queue — treat as a fresh BUY at the extended range.
+        # 3. No active trade and not in pending queue.
+        if not Config.EXTEND_RANGE_ALLOWS_ENTRY:
+            logger.warning(
+                f"[STAGE 3] EXTEND_RANGE: no active/pending trade for {symbol} — "
+                f"rejected (set EXTEND_RANGE_ALLOWS_ENTRY=true to allow new BUY entries)."
+            )
+            return (
+                f"⚠️ EXTEND_RANGE: no active or pending trade found for {symbol}. "
+                f"Signal ignored. (Set EXTEND_RANGE_ALLOWS_ENTRY=true to allow entry.)"
+            )
         logger.info(
             f"[STAGE 3] EXTEND_RANGE: no active/pending trade for {symbol} — "
-            f"forwarding as fresh BUY with extended range."
+            f"forwarding as fresh BUY with extended range (EXTEND_RANGE_ALLOWS_ENTRY=true)."
         )
         signal.action = "BUY"
         return self._handle_entry(signal)
@@ -290,6 +304,19 @@ class StateEngine:
         if not resolved:
             logger.info(f"[STAGE 3] No active trade matched for '{symbol}' — cannot exit/trail.")
             return f"⚠️ NO ACTIVE TRADE: Could not find an open position for {symbol}."
+
+        # FSM guard — validate the action is permitted for the current trade state.
+        rec = active.get(resolved) or {}
+        trade_state = state_from_record(rec if isinstance(rec, dict) else {})
+        if not can_transition(trade_state, signal.action):
+            logger.warning(
+                "[STAGE 3] FSM: action '%s' rejected for %s in state %s.",
+                signal.action, resolved, trade_state.value,
+            )
+            return (
+                f"⚠️ {signal.action} rejected for {resolved}: "
+                f"trade is in state {trade_state.value}."
+            )
 
         if resolved != symbol:
             logger.info(f"[STAGE 3] Symbol reconciled: '{symbol}' → '{resolved}'")

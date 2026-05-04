@@ -6,10 +6,14 @@ import re
 import csv
 import copy
 import time
+import tempfile
+import threading
 import datetime
 import math
 import pytz
 from .config import Config
+from .metrics import metrics
+from .db import db
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +45,8 @@ class Trader:
         self.pending_management_file = "pending_management.json"
         self.completed_trades_dir = "completed_trades"
         self._instrument_cache = None  # lazy-loaded dict[(exchange,trading_symbol)] -> row dict
+        self._instrument_cache_lock = threading.Lock()
+        self._file_lock = threading.Lock()
         self.place_entry_orders = not dry_run
         self._access_token = None
 
@@ -85,6 +91,46 @@ class Trader:
                 logger.error(f"Groww client init failed: {e}")
             self.client = None
             return False
+
+    # Limit concurrent Groww broker API calls across all threads.
+    _broker_semaphore = threading.Semaphore(3)
+
+    # Groww HTTP status / exception substrings treated as transient and worth retrying.
+    _TRANSIENT_BROKER_ERRORS = (
+        "429", "rate limit", "ratelimit",
+        "503", "502", "500", "server error",
+        "timeout", "timed out", "connection",
+        "temporarily unavailable",
+    )
+
+    def _groww_call(self, fn, *args, **kwargs):
+        """
+        Execute a single Groww API call with:
+        - a shared semaphore (max 3 concurrent broker calls)
+        - up to 3 attempts with exponential backoff (2 s, 4 s) on transient errors
+        """
+        metrics.increment("broker_calls")
+        last_err: Exception | None = None
+        for attempt in range(1, 4):
+            try:
+                with self._broker_semaphore:
+                    return fn(*args, **kwargs)
+            except Exception as e:
+                last_err = e
+                err_str = str(e).lower()
+                is_transient = any(k in err_str for k in self._TRANSIENT_BROKER_ERRORS)
+                if is_transient and attempt < 3:
+                    wait = 2 ** attempt  # 2 s, 4 s
+                    logger.warning(
+                        "[BROKER] Attempt %d transient error (%s) — retrying in %ds.",
+                        attempt, str(e)[:80], wait,
+                    )
+                    metrics.increment("broker_retries")
+                    time.sleep(wait)
+                else:
+                    break
+        metrics.increment("broker_failed")
+        raise last_err
 
     @property
     def execute_orders(self) -> bool:
@@ -212,37 +258,24 @@ class Trader:
 
     def _load_completed_trades_book(self, date_iso: str | None = None) -> dict:
         d = str(date_iso or self._today_ist_iso())
-        path = self._completed_trades_file(d)
-        if not os.path.exists(path):
-            return {
-                "date": d,
-                "timezone": "Asia/Kolkata",
-                "trades": [],
-                "eod": {"summary_sent_at": ""},
-            }
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            if not isinstance(data, dict):
-                raise ValueError("invalid completed trades schema")
-            data.setdefault("date", d)
-            data.setdefault("timezone", "Asia/Kolkata")
-            data.setdefault("trades", [])
-            data.setdefault("eod", {"summary_sent_at": ""})
-            return data
-        except Exception:
-            return {
-                "date": d,
-                "timezone": "Asia/Kolkata",
-                "trades": [],
-                "eod": {"summary_sent_at": ""},
-            }
+        return db.get_completed_trades_for_date(d)
 
-    def _save_completed_trades_book(self, book: dict, date_iso: str | None = None):
+    def _save_completed_trades_book(self, book: dict, date_iso: str | None = None) -> None:
         d = str(date_iso or book.get("date") or self._today_ist_iso())
-        path = self._completed_trades_file(d)
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(book, f, indent=4)
+        # Persist any rows not already in the DB by trade_id.
+        existing_rows = db.get_completed_trades_for_date(d)
+        existing_ids = {r.get("trade_id") for r in existing_rows.get("trades", [])}
+        for row in book.get("trades", []):
+            if row.get("trade_id") not in existing_ids:
+                db.insert_completed_trade(d, row)
+            else:
+                # Update in case exit price / PnL was backfilled.
+                trade_id = row.get("trade_id")
+                if trade_id:
+                    db.update_completed_trade_row(trade_id, row)
+        eod_sent = bool((book.get("eod") or {}).get("summary_sent_at"))
+        if eod_sent:
+            db.mark_eod_sent(d)
 
     @staticmethod
     def _num_or(value, default: float = 0.0) -> float:
@@ -807,10 +840,20 @@ class Trader:
             pending_lines = [f"• {str(r.get('symbol') or '?')}: exit fill pending" for r in pending_rows]
             pending_section = "\n\nPending exit fill\n" + "\n".join(pending_lines)
 
+        metrics_snap = metrics.snapshot()
+        metrics_lines = []
+        for key in ("signals_received", "trades_entered", "llm_calls", "llm_cache_hits",
+                    "llm_retries", "llm_failed", "broker_calls", "broker_retries", "broker_failed"):
+            v = metrics_snap.get(key, 0)
+            if v:
+                metrics_lines.append(f"  {key}: {v}")
+        metrics_section = ("\n\nBot metrics (session)\n" + "\n".join(metrics_lines)) if metrics_lines else ""
+
         return (
             f"📊 EOD Trading Summary ({d} IST)\n\n"
             f"Per-trade P&L\n{per_trade_section}{pending_section}\n\n"
             f"Final day P/L: INR {total_inr:.2f} | {total_pts:.2f} pts/lot"
+            f"{metrics_section}"
         )
 
     def run_eod_summary_tick(self) -> str | None:
@@ -2092,18 +2135,23 @@ class Trader:
             return None
         return self._sync_multi_target_progress_for_symbol(resolved, rec, pos or {})
 
-    def _load_active_trades(self):
-        if not os.path.exists(self.active_trades_file):
-            return {}
-        try:
-            with open(self.active_trades_file, "r") as f:
-                return json.load(f)
-        except:
-            return {}
+    def _atomic_json_write(self, path: str, data) -> None:
+        """
+        Write *data* to *path* atomically: serialise to a sibling .tmp file,
+        then os.replace() so the target is never partially written.
+        The file-level lock ensures concurrent to_thread() calls serialise.
+        """
+        tmp = path + ".tmp"
+        with self._file_lock:
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=4)
+            os.replace(tmp, path)
 
-    def _save_all_trades(self, trades_dict):
-        with open(self.active_trades_file, "w") as f:
-            json.dump(trades_dict, f, indent=4)
+    def _load_active_trades(self) -> dict:
+        return db.get_active_trades()
+
+    def _save_all_trades(self, trades_dict: dict) -> None:
+        db.replace_all_active_trades(trades_dict)
 
     @staticmethod
     def _normalize_active_trade_record(record) -> dict:
@@ -2631,7 +2679,8 @@ class Trader:
         sl = self._round_price_to_tick(new_sl, mode="nearest")
         if sl <= 0:
             raise RuntimeError(f"Invalid SL after tick-rounding: {new_sl}")
-        self.client.modify_smart_order(
+        self._groww_call(
+            self.client.modify_smart_order,
             smart_order_id=order_id,
             smart_order_type=self.client.SMART_ORDER_TYPE_OCO,
             segment=self.SMART_SEGMENT,
@@ -2649,7 +2698,8 @@ class Trader:
         tgt = self._round_price_to_tick(new_target, mode="down")
         if tgt <= 0:
             raise RuntimeError(f"Invalid target after tick-rounding: {new_target}")
-        self.client.modify_smart_order(
+        self._groww_call(
+            self.client.modify_smart_order,
             smart_order_id=order_id,
             smart_order_type=self.client.SMART_ORDER_TYPE_OCO,
             segment=self.SMART_SEGMENT,
@@ -3211,18 +3261,10 @@ class Trader:
         return plans
 
     def _load_pending_management(self) -> list[dict]:
-        if not os.path.exists(self.pending_management_file):
-            return []
-        try:
-            with open(self.pending_management_file, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            return data if isinstance(data, list) else []
-        except Exception:
-            return []
+        return db.get_pending_management()
 
-    def _save_pending_management(self, items: list[dict]):
-        with open(self.pending_management_file, "w", encoding="utf-8") as f:
-            json.dump(items, f, indent=4)
+    def _save_pending_management(self, items: list[dict]) -> None:
+        db.replace_pending_management(items)
 
     def _market_window_state_ist(self) -> str:
         now = self._now_ist()
@@ -3394,19 +3436,11 @@ class Trader:
         return out
 
 
-    def _load_pending(self):
-        if not os.path.exists(self.pending_trades_file):
-            return []
-        try:
-            with open(self.pending_trades_file, "r") as f:
-                data = json.load(f)
-            return data if isinstance(data, list) else []
-        except Exception:
-            return []
+    def _load_pending(self) -> list:
+        return db.get_pending_entries()
 
-    def _save_pending(self, items):
-        with open(self.pending_trades_file, "w") as f:
-            json.dump(items, f, indent=4)
+    def _save_pending(self, items: list) -> None:
+        db.replace_pending_entries(items)
 
     def _append_pending(self, item):
         items = self._load_pending()
@@ -4857,31 +4891,32 @@ class Trader:
         Loads the packaged Groww instruments list (CSV) from the installed growwapi package.
         This avoids network dependency on Groww's instruments download endpoint.
         """
-        if self._instrument_cache is not None:
-            return
-        cache = {}
-        try:
-            import growwapi  # type: ignore
-
-            pkg_dir = os.path.dirname(growwapi.__file__)
-            csv_path = os.path.join(pkg_dir, "instruments.csv")
-            if not os.path.exists(csv_path):
-                self._instrument_cache = {}
+        with self._instrument_cache_lock:
+            if self._instrument_cache is not None:
                 return
+            cache = {}
+            try:
+                import growwapi  # type: ignore
 
-            with open(csv_path, newline="", encoding="utf-8") as f:
-                reader = csv.DictReader(f)
-                for row in reader:
-                    ex = row.get("exchange")
-                    ts = row.get("trading_symbol")
-                    if not ex or not ts:
-                        continue
-                    cache[(ex, ts)] = row
+                pkg_dir = os.path.dirname(growwapi.__file__)
+                csv_path = os.path.join(pkg_dir, "instruments.csv")
+                if not os.path.exists(csv_path):
+                    self._instrument_cache = {}
+                    return
 
-            self._instrument_cache = cache
-        except Exception as e:
-            logger.debug(f"Local instrument cache load failed: {e}")
-            self._instrument_cache = {}
+                with open(csv_path, newline="", encoding="utf-8") as f:
+                    reader = csv.DictReader(f)
+                    for row in reader:
+                        ex = row.get("exchange")
+                        ts = row.get("trading_symbol")
+                        if not ex or not ts:
+                            continue
+                        cache[(ex, ts)] = row
+
+                self._instrument_cache = cache
+            except Exception as e:
+                logger.debug(f"Local instrument cache load failed: {e}")
+                self._instrument_cache = {}
 
     def _get_instrument(self, exchange: str, trading_symbol: str):
         """

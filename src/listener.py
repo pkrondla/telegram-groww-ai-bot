@@ -80,6 +80,8 @@ class BotListener:
         self._pending_size_override_scope = "ALL"
         self._pending_size_override_until_ts = 0.0
         self._groww_ready_last_state: bool | None = None
+        self._stop = asyncio.Event()
+        self._tasks: list[asyncio.Task] = []
 
     @staticmethod
     def _parse_hhmm_ist(raw: str) -> tuple[int, int] | None:
@@ -116,7 +118,7 @@ class BotListener:
             return
         interval = max(5, Config.ENTRY_QUEUE_POLL_SEC)
         logger.info(f"Pending entry watcher started (every {interval}s).")
-        while True:
+        while not self._stop.is_set():
             try:
                 await asyncio.sleep(interval)
                 if not self.state_engine.is_active():
@@ -147,7 +149,7 @@ class BotListener:
     async def _scheduled_alerts(self):
         ist = pytz.timezone("Asia/Kolkata")
         logger.info("Market Alert Scheduler Started.")
-        while True:
+        while not self._stop.is_set():
             try:
                 if not self._is_broker_window_open_ist():
                     await asyncio.sleep(30)
@@ -177,7 +179,7 @@ class BotListener:
             return
         interval = max(10, Config.VOL_SL_SCHEDULE_POLL_SEC)
         logger.info(f"Volatility SL scheduler started (every {interval}s, IST widen/restore).")
-        while True:
+        while not self._stop.is_set():
             try:
                 await asyncio.sleep(interval)
                 if not self.state_engine.is_active():
@@ -202,7 +204,7 @@ class BotListener:
             return
         interval = max(10, Config.EOD_SUMMARY_POLL_SEC)
         logger.info(f"EOD summary scheduler started (every {interval}s).")
-        while True:
+        while not self._stop.is_set():
             try:
                 await asyncio.sleep(interval)
                 if not self._is_broker_window_open_ist():
@@ -222,7 +224,7 @@ class BotListener:
             return
         interval = max(10, Config.ACTIVE_RECONCILE_POLL_SEC)
         logger.info(f"Active trade reconciler started (every {interval}s).")
-        while True:
+        while not self._stop.is_set():
             try:
                 await asyncio.sleep(interval)
                 if not self.state_engine.is_active():
@@ -255,7 +257,7 @@ class BotListener:
             return
         interval = max(10, Config.AUTO_REARM_POLL_SEC)
         logger.info(f"Auto re-arm scheduler started (every {interval}s).")
-        while True:
+        while not self._stop.is_set():
             try:
                 await asyncio.sleep(interval)
                 if not self.state_engine.is_active():
@@ -287,7 +289,7 @@ class BotListener:
             return
         interval = max(5, Config.MGMT_QUEUE_POLL_SEC)
         logger.info(f"Management queue watcher started (every {interval}s).")
-        while True:
+        while not self._stop.is_set():
             try:
                 await asyncio.sleep(interval)
                 if not self.state_engine.is_active():
@@ -314,7 +316,7 @@ class BotListener:
         """
         interval = max(15, int(getattr(Config, "GROWW_AUTH_POLL_SEC", 60)))
         logger.info(f"Groww auth watcher started (every {interval}s).")
-        while True:
+        while not self._stop.is_set():
             try:
                 await asyncio.sleep(interval)
                 if not self._is_broker_window_open_ist():
@@ -655,14 +657,15 @@ class BotListener:
         if is_reply:
             logger.info(f"[STAGE 1] parent: {parent_text[:200]}")
 
-        # --- Stage 2: AI Parser ---
-        signal = self.assistant.parse_signal_as_event(
+        # --- Stage 2: AI Parser (off event loop — OpenAI call can take 1-3s) ---
+        signal = await asyncio.to_thread(
+            self.assistant.parse_signal_as_event,
             {
                 "is_reply": is_reply,
                 "parent_text": parent_text,
                 "child_text": child_text,
                 "full_text": raw_text,
-            }
+            },
         )
 
         if not signal:
@@ -710,8 +713,8 @@ class BotListener:
                 f"| sl={signal.stop_loss} | tgt={signal.target}"
             )
 
-        # --- Stage 3: State Engine ---
-        result_msg = self.state_engine.process(signal)
+        # --- Stage 3: State Engine (off event loop — may make synchronous broker API calls) ---
+        result_msg = await asyncio.to_thread(self.state_engine.process, signal)
 
         # --- Stage 4: Notify ---
         if result_msg:
@@ -795,14 +798,16 @@ class BotListener:
         except Exception as e:
             logger.warning(f"Metadata Fetch Error: {str(e)}")
 
-        asyncio.create_task(self._scheduled_alerts())
-        asyncio.create_task(self._vol_sl_scheduler())
-        asyncio.create_task(self._eod_summary_scheduler())
-        asyncio.create_task(self._pending_entry_watcher())
-        asyncio.create_task(self._management_queue_watcher())
-        asyncio.create_task(self._active_trade_reconciler())
-        asyncio.create_task(self._auto_rearm_scheduler())
-        asyncio.create_task(self._groww_auth_watcher())
+        self._tasks = [
+            asyncio.create_task(self._scheduled_alerts()),
+            asyncio.create_task(self._vol_sl_scheduler()),
+            asyncio.create_task(self._eod_summary_scheduler()),
+            asyncio.create_task(self._pending_entry_watcher()),
+            asyncio.create_task(self._management_queue_watcher()),
+            asyncio.create_task(self._active_trade_reconciler()),
+            asyncio.create_task(self._auto_rearm_scheduler()),
+            asyncio.create_task(self._groww_auth_watcher()),
+        ]
 
         # Listen to both incoming and outgoing so admin commands typed from the
         # same logged-in account (Saved Messages / bot DM) are also captured.
@@ -812,3 +817,17 @@ class BotListener:
 
         logger.info("Bot Connection Established.")
         await self.client.run_until_disconnected()
+
+    async def stop(self):
+        """Gracefully cancel all background tasks and disconnect from Telegram."""
+        logger.info("Graceful shutdown initiated...")
+        self._stop.set()
+        for task in self._tasks:
+            task.cancel()
+        if self._tasks:
+            await asyncio.gather(*self._tasks, return_exceptions=True)
+        try:
+            await self.client.disconnect()
+        except Exception as e:
+            logger.warning(f"Disconnect error during shutdown: {e}")
+        logger.info("Bot stopped cleanly.")

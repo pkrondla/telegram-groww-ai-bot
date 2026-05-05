@@ -42,11 +42,9 @@ async def run_bot():
                 "Bot will keep running and retry in background."
             )
         else:
-            # Active-trade maintenance on startup only when broker access is available.
-            boot_stats = bot.trader.maintain_active_trades()
             logger.info(
-                f"Startup active-trade maintenance: active={boot_stats.get('active', 0)} "
-                f"removed={boot_stats.get('removed', 0)} rearmed={boot_stats.get('rearmed', 0)}"
+                "Startup: skipping active-trade maintenance (handled by scheduled "
+                "reconcile / re-arm / VOL_SL tasks after listener starts)."
             )
 
         # Start Telegram listener regardless of Groww readiness.

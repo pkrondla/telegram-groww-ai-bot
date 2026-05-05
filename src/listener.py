@@ -407,6 +407,24 @@ class BotListener:
         m_exit_symbol = re.fullmatch(r"EXIT\s+([A-Z0-9]+)", t)
         if m_exit_symbol:
             return f"exit_symbol:{m_exit_symbol.group(1)}"
+        m_tsl = re.fullmatch(r"TSL(?:\s+TO)?\s+(\d+(?:\.\d+)?)\s+([A-Z0-9]+)", t)
+        if m_tsl:
+            return f"admin_tsl:{m_tsl.group(2).upper()}:{m_tsl.group(1)}"
+        m_ut = re.fullmatch(
+            r"(?:CHANGE\s+TARGET(?:\s+TO)?|TARGET)\s+(\d+(?:\.\d+)?)\s+([A-Z0-9]+)",
+            t,
+        )
+        if m_ut:
+            return f"admin_target:{m_ut.group(2).upper()}:{m_ut.group(1)}"
+        if t in ("PROGRESS", "PROGRESS ALL", "SL PROGRESS", "SL PROGRESS ALL"):
+            return "progress_all"
+        m_prog = re.fullmatch(r"(?:SL\s+)?PROGRESS\s+([A-Z0-9]+)", t)
+        if m_prog and m_prog.group(1) != "ALL":
+            return f"progress_symbol:{m_prog.group(1)}"
+        if t in ("VOLSL WIDEN", "VOL_SL WIDEN", "VOL SL WIDEN"):
+            return "volsl_widen"
+        if t in ("VOLSL RESTORE", "VOL_SL RESTORE", "VOL SL RESTORE"):
+            return "volsl_restore"
         for cmd in _OVERRIDE_COMMANDS:
             if t == cmd:
                 return _OVERRIDE_COMMANDS[cmd]
@@ -535,8 +553,90 @@ class BotListener:
             }
             msg = await asyncio.to_thread(self.trader.execute_trade, payload)
             await self.notifier.send(f"EXIT {symbol}\n\n{msg}")
+        elif command.startswith("admin_tsl:"):
+            parts = command.split(":", 2)
+            if len(parts) < 3:
+                await self.notifier.send("⚠️ TSL: invalid command format.")
+                return
+            sym = parts[1].strip().upper()
+            try:
+                slv = float(parts[2].strip())
+            except ValueError:
+                await self.notifier.send(f"⚠️ TSL: invalid price {parts[2]!r}.")
+                return
+            logger.info(f"[STAGE 1] Admin override: TSL {sym} @ {slv}")
+            payload = {
+                "action": "TRAIL_SL",
+                "stock": sym,
+                "trading_symbol": sym,
+                "entry_range": [0, 0],
+                "buy_range_min": 0.0,
+                "buy_range_max": 0.0,
+                "stop_loss": slv,
+                "target": 0,
+                "is_trade": True,
+            }
+            msg = await asyncio.to_thread(self.trader.execute_trade, payload)
+            await self.notifier.send(f"TSL {sym} @ {slv}\n\n{msg}")
+        elif command.startswith("admin_target:"):
+            parts = command.split(":", 2)
+            if len(parts) < 3:
+                await self.notifier.send("⚠️ TARGET: invalid command format.")
+                return
+            sym = parts[1].strip().upper()
+            try:
+                tgt = float(parts[2].strip())
+            except ValueError:
+                await self.notifier.send(f"⚠️ TARGET: invalid price {parts[2]!r}.")
+                return
+            logger.info(f"[STAGE 1] Admin override: TARGET {sym} @ {tgt}")
+            payload = {
+                "action": "UPDATE_TGT",
+                "stock": sym,
+                "trading_symbol": sym,
+                "entry_range": [0, 0],
+                "buy_range_min": 0.0,
+                "buy_range_max": 0.0,
+                "stop_loss": 0,
+                "target": tgt,
+                "target_leg_index": 0,
+                "is_trade": True,
+            }
+            msg = await asyncio.to_thread(self.trader.execute_trade, payload)
+            await self.notifier.send(f"TARGET {sym} @ {tgt}\n\n{msg}")
         elif command == "rearm":
             msg = await asyncio.to_thread(self.trader.admin_rearm_protection_for_active_trades)
+            await self.notifier.send(msg)
+        elif command == "progress_all":
+            logger.info("[STAGE 1] Admin override command: PROGRESS (all active trades)")
+            msg = await asyncio.to_thread(self.trader.admin_sync_target_progression, None)
+            await self.notifier.send(msg)
+        elif command.startswith("progress_symbol:"):
+            sym = command.split(":", 1)[1].strip()
+            logger.info(f"[STAGE 1] Admin override command: PROGRESS {sym}")
+            msg = await asyncio.to_thread(self.trader.admin_sync_target_progression, sym)
+            await self.notifier.send(msg)
+        elif command == "volsl_widen":
+            logger.info("[STAGE 1] Admin override command: VOLSL WIDEN")
+            lines = await asyncio.to_thread(
+                lambda: self.trader.run_volatility_sl_schedule_tick(admin_widen=True)
+            )
+            msg = (
+                "\n".join(lines)
+                if lines
+                else "ℹ️ VOLSL WIDEN: no eligible active trades (need OCO ids, open broker qty, sl_true > 0)."
+            )
+            await self.notifier.send(msg)
+        elif command == "volsl_restore":
+            logger.info("[STAGE 1] Admin override command: VOLSL RESTORE")
+            lines = await asyncio.to_thread(
+                lambda: self.trader.run_volatility_sl_schedule_tick(admin_restore=True)
+            )
+            msg = (
+                "\n".join(lines)
+                if lines
+                else "ℹ️ VOLSL RESTORE: no eligible trades (need widened state: vol_sl_needs_restore, or use RESTORE SL <SYMBOL>)."
+            )
             await self.notifier.send(msg)
         elif command == "day_summary":
             # On-demand summary uses the same formatter as scheduled market close alert.
@@ -552,6 +652,10 @@ class BotListener:
                 "- EXIT <TRADING_SYMBOL> — close one active trade\n"
                 "- EXIT ALL — close all active trades\n"
                 "- REARM — re-arm missing OCO protection for active trades\n"
+                "- VOLSL WIDEN — run scheduled widen now (VOL_SL_WIDEN_PCT / sl_true; ignores today's widen idempotency)\n"
+                "- VOLSL RESTORE — run scheduled restore now (requires prior widen / vol_sl_needs_restore)\n"
+                "- PROGRESS — multi-target SL progression sync for all active trades\n"
+                "- PROGRESS <TRADING_SYMBOL> — progression sync for one active trade\n"
                 "- DAY SUMMARY — send current Market Closing Summary on demand\n"
                 "- CLEAR PENDING — clear pending entry queue\n"
                 "- SIZING — show current position sizing modes\n"
@@ -564,11 +668,12 @@ class BotListener:
                 "- DRYRUN ON — no live entry orders\n"
                 "- DRYRUN OFF — live entry orders enabled\n\n"
                 "Single-trade management (no reply context needed)\n"
+                "- PROGRESS <TRADING_SYMBOL>\n"
                 "- EXIT <TRADING_SYMBOL>\n"
-                "- TSL TO <PRICE> <TRADING_SYMBOL>\n"
-                "- CHANGE TARGET TO <PRICE> <TRADING_SYMBOL>\n"
+                "- TSL <PRICE> <TRADING_SYMBOL> (legacy: TSL TO <PRICE> <SYMBOL>)\n"
+                "- TARGET <PRICE> <TRADING_SYMBOL> (legacy: CHANGE TARGET TO <PRICE> <SYMBOL>)\n"
                 "- RESTORE SL <TRADING_SYMBOL>\n\n"
-                "Example: EXIT NIFTY26424300PE"
+                "Examples: EXIT NIFTY26424300PE | TSL 40 NIFTY26424300PE | TARGET 55 NIFTY26424300PE"
             )
         elif command == "dryrun_on":
             self.trader.execute_orders = False

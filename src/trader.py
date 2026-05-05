@@ -14,6 +14,7 @@ import pytz
 from .config import Config
 from .metrics import metrics
 from .db import db
+from .logger import logger as app_logger
 
 logger = logging.getLogger(__name__)
 
@@ -1099,9 +1100,9 @@ class Trader:
                             )
                             eff_tgt = self._take_profit_order_price(target_signal)
                         if eff_tgt > 0:
-                            self._modify_oco_target(sid, eff_tgt)
+                            self._modify_oco_target(sid, eff_tgt, symbol=symbol, payload_cache=payload_cache)
                     if not has_s and broker_sl > 0:
-                        self._modify_oco_sl(symbol, sid, broker_sl)
+                        self._modify_oco_sl(symbol, sid, broker_sl, payload_cache=payload_cache)
                     repaired += 1
                     if payload_cache is not None:
                         payload_cache.pop(sid, None)
@@ -1381,12 +1382,13 @@ class Trader:
         probe_sl = raw_sl if raw_sl > 0 else raw_true
         if probe_sl <= 0:
             return False
+        probe_cache: dict[str, dict] = {}
         for probe_id in probe_ids:
             if not probe_id or probe_id == self.DRY_RUN_PLACEHOLDER_ORDER_ID:
                 continue
             try:
                 # Probe with current level so there is no effective price change.
-                self._modify_oco_sl(symbol, probe_id, probe_sl)
+                self._modify_oco_sl(symbol, probe_id, probe_sl, payload_cache=probe_cache)
             except Exception as e:
                 if self._is_stale_oco_error(str(e)):
                     return False
@@ -1807,9 +1809,13 @@ class Trader:
 
     def maintain_active_trades(self, *, include_rearm: bool = True) -> dict:
         """
-        Unified active-trade maintenance:
-        1) Reconcile local active trades with broker open positions.
-        2) Optionally re-arm OCO for carry-forward open positions.
+        Position/book maintenance (split concerns):
+
+        1) Reconcile: align local active book with broker open positions — journal
+           closed rows and remove stale actives. Does **not** modify broker SL/targets;
+           use event-driven `sync_target_progression_for_symbol`, VOL_SL scheduler,
+           management commands, or `AUTO_REARM_PROTECTION` for that.
+        2) Optionally re-arm OCO when `include_rearm` and `AUTO_REARM_PROTECTION`.
         """
         stats = {"active": 0, "removed": 0, "rearmed": 0, "alerts": []}
         if self.client is None:
@@ -1831,19 +1837,11 @@ class Trader:
         stats["active"] = len(positions_map)
         active_symbols = set(positions_map.keys())
 
-        # Reconcile first: remove symbols not open on broker.
+        # Reconcile: remove locals that are not open on broker; keep opens unchanged here.
         updated = {}
         for symbol, rec in local.items():
             if symbol in active_symbols:
-                rec_norm = self._normalize_active_trade_record(rec)
-                try:
-                    prog_msg = self._sync_multi_target_progress_for_symbol(symbol, rec_norm, positions_map[symbol])
-                    if prog_msg:
-                        stats["alerts"].append(prog_msg)
-                        rec_norm = self._get_active_trade_record(symbol) or rec_norm
-                except Exception as e:
-                    logger.warning(f"[PROGRESS] Failed to sync SL progression for {symbol}: {e}")
-                updated[symbol] = rec_norm
+                updated[symbol] = self._normalize_active_trade_record(rec)
             else:
                 stats["removed"] += 1
                 try:
@@ -2134,6 +2132,56 @@ class Trader:
         if qty <= 0:
             return None
         return self._sync_multi_target_progress_for_symbol(resolved, rec, pos or {})
+
+    def admin_sync_target_progression(self, symbol_filter: str | None = None) -> str:
+        """
+        Admin sweep: run broker-validated multi-target SL progression for active trade(s).
+        symbol_filter: None = all actives; else one trading_symbol (resolved via active book).
+        """
+        if self.client is None:
+            return "⚠️ PROGRESS skipped: Groww client not initialized."
+
+        active = self._load_active_trades()
+        if not active:
+            return "ℹ️ PROGRESS: no active trades."
+
+        if symbol_filter:
+            sym = str(symbol_filter).upper().strip()
+            resolved = self.resolve_active_symbol(sym)
+            if not resolved:
+                return f"⚠️ PROGRESS: no active trade matched for {sym}."
+            symbols = [resolved]
+        else:
+            symbols = [str(s) for s in active.keys() if str(s)]
+
+        applied: list[str] = []
+        errors: list[str] = []
+        unchanged = 0
+        for sym in symbols:
+            try:
+                msg = self.sync_target_progression_for_symbol(sym)
+                if msg:
+                    applied.append(f"• {sym}\n  {msg}")
+                else:
+                    unchanged += 1
+            except Exception as e:
+                errors.append(f"• {sym}: {e}")
+                logger.warning(f"[PROGRESS] Admin sweep failed for {sym}: {e}")
+
+        lines = [
+            "🪜 Target progression (admin)",
+            f"Processed: {len(symbols)} | broker SL update / message: {len(applied)} | no change: {unchanged}",
+        ]
+        if applied:
+            lines.append("\n".join(applied))
+        if errors:
+            lines.append("Errors:\n" + "\n".join(errors))
+        if not applied and not errors:
+            lines.append(
+                "No progression applied. Typical reasons: fewer than 2 OCO legs, "
+                "no open broker qty, or SL stage already matches inferred fills."
+            )
+        return "\n".join(lines)
 
     def _atomic_json_write(self, path: str, data) -> None:
         """
@@ -2588,9 +2636,10 @@ class Trader:
 
         if self.client is not None:
             ids = self._active_leg_order_ids(next_rec)
+            prog_sl_cache: dict[str, dict] = {}
             for oid in ids:
                 try:
-                    broker_sl = self._modify_oco_sl(symbol, oid, broker_sl)
+                    broker_sl = self._modify_oco_sl(symbol, oid, broker_sl, payload_cache=prog_sl_cache)
                 except Exception as e:
                     if self._is_stale_oco_error(str(e)):
                         logger.info(f"[PROGRESS] {symbol}: stale OCO leg skipped during SL progression (id={oid}).")
@@ -2673,44 +2722,145 @@ class Trader:
         trades[symbol] = rec
         self._save_all_trades(trades)
 
-    def _modify_oco_sl(self, symbol: str, order_id: str, new_sl: float) -> float:
+    def _broker_sl_for_target_modify(self, symbol: str, payload: dict) -> float:
+        """Broker SL level to preserve when applying a target-only OCO modify."""
+        sl_px = float(self._oco_payload_stop_trigger_price(payload))
+        if sl_px > 0:
+            return sl_px
+        sym = str(symbol or "").strip()
+        if not sym:
+            return 0.0
+        nrec = self._normalize_active_trade_record(self._get_active_trade_record(sym) or {})
+        broker_sl = float(self._num_or(nrec.get("stop_loss"), 0.0))
+        if broker_sl > 0:
+            return broker_sl
+        st = float(self._num_or(nrec.get("sl_true"), 0.0))
+        if st <= 0:
+            return 0.0
+        if bool(nrec.get("vol_sl_needs_restore")):
+            widened = self._widened_sl_from_true(
+                sym, st, float(nrec.get("sl_widen_pct") or Config.VOL_SL_WIDEN_PCT)
+            )
+            if widened is not None and float(widened) > 0:
+                return float(widened)
+        return float(st)
+
+    def _modify_oco_sl(
+        self,
+        symbol: str,
+        order_id: str,
+        new_sl: float,
+        *,
+        payload_cache: dict[str, dict] | None = None,
+    ) -> float:
         if not self.client:
             raise RuntimeError("Groww client not initialized")
         sl = self._round_price_to_tick(new_sl, mode="nearest")
         if sl <= 0:
             raise RuntimeError(f"Invalid SL after tick-rounding: {new_sl}")
-        self._groww_call(
-            self.client.modify_smart_order,
-            smart_order_id=order_id,
-            smart_order_type=self.client.SMART_ORDER_TYPE_OCO,
-            segment=self.SMART_SEGMENT,
-            stop_loss={
+
+        payload: dict = {}
+        oid = str(order_id or "")
+        if oid and oid != self.DRY_RUN_PLACEHOLDER_ORDER_ID:
+            try:
+                payload = self._get_oco_order_payload_cached(oid, payload_cache)
+            except Exception as e:
+                logger.debug(f"[OCO] target preserve: get_smart_order failed for {oid}: {e}")
+
+        tgt_px = float(self._oco_payload_target_trigger_price(payload))
+        if tgt_px <= 0 and symbol:
+            rec_fb = self._get_active_trade_record(str(symbol).strip()) or {}
+            for leg in self._sorted_oco_legs(rec_fb):
+                if str(leg.get("smart_order_id") or "") != oid:
+                    continue
+                tb = float(self._num_or(leg.get("target_broker"), 0.0))
+                if tb > 0:
+                    tgt_px = tb
+                    break
+                ts = float(self._num_or(leg.get("target_signal"), 0.0))
+                if ts > 0:
+                    tgt_px = float(self._take_profit_order_price(ts))
+                    break
+
+        modify_kw: dict = {
+            "smart_order_id": order_id,
+            "smart_order_type": self.client.SMART_ORDER_TYPE_OCO,
+            "segment": self.SMART_SEGMENT,
+            "stop_loss": {
                 "trigger_price": float(sl),
                 "price": float(sl),
                 "order_type": "SL",
             },
-        )
+        }
+        if tgt_px > 0:
+            tgt_r = self._round_price_to_tick(tgt_px, mode="down")
+            if tgt_r > 0:
+                modify_kw["target"] = {
+                    "trigger_price": float(tgt_r),
+                    "price": None,
+                    "order_type": "MARKET",
+                }
+                logger.debug(
+                    f"[OCO] modify_smart_order {symbol} id={order_id}: SL={sl} + preserve target={tgt_r}"
+                )
+
+        try:
+            self._groww_call(self.client.modify_smart_order, **modify_kw)
+        finally:
+            if payload_cache is not None and oid:
+                payload_cache.pop(oid, None)
         return float(sl)
 
-    def _modify_oco_target(self, order_id: str, new_target: float) -> float:
+    def _modify_oco_target(
+        self,
+        order_id: str,
+        new_target: float,
+        *,
+        symbol: str | None = None,
+        payload_cache: dict[str, dict] | None = None,
+    ) -> float:
         if not self.client:
             raise RuntimeError("Groww client not initialized")
         tgt = self._round_price_to_tick(new_target, mode="down")
         if tgt <= 0:
             raise RuntimeError(f"Invalid target after tick-rounding: {new_target}")
-        self._groww_call(
-            self.client.modify_smart_order,
-            smart_order_id=order_id,
-            smart_order_type=self.client.SMART_ORDER_TYPE_OCO,
-            segment=self.SMART_SEGMENT,
-            target={
+
+        oid = str(order_id or "")
+        payload: dict = {}
+        if oid and oid != self.DRY_RUN_PLACEHOLDER_ORDER_ID:
+            try:
+                payload = self._get_oco_order_payload_cached(oid, payload_cache)
+            except Exception as e:
+                logger.debug(f"[OCO] SL preserve: get_smart_order failed for {oid}: {e}")
+
+        sl_px = float(self._broker_sl_for_target_modify(str(symbol or "").strip(), payload))
+        modify_kw: dict = {
+            "smart_order_id": order_id,
+            "smart_order_type": self.client.SMART_ORDER_TYPE_OCO,
+            "segment": self.SMART_SEGMENT,
+            "target": {
                 "trigger_price": float(tgt),
-                # Keep shape aligned with create_smart_order target payload to avoid
-                # broker-side schema rejections like "Order type is required".
                 "price": None,
                 "order_type": "MARKET",
             },
-        )
+        }
+        if sl_px > 0:
+            sl_r = self._round_price_to_tick(sl_px, mode="nearest")
+            if sl_r > 0:
+                modify_kw["stop_loss"] = {
+                    "trigger_price": float(sl_r),
+                    "price": float(sl_r),
+                    "order_type": "SL",
+                }
+                logger.debug(
+                    f"[OCO] modify_smart_order {symbol or '?'} id={order_id}: target={tgt} + preserve SL={sl_r}"
+                )
+
+        try:
+            self._groww_call(self.client.modify_smart_order, **modify_kw)
+        finally:
+            if payload_cache is not None and oid:
+                payload_cache.pop(oid, None)
         return float(tgt)
 
     @staticmethod
@@ -2776,8 +2926,9 @@ class Trader:
             f"ids={order_ids} → sl_true={sl_true}."
         )
         try:
+            restore_sl_cache: dict[str, dict] = {}
             for oid in order_ids:
-                sl_true = self._modify_oco_sl(symbol, oid, sl_true)
+                sl_true = self._modify_oco_sl(symbol, oid, sl_true, payload_cache=restore_sl_cache)
         except Exception as e:
             err = str(e or "")
             low = err.lower()
@@ -2830,30 +2981,48 @@ class Trader:
         )
         return f"🔁 RESTORE_SL SUCCESS: {symbol} broker SL restored to sl_true={sl_true} ({source}).{self._ltp_suffix_for_symbol(symbol)}"
 
-    def run_volatility_sl_schedule_tick(self) -> list[str]:
+    def run_volatility_sl_schedule_tick(
+        self,
+        *,
+        admin_widen: bool = False,
+        admin_restore: bool = False,
+    ) -> list[str]:
         """
         IST widen/restore tick driven by Config.VOL_SL_*.
+        Optional admin_widen / admin_restore force the corresponding branch immediately
+        (bypass clock and, for widen, today's widen idempotency flag).
         Returns human-readable lines suitable for admin notifications/logging.
         """
         lines: list[str] = []
-        if not Config.VOL_SL_SCHEDULE_ENABLED:
+        now = self._now_ist()
+        admin_any = bool(admin_widen or admin_restore)
+
+        if not admin_any and not Config.VOL_SL_SCHEDULE_ENABLED:
             return lines
 
-        now = self._now_ist()
-        if Config.VOL_SL_SKIP_WEEKENDS and now.weekday() >= 5:
+        if Config.VOL_SL_SKIP_WEEKENDS and now.weekday() >= 5 and not admin_any:
             return lines
 
         widen_t = self._parse_hhmm_ist(Config.VOL_SL_WIDEN_TIME_IST)
         restore_t = self._parse_hhmm_ist(Config.VOL_SL_RESTORE_TIME_IST)
-        if not widen_t or not restore_t:
-            lines.append("⚠️ VOL_SL schedule: invalid VOL_SL_WIDEN_TIME_IST / VOL_SL_RESTORE_TIME_IST (expected HH:MM IST).")
-            return lines
 
-        hm = now.strftime("%H:%M")
-        want_widen = hm == f"{widen_t[0]:02d}:{widen_t[1]:02d}"
-        want_restore = hm == f"{restore_t[0]:02d}:{restore_t[1]:02d}"
+        if admin_any:
+            want_widen = bool(admin_widen)
+            want_restore = bool(admin_restore)
+        else:
+            if not widen_t or not restore_t:
+                lines.append(
+                    "⚠️ VOL_SL schedule: invalid VOL_SL_WIDEN_TIME_IST / VOL_SL_RESTORE_TIME_IST (expected HH:MM IST)."
+                )
+                return lines
+            hm = now.strftime("%H:%M")
+            want_widen = hm == f"{widen_t[0]:02d}:{widen_t[1]:02d}"
+            want_restore = hm == f"{restore_t[0]:02d}:{restore_t[1]:02d}"
+
         if not want_widen and not want_restore:
             return lines
+
+        restore_source = "admin" if admin_restore else "schedule"
 
         today = now.date().isoformat()
         pct = float(Config.VOL_SL_WIDEN_PCT or 0.0)
@@ -2875,7 +3044,7 @@ class Trader:
                 continue
 
             if want_widen:
-                if str(rec.get("vol_sl_widen_done_for") or "") == today:
+                if not admin_widen and str(rec.get("vol_sl_widen_done_for") or "") == today:
                     continue
                 widened = self._widened_sl_from_true(symbol, sl_true, pct)
                 if widened is None:
@@ -2886,11 +3055,12 @@ class Trader:
                     return lines
                 try:
                     logger.info(
-                        f"[VOL_SL] Widen schedule: {symbol} sl_true={sl_true} pct={pct} → broker_sl={widened} "
-                        f"(smart_order_ids={order_ids})."
+                        f"[VOL_SL] Widen ({'admin' if admin_widen else 'schedule'}): {symbol} sl_true={sl_true} "
+                        f"pct={pct} → broker_sl={widened} (smart_order_ids={order_ids})."
                     )
+                    vol_sl_cache: dict[str, dict] = {}
                     for oid in order_ids:
-                        widened = self._modify_oco_sl(symbol, oid, widened)
+                        widened = self._modify_oco_sl(symbol, oid, widened, payload_cache=vol_sl_cache)
                     self._update_active_trade_levels(
                         symbol,
                         stop_loss=widened,
@@ -2916,8 +3086,11 @@ class Trader:
                                 rec_after = self._get_active_trade_record(symbol) or {}
                                 retry_ids = self._oco_ids_from_record(rec_after)
                                 retry_widened = widened
+                                vol_sl_retry_cache: dict[str, dict] = {}
                                 for rid in retry_ids:
-                                    retry_widened = self._modify_oco_sl(symbol, rid, retry_widened)
+                                    retry_widened = self._modify_oco_sl(
+                                        symbol, rid, retry_widened, payload_cache=vol_sl_retry_cache
+                                    )
                                 self._update_active_trade_levels(
                                     symbol,
                                     stop_loss=retry_widened,
@@ -2944,15 +3117,20 @@ class Trader:
                 rec = self._get_active_trade_record(symbol) or rec
 
             if want_restore:
-                if str(rec.get("vol_sl_restore_done_for") or "") == today:
+                if not admin_restore and str(rec.get("vol_sl_restore_done_for") or "") == today:
                     continue
                 if not bool(rec.get("vol_sl_needs_restore")):
+                    if admin_restore:
+                        lines.append(
+                            f"ℹ️ VOLSL RESTORE skipped {symbol}: not awaiting restore "
+                            f"(run VOLSL WIDEN first, or use RESTORE SL <SYMBOL>)."
+                        )
                     continue
                 if not self.client:
                     lines.append("⚠️ VOL_SL restore skipped: Groww client not initialized.")
                     return lines
                 try:
-                    msg = self.restore_channel_sl(symbol, source="schedule")
+                    msg = self.restore_channel_sl(symbol, source=restore_source)
                     lines.append(msg)
                 except Exception as e:
                     logger.error(f"[VOL_SL] Restore failed for {symbol}: {e}", exc_info=True)
@@ -2983,19 +3161,54 @@ class Trader:
     def _get_oco_order_payload(self, smart_order_id: str) -> dict:
         if not self.client or not smart_order_id:
             return {}
+        sid = str(smart_order_id)
         try:
             res = self.client.get_smart_order(
                 segment=self.client.SEGMENT_FNO,
                 smart_order_type=self.client.SMART_ORDER_TYPE_OCO,
-                smart_order_id=str(smart_order_id),
+                smart_order_id=sid,
             )
+            out: dict = {}
             if isinstance(res, dict):
                 payload = res.get("payload")
                 if isinstance(payload, dict):
-                    return payload
-                return res
+                    out = payload
+                else:
+                    out = res
+            else:
+                app_logger.info(
+                    "[OCO_PAYLOAD] get_smart_order id=%s unexpected_response_type=%s",
+                    sid,
+                    type(res).__name__,
+                )
+                return {}
+
+            has_t = self._oco_payload_has_target(out)
+            has_s = self._oco_payload_has_stop(out)
+            tgt_trig = self._oco_payload_target_trigger_price(out)
+            sl_trig = self._oco_payload_stop_trigger_price(out)
+            tgt_node = out.get("target")
+            sl_node = out.get("stop_loss") or out.get("stopLoss")
+            tgt_blk = "dict" if isinstance(tgt_node, dict) else (
+                type(tgt_node).__name__ if tgt_node is not None else "missing"
+            )
+            sl_blk = "dict" if isinstance(sl_node, dict) else (
+                type(sl_node).__name__ if sl_node is not None else "missing"
+            )
+            app_logger.info(
+                "[OCO_PAYLOAD] get_smart_order id=%s has_target=%s has_stop=%s "
+                "target_trigger=%s stop_trigger=%s target_block=%s stop_block=%s",
+                sid,
+                has_t,
+                has_s,
+                tgt_trig if tgt_trig > 0 else None,
+                sl_trig if sl_trig > 0 else None,
+                tgt_blk,
+                sl_blk,
+            )
+            return out
         except Exception as e:
-            logger.warning(f"OCO verify get_smart_order failed for id={smart_order_id}: {e}")
+            app_logger.warning(f"OCO verify get_smart_order failed for id={sid}: {e}")
         return {}
 
     def _get_oco_order_payload_cached(self, smart_order_id: str, payload_cache: dict[str, dict] | None) -> dict:
@@ -3167,6 +3380,46 @@ class Trader:
             return False
         trig = sl.get("triggerPrice", sl.get("trigger_price"))
         return trig not in (None, "", 0, "0", "0.0")
+
+    @staticmethod
+    def _oco_payload_target_trigger_price(payload: dict) -> float:
+        """Broker-reported target trigger for an OCO payload (0 when unknown)."""
+        if not isinstance(payload, dict):
+            return 0.0
+        tgt = payload.get("target")
+        if not isinstance(tgt, dict):
+            return 0.0
+        for key in ("trigger_price", "triggerPrice"):
+            v = tgt.get(key)
+            if v in (None, "", 0, "0", "0.0"):
+                continue
+            try:
+                f = float(v)
+                if f > 0:
+                    return f
+            except (TypeError, ValueError):
+                continue
+        return 0.0
+
+    @staticmethod
+    def _oco_payload_stop_trigger_price(payload: dict) -> float:
+        """Broker-reported stop trigger for an OCO payload (0 when unknown)."""
+        if not isinstance(payload, dict):
+            return 0.0
+        sl = payload.get("stop_loss") or payload.get("stopLoss")
+        if not isinstance(sl, dict):
+            return 0.0
+        for key in ("trigger_price", "triggerPrice", "price"):
+            v = sl.get(key)
+            if v in (None, "", 0, "0", "0.0"):
+                continue
+            try:
+                f = float(v)
+                if f > 0:
+                    return f
+            except (TypeError, ValueError):
+                continue
+        return 0.0
 
     @staticmethod
     def _parse_split_config(raw: str, expected_parts: int) -> list[int]:
@@ -3454,6 +3707,28 @@ class Trader:
         self._save_pending([])
         return removed
 
+    def _index_weekly_symbol_encoding_variants(self, symbol: str) -> list[str]:
+        """
+        Groww/NSE index weeklies use YY + M + DD + strike (month 1-9 unpadded).
+        Older builds emitted YY + MM + DD; add the compact token so resolution still hits.
+        """
+        p = self._parse_option_symbol_parts(symbol)
+        if not p or not isinstance(p.get("expiry"), datetime.date):
+            return []
+        u = str(p.get("underlying") or "").upper()
+        yy = str(p.get("yy") or "")
+        mm = int(p.get("month_num") or 0)
+        day = int(p.get("day") or 0)
+        strike = str(p.get("strike") or "")
+        ot = str(p.get("option_type") or "").upper()
+        if not u or len(yy) != 2 or mm < 1 or mm > 12 or day < 1 or day > 31 or not strike or ot not in ("CE", "PE"):
+            return []
+        dd = str(day).zfill(2)
+        compact = f"{u}{yy}{mm}{dd}{strike}{ot}"
+        padded_m = f"{u}{yy}{str(mm).zfill(2)}{dd}{strike}{ot}"
+        out = [compact, padded_m]
+        return [s for s in out if s and s.upper() != str(symbol).upper()]
+
     def _variant_list(self, symbol: str) -> list[str]:
         variants = [symbol]
         m = re.match(r"^(?P<underlying>[A-Z&_\-]+?)(?P<rest>\d.*)$", symbol)
@@ -3493,14 +3768,68 @@ class Trader:
                             m_variants.append(v.replace(mo, month_num))
                     variants.extend(m_variants)
                     break
+        variants.extend(self._index_weekly_symbol_encoding_variants(symbol))
         return list(dict.fromkeys(variants))
+
+    @staticmethod
+    def _parse_index_weekly_numeric(s: str) -> dict | None:
+        """
+        Index weekly after YY (NSE-style): Oct–Dec use a 2-digit month 10|11|12; Jan–Sep
+        use a single digit 1–9 then DD (2 digits) then strike. Padded months 01–09 use
+        a leading 0 on the tail (YY + 0M + DD + strike).
+        """
+        m = re.match(
+            r"^(?P<underlying>[A-Z&_\-]+)(?P<yy>\d{2})(?P<tail>\d+)(?P<option_type>CE|PE)$",
+            s,
+        )
+        if not m:
+            return None
+        yy_s = m.group("yy")
+        tail = m.group("tail")
+        if len(tail) < 3:
+            return None
+
+        mm: int
+        dd: int
+        strike: str
+        if tail.startswith(("10", "11", "12")):
+            if len(tail) < 4:
+                return None
+            mm = int(tail[:2])
+            dd = int(tail[2:4])
+            strike = tail[4:]
+        elif tail.startswith("0") and len(tail) >= 4:
+            mm = int(tail[0:2])
+            dd = int(tail[2:4])
+            strike = tail[4:]
+        else:
+            mm = int(tail[0])
+            dd = int(tail[1:3])
+            strike = tail[3:]
+
+        if mm < 1 or mm > 12 or dd < 1 or dd > 31 or not strike.isdigit():
+            return None
+        try:
+            exp = datetime.date(2000 + int(yy_s), mm, dd)
+        except ValueError:
+            return None
+        return {
+            "underlying": m.group("underlying"),
+            "yy": yy_s,
+            "month_num": mm,
+            "day": dd,
+            "month_abbr": "",
+            "strike": strike,
+            "option_type": m.group("option_type"),
+            "expiry": exp,
+        }
 
     @staticmethod
     def _parse_option_symbol_parts(symbol: str) -> dict | None:
         """
         Parse Groww option trading symbols into comparable components.
         Supports:
-          - Index weekly: NIFTY2642823800PE  (yy + m + dd + strike + opt)
+          - Index weekly: NIFTY2650524200CE (yy + m + dd + strike + opt, padded or compact month)
           - Stock monthly: WIPRO26APR200PE   (yy + MON + strike + opt)
         """
         s = str(symbol or "").upper().strip()
@@ -3509,54 +3838,29 @@ class Trader:
         m = re.match(
             r"^(?P<underlying>[A-Z&_\-]+)"
             r"(?P<yy>\d{2})"
-            r"(?P<month_num>\d{1,2})"
-            r"(?P<day>\d{2})"
-            r"(?P<strike>\d+)"
-            r"(?P<option_type>CE|PE)$",
-            s,
-        )
-        if m:
-            month_num = int(m.group("month_num"))
-            try:
-                expiry = datetime.date(2000 + int(m.group("yy")), month_num, int(m.group("day")))
-            except Exception:
-                expiry = None
-            return {
-                "underlying": m.group("underlying"),
-                "yy": m.group("yy"),
-                "month_num": month_num,
-                "day": int(m.group("day")),
-                "month_abbr": "",
-                "strike": m.group("strike"),
-                "option_type": m.group("option_type"),
-                "expiry": expiry,
-            }
-
-        m = re.match(
-            r"^(?P<underlying>[A-Z&_\-]+)"
-            r"(?P<yy>\d{2})"
             r"(?P<month_abbr>JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)"
             r"(?P<strike>\d+)"
             r"(?P<option_type>CE|PE)$",
             s,
         )
-        if not m:
-            return None
-        month_map = {
-            "JAN": 1, "FEB": 2, "MAR": 3, "APR": 4, "MAY": 5, "JUN": 6,
-            "JUL": 7, "AUG": 8, "SEP": 9, "OCT": 10, "NOV": 11, "DEC": 12,
-        }
-        month_num = month_map.get(m.group("month_abbr"), 0)
-        return {
-            "underlying": m.group("underlying"),
-            "yy": m.group("yy"),
-            "month_num": month_num,
-            "day": None,
-            "month_abbr": m.group("month_abbr"),
-            "strike": m.group("strike"),
-            "option_type": m.group("option_type"),
-            "expiry": None,
-        }
+        if m:
+            month_map = {
+                "JAN": 1, "FEB": 2, "MAR": 3, "APR": 4, "MAY": 5, "JUN": 6,
+                "JUL": 7, "AUG": 8, "SEP": 9, "OCT": 10, "NOV": 11, "DEC": 12,
+            }
+            month_num = month_map.get(m.group("month_abbr"), 0)
+            return {
+                "underlying": m.group("underlying"),
+                "yy": m.group("yy"),
+                "month_num": month_num,
+                "day": None,
+                "month_abbr": m.group("month_abbr"),
+                "strike": m.group("strike"),
+                "option_type": m.group("option_type"),
+                "expiry": None,
+            }
+
+        return Trader._parse_index_weekly_numeric(s)
 
     def _fallback_option_candidates(self, symbol: str) -> list[str]:
         """
@@ -3677,6 +3981,13 @@ class Trader:
                 # Index contracts can appear in two forms:
                 # - Weekly numeric: NIFTY2650523800PE (has explicit date)
                 # - Monthly alpha:   NIFTY26APR23800PE (month-only symbol)
+                #
+                # When the *requested* symbol is weekly (parsed calendar expiry), do not
+                # substitute month-only or another week's contract from CSV — wrong LTP
+                # and wrong fills (e.g. NIFTY26MAY24200CE vs NIFTY26050524200CE).
+                if isinstance(req_exp, datetime.date):
+                    if not isinstance(exp, datetime.date) or exp != req_exp:
+                        continue
                 if isinstance(exp, datetime.date):
                     if exp < today:
                         continue
@@ -3757,9 +4068,8 @@ class Trader:
                 return False
             if got_exp < today:
                 return False
-            # Prefer Stage-2-selected expiry, but allow nearest future active
-            # weekly from broker instruments when exact contract is unavailable.
-            return True
+            # Same calendar expiry only (no other week / no monthly via this path).
+            return got_exp == req_exp
 
         # Stock options are monthly; enforce current active month.
         year_now_2d = str(today.year)[-2:]
@@ -3810,7 +4120,10 @@ class Trader:
 
         variants = self._variant_list(symbol)
         active_candidates = self._active_contract_candidates(trade_data, symbol)
-        hit = try_symbols(active_candidates)
+        # Resolve the exact constructed symbol (Groww API) before CSV chain matches.
+        # Packaged instruments.csv can lag or omit a weekly while still listing monthlies;
+        # trying active_candidates first used to pin LTP/orders to the wrong contract.
+        hit = try_symbols(list(dict.fromkeys(variants)))
         if hit:
             reason = self._resolution_reason(symbol, hit[1])
             logger.info(
@@ -3819,8 +4132,13 @@ class Trader:
             )
             return hit
 
-        hit = try_symbols(variants)
+        hit = try_symbols(active_candidates)
         if hit:
+            reason = self._resolution_reason(symbol, hit[1])
+            logger.info(
+                f"[STAGE 4] Contract resolution: requested={symbol} resolved={hit[1]} "
+                f"exchange={hit[0]} segment={hit[2]} reason={reason}"
+            )
             return hit
 
         # Try broader, nearest-expiry candidates from local instruments fallback.
@@ -5481,8 +5799,9 @@ class Trader:
                         f"sl_true={new_sl} broker_sl={broker_sl}."
                     )
                     try:
+                        trail_sl_cache: dict[str, dict] = {}
                         for oid in order_ids:
-                            broker_sl = self._modify_oco_sl(symbol, oid, broker_sl)
+                            broker_sl = self._modify_oco_sl(symbol, oid, broker_sl, payload_cache=trail_sl_cache)
                     except Exception as e:
                         err = str(e)
                         if self._is_stale_oco_error(err):
@@ -5523,6 +5842,7 @@ class Trader:
                         f"target signal {raw_tgt} → broker {eff_tgt}."
                     )
                     rec_live = self._get_active_trade_record(symbol) or {}
+                    oco_tgt_modify_cache: dict[str, dict] = {}
                     legs = rec_live.get("oco_legs")
                     attempted = 0
                     success = 0
@@ -5549,7 +5869,12 @@ class Trader:
                                 leg_target_broker = eff_tgt
                             try:
                                 try:
-                                    self._modify_oco_target(oid, leg_target_broker)
+                                    self._modify_oco_target(
+                                        oid,
+                                        leg_target_broker,
+                                        symbol=symbol,
+                                        payload_cache=oco_tgt_modify_cache,
+                                    )
                                 except Exception as e1:
                                     em1 = str(e1)
                                     if self._is_transient_update_tgt_error(em1):
@@ -5557,7 +5882,12 @@ class Trader:
                                             f"[STAGE 4] UPDATE_TGT transient error for {symbol} id={oid}; retrying once: {em1}"
                                         )
                                         time.sleep(0.8)
-                                        self._modify_oco_target(oid, leg_target_broker)
+                                        self._modify_oco_target(
+                                            oid,
+                                            leg_target_broker,
+                                            symbol=symbol,
+                                            payload_cache=oco_tgt_modify_cache,
+                                        )
                                     else:
                                         raise
                                 leg["target_broker"] = float(leg_target_broker)
@@ -5587,7 +5917,9 @@ class Trader:
                             attempted += 1
                             try:
                                 try:
-                                    self._modify_oco_target(oid, eff_tgt)
+                                    self._modify_oco_target(
+                                        oid, eff_tgt, symbol=symbol, payload_cache=oco_tgt_modify_cache
+                                    )
                                 except Exception as e1:
                                     em1 = str(e1)
                                     if self._is_transient_update_tgt_error(em1):
@@ -5595,7 +5927,9 @@ class Trader:
                                             f"[STAGE 4] UPDATE_TGT transient error for {symbol} id={oid}; retrying once: {em1}"
                                         )
                                         time.sleep(0.8)
-                                        self._modify_oco_target(oid, eff_tgt)
+                                        self._modify_oco_target(
+                                            oid, eff_tgt, symbol=symbol, payload_cache=oco_tgt_modify_cache
+                                        )
                                     else:
                                         raise
                                 success += 1

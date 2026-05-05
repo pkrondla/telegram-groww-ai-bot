@@ -392,6 +392,12 @@ class Assistant:
                 if self._normalize_for_match(phrase) in n:
                     sl = self._extract_trail_sl_price(chunk)
                     return ("TRAIL_SL", sl)
+            # "TSL 40 …" / "TSL TO 40 …" (shorthand; avoids bare "TSL" substring false positives).
+            if re.search(r"(?<![\w/])TSL(?:\s+TO)?\s+\d", chunk, re.IGNORECASE):
+                if not re.search(r"\bTSL\s+(?:GONE|HIT)\b", chunk, re.IGNORECASE):
+                    sl = self._extract_trail_sl_price(chunk)
+                    if sl is not None:
+                        return ("TRAIL_SL", sl)
         return None
 
     @classmethod
@@ -408,6 +414,9 @@ class Assistant:
                 return True
         for phrase in cls._TRAIL_PHRASES:
             if cls._normalize_for_match(phrase) in n:
+                return True
+        if re.search(r"(?<![\w/])TSL(?:\s+TO)?\s+\d", tail, re.IGNORECASE):
+            if not re.search(r"\bTSL\s+(?:GONE|HIT)\b", tail, re.IGNORECASE):
                 return True
         for phrase in cls._RESTORE_SL_PHRASES:
             if cls._normalize_for_match(phrase) in n:
@@ -564,6 +573,17 @@ class Assistant:
                 return float(m.group(1))
             except ValueError:
                 return None
+        # "TARGET 7.45" / "CHANGE TARGET 8" / "CHANGE TARGET TO 9" (admin-style shorthand)
+        m3b = re.search(
+            r"\b(?:CHANGE\s+TARGET(?:\s+TO)?|TARGET)\s+(\d+(?:\.\d+)?)\b",
+            text,
+            re.IGNORECASE,
+        )
+        if m3b:
+            try:
+                return float(m3b.group(1))
+            except ValueError:
+                return None
         # "T1 TO 7.45" / "T2 TO 8"
         m2 = re.search(r"\bT[123]\s+TO\s+(\d+(?:\.\d+)?)\b", text, re.IGNORECASE)
         if m2:
@@ -654,6 +674,11 @@ class Assistant:
         otherwise returns None.
         Only fires when the normalised tail contains one of _UPDATE_TGT_PHRASES.
         """
+        raw = str(tail or "").strip()
+        if raw and re.match(r"(?:CHANGE\s+TARGET(?:\s+TO)?|TARGET)\s+\d", raw, re.IGNORECASE):
+            px = cls._extract_update_tgt_price(tail)
+            if px is not None:
+                return px
         n = cls._normalize_for_match(tail)
         if not n:
             return None
@@ -890,8 +915,8 @@ class Assistant:
     @classmethod
     def _safe_month_num(cls, raw_month) -> str:
         abbr = cls._safe_month_abbr(raw_month)
-        # Index option symbols encode month as 2 digits (01-12). Ensure zero-padding
-        # so MAY -> "05" (not "5"), otherwise symbol resolution can drift.
+        # Calendar month number 01-12 (used for date math). Index *weekly* Groww symbols
+        # use a single-digit month 1-9 / two-digit 10-11/11-12 in the token (see _apply_symbol_factory).
         mm = cls._MONTH_NUM.get(abbr, str(cls._now_ist().month))
         mm = re.sub(r"[^\d]", "", str(mm or ""))
         if not mm:
@@ -1012,8 +1037,11 @@ class Assistant:
         groww_symbol = f"{underlying}{yy}{expiry_month}{strike}{option_type}"
 
         if is_index:
+            # NSE/Groww index weekly: YY + M (no leading zero) + DD + strike + CE|PE
+            # e.g. 5 May 2026 -> NIFTY2650524200CE — NOT NIFTY26050524200CE (YY+MM+DD).
             month_num = self._safe_month_num(raw_month)
-            groww_symbol = f"{underlying}{yy}{month_num}{expiry_day}{strike}{option_type}"
+            month_token = str(int(month_num))
+            groww_symbol = f"{underlying}{yy}{month_token}{expiry_day}{strike}{option_type}"
 
         # Keep normalized expiry fields in sync with the symbol factory output.
         data["expiry_day"] = expiry_day
@@ -1120,7 +1148,7 @@ Return JSON only with these keys:
 
 Rules:
 - official_symbol must be the bare underlying root. Never include strike or CE/PE in it.
-- Use parent_message to resolve the instrument when child_message only contains an update (e.g. "TSL TO 65").
+- Use parent_message to resolve the instrument when child_message only contains an update (e.g. "TSL 65" or "TSL TO 65").
 - TSL / TSL TO / NEW TSL / TRAIL SL / MOVE SL all indicate a trailing stop update.
 - Never set action to BUY.
 - Stock options with no explicit expiry: use current month expiry (expiry_month = current month, expiry_day = "01").
@@ -1674,7 +1702,7 @@ entry_range:
   - Use [0, 0] for EXIT_ALL, TRAIL_SL, and RESTORE_SL.
 
 stop_loss:
-  - Number. For TRAIL_SL use the NEW stop value from child_message (e.g. "TSL TO 40" → 40.0).
+  - Number. For TRAIL_SL use the NEW stop value from child_message (e.g. "TSL 40" / "TSL TO 40" → 40.0).
   - For RESTORE_SL use 0 (the bot restores using persisted sl_true in active_trades.json).
   - "SL 22" → 22.0. Use 0 if not stated.
 
@@ -1686,7 +1714,7 @@ action:
   - "SELL"         — fresh short entry signal.
   - "EXIT_ALL"     — close position. Triggered by: CLOSE THE TRADE, TSL GONE, TSL HIT, SL HIT,
                       STOPLOSS HIT, BOOK PROFIT, SQUARE OFF, EXIT TRADE, FULL EXIT, STOPPED OUT.
-  - "TRAIL_SL"     — update stop loss. Triggered by: TSL TO, NEW TSL, TRAIL SL, MOVE SL, SHIFT SL,
+  - "TRAIL_SL"     — update stop loss. Triggered by: TSL, TSL TO, NEW TSL, TRAIL SL, MOVE SL, SHIFT SL,
                       SL TO, TRAILING SL. Extract new SL value from child_message.
   - "RESTORE_SL"   — restore broker OCO SL to the channel/admin true SL (persisted as sl_true).
                       Triggered by replies like: RESTORE SL, RESET SL, REVERT SL, TRUE SL, CHANNEL SL.
@@ -1697,7 +1725,7 @@ action:
                       CRITICAL: do NOT classify these as TRAIL_SL. The price is an entry ceiling,
                       not a stop loss. Set entry_range = [original_min, X], stop_loss = original SL.
   - "UPDATE_TGT"  — change the profit target for an existing trade. Triggered by replies like:
-                      CHANGE T1 TO X, CHANGE TARGET X, UPDATE TGT TO X, NEW TARGET X, T1 TO X,
+                      CHANGE T1 TO X, TARGET X, CHANGE TARGET X, UPDATE TGT TO X, NEW TARGET X, T1 TO X,
                       REVISE TARGET X. Extract the new target price into the target field.
                       Set entry_range = [0, 0], stop_loss = 0.
                       CRITICAL: do NOT classify these as is_trade=false or commentary.

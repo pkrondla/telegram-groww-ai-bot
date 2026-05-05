@@ -1,3 +1,4 @@
+import argparse
 import json
 import os
 import sys
@@ -6,17 +7,20 @@ PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
+from src.db import Database
 from src.trader import Trader
 
+DEFAULT_DB_PATH = os.path.join(PROJECT_ROOT, "trading_bot.db")
 
-def load_active_trades(path: str) -> dict:
-    if not os.path.exists(path):
-        raise FileNotFoundError(f"active trades file not found: {path}")
-    with open(path, "r", encoding="utf-8") as f:
-        data = json.load(f)
-    if not isinstance(data, dict):
-        raise ValueError("active_trades.json must contain a JSON object at root")
-    return data
+
+def load_active_trades(db_path: str) -> dict:
+    if not os.path.exists(db_path):
+        raise FileNotFoundError(f"SQLite database not found: {db_path}")
+    store = Database(db_path)
+    active = store.get_active_trades()
+    if not isinstance(active, dict):
+        raise ValueError("active_trades table must deserialize to a dict")
+    return active
 
 
 def extract_order_id(record: dict) -> str:
@@ -37,9 +41,20 @@ def extract_order_id(record: dict) -> str:
 
 
 def main() -> int:
-    active_path = "active_trades.json"
+    ap = argparse.ArgumentParser(
+        description="Dump raw Groww get_smart_order(OCO) responses for each active trade "
+        "(symbols + smart_order_ids from trading_bot.db)."
+    )
+    ap.add_argument(
+        "--db",
+        default=DEFAULT_DB_PATH,
+        help=f"Path to SQLite DB (default: {DEFAULT_DB_PATH})",
+    )
+    args = ap.parse_args()
+    db_path = os.path.abspath(args.db)
+
     try:
-        active = load_active_trades(active_path)
+        active = load_active_trades(db_path)
     except Exception as e:
         print(f"ERROR: {e}")
         return 1
@@ -50,7 +65,7 @@ def main() -> int:
         return 2
 
     print("Ready to Groww!")
-    print(f"Loaded {len(active)} active trade(s) from {active_path}")
+    print(f"Loaded {len(active)} active trade(s) from {db_path}")
 
     for symbol, rec in active.items():
         oid = extract_order_id(rec)

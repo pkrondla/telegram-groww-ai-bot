@@ -267,7 +267,7 @@ class BotListener:
                 active_trades = await asyncio.to_thread(self.trader._load_active_trades)
                 if not active_trades:
                     continue
-                logger.info(f"[REARM] Polling broker for {len(active_trades)} active trade(s)...")
+                logger.debug(f"[REARM] Polling broker for {len(active_trades)} active trade(s)...")
                 stats = await asyncio.to_thread(self.trader.run_auto_rearm_protection_tick)
                 if stats.get("rearmed"):
                     logger.info(

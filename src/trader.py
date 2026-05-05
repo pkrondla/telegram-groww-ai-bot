@@ -1405,8 +1405,9 @@ class Trader:
     def _has_modifiable_oco(self, symbol: str, rec: dict) -> bool:
         """
         Best-effort broker OCO liveness check for maintenance runs.
-        Uses a no-op SL modify on one active OCO id; stale-id errors mean
-        broker-side protection is missing/stale.
+        `_modify_oco_sl` fails fast when get_smart_order shows expired/cancelled OCO;
+        remaining cases use a same-level SL modify probe; stale broker errors mean
+        protection is missing or not modifiable.
         """
         if self.client is None:
             return False
@@ -1723,7 +1724,15 @@ class Trader:
             return None
         mode = "forced" if forced else "normal"
         retry = " +retry" if retried else ""
-        status = "✅" if success else "❌"
+        detail_up = str(detail or "").upper()
+        integrity_ok = "INTEGRITY=OK" in detail_up and "INTEGRITY_FAILED" not in detail_up
+        if success:
+            status = "✅"
+        elif integrity_ok:
+            # Re-arm action may fail/skip while protection remains intact.
+            status = "⚠️"
+        else:
+            status = "❌"
         msg = f"{status} REARM[{source}] {symbol}: {mode}{retry}"
         if detail:
             msg += f" ({detail})"
@@ -2821,6 +2830,23 @@ class Trader:
                 return float(widened)
         return float(st)
 
+    def _require_live_oco_payload_for_modify(self, order_id: str, payload: dict) -> None:
+        """
+        Block modify_smart_order when the fetched smart-order payload shows expired
+        session / terminal status. Empty payload skips (transient API failure — caller
+        may still attempt modify). Message includes \"cannot be modified\" for
+        _is_stale_oco_error routing on management paths.
+        """
+        oid = str(order_id or "").strip()
+        if not oid or oid == self.DRY_RUN_PLACEHOLDER_ORDER_ID:
+            return
+        if not payload:
+            return
+        live_ok, live_rs = self._smart_order_payload_is_live_protection(payload)
+        if live_ok:
+            return
+        raise RuntimeError(f"OCO id={oid} not live ({live_rs}); cannot be modified.")
+
     def _modify_oco_sl(
         self,
         symbol: str,
@@ -2829,6 +2855,10 @@ class Trader:
         *,
         payload_cache: dict[str, dict] | None = None,
     ) -> float:
+        """
+        Modify OCO stop-loss on broker. Raises if smart order is expired/cancelled
+        (same stale handling as broker \"cannot be modified\" errors).
+        """
         if not self.client:
             raise RuntimeError("Groww client not initialized")
         sl = self._round_price_to_tick(new_sl, mode="nearest")
@@ -2842,6 +2872,8 @@ class Trader:
                 payload = self._get_oco_order_payload_cached(oid, payload_cache)
             except Exception as e:
                 logger.debug(f"[OCO] target preserve: get_smart_order failed for {oid}: {e}")
+
+        self._require_live_oco_payload_for_modify(oid, payload)
 
         tgt_px = float(self._oco_payload_target_trigger_price(payload))
         if tgt_px <= 0 and symbol:
@@ -2895,6 +2927,9 @@ class Trader:
         symbol: str | None = None,
         payload_cache: dict[str, dict] | None = None,
     ) -> float:
+        """
+        Modify OCO target on broker. Raises if smart order is expired/cancelled.
+        """
         if not self.client:
             raise RuntimeError("Groww client not initialized")
         tgt = self._round_price_to_tick(new_target, mode="down")
@@ -2908,6 +2943,8 @@ class Trader:
                 payload = self._get_oco_order_payload_cached(oid, payload_cache)
             except Exception as e:
                 logger.debug(f"[OCO] SL preserve: get_smart_order failed for {oid}: {e}")
+
+        self._require_live_oco_payload_for_modify(oid, payload)
 
         sl_px = float(self._broker_sl_for_target_modify(str(symbol or "").strip(), payload))
         modify_kw: dict = {
@@ -3001,50 +3038,81 @@ class Trader:
             f"[STAGE 4] RESTORE_SL ({source}): modify_smart_order {symbol} "
             f"ids={order_ids} → sl_true={sl_true}."
         )
-        try:
-            restore_sl_cache: dict[str, dict] = {}
-            for oid in order_ids:
-                sl_true = self._modify_oco_sl(symbol, oid, sl_true, payload_cache=restore_sl_cache)
-        except Exception as e:
-            err = str(e or "")
-            low = err.lower()
-            # Broker-side OCO can be cancelled/expired overnight while position remains open.
-            # In that case, create a fresh OCO for the live position instead of failing restore.
-            if (
-                "cannot be modified" in low
-                or "does not exist" in low
-                or "not exist" in low
-                or "not found" in low
-            ):
-                pos, qty = self._get_open_position_for_symbol(symbol)
-                if qty == 0:
-                    return (
-                        f"⚠️ RESTORE_SL failed for {symbol}: broker order is stale and no open position exists. "
-                        f"Error: {err}{self._ltp_suffix_for_symbol(symbol)}"
+        restore_sl_cache: dict[str, dict] = {}
+        attempted = 0
+        success = 0
+        skipped_stale = 0
+        failed: list[str] = []
+        last_sl_true = float(sl_true)
+        for oid in order_ids:
+            attempted += 1
+            try:
+                last_sl_true = self._modify_oco_sl(symbol, oid, last_sl_true, payload_cache=restore_sl_cache)
+                success += 1
+            except Exception as e:
+                err = str(e or "")
+                if self._is_stale_oco_error(err):
+                    skipped_stale += 1
+                    logger.warning(
+                        f"[STAGE 4] RESTORE_SL skipped stale OCO leg for {symbol} id={oid}: {err}"
                     )
-                rec_rearm = dict(rec)
-                rec_rearm["stop_loss"] = float(sl_true)
-                # Force immediate re-arm regardless of today's armed date.
-                rec_rearm["protection_armed_date"] = ""
-                ok, alert = self._rearm_oco_for_open_position(symbol, rec_rearm, pos or {})
-                if ok:
-                    today = self._today_ist_iso()
-                    self._update_active_trade_levels(
-                        symbol,
-                        stop_loss=sl_true,
-                        sl_true=sl_true,
-                        sl_mode="NORMAL",
-                        sl_widened=0.0,
-                        vol_sl_needs_restore=False,
-                        vol_sl_restore_done_for=today,
-                    )
-                    return (
-                        f"🔁 RESTORE_SL RE-ARMED: {symbol} had no modifiable OCO; "
-                        f"created fresh protection at sl_true={sl_true} ({source}).{self._ltp_suffix_for_symbol(symbol)}"
-                    )
-                if alert:
-                    return f"⚠️ RESTORE_SL re-arm attempt for {symbol}: {alert}{self._ltp_suffix_for_symbol(symbol)}"
-            raise
+                    continue
+                failed.append(f"{oid}: {err}")
+                logger.warning(
+                    f"[STAGE 4] RESTORE_SL leg modify failed for {symbol} id={oid}: {err}"
+                )
+
+        # Broker-side OCO can be cancelled/expired while position remains open.
+        # If every attempted leg is stale/unmodifiable, create fresh OCO protection.
+        if attempted > 0 and success == 0 and skipped_stale > 0 and not failed:
+            pos, qty = self._get_open_position_for_symbol(symbol)
+            if qty == 0:
+                return (
+                    f"⚠️ RESTORE_SL failed for {symbol}: broker order is stale and no open position exists."
+                    f"{self._ltp_suffix_for_symbol(symbol)}"
+                )
+            rec_rearm = dict(rec)
+            rec_rearm["stop_loss"] = float(last_sl_true)
+            # Force immediate re-arm regardless of today's armed date.
+            rec_rearm["protection_armed_date"] = ""
+            ok, alert = self._rearm_oco_for_open_position(symbol, rec_rearm, pos or {})
+            if ok:
+                today = self._today_ist_iso()
+                self._update_active_trade_levels(
+                    symbol,
+                    stop_loss=last_sl_true,
+                    sl_true=last_sl_true,
+                    sl_mode="NORMAL",
+                    sl_widened=0.0,
+                    vol_sl_needs_restore=False,
+                    vol_sl_restore_done_for=today,
+                )
+                return (
+                    f"🔁 RESTORE_SL RE-ARMED: {symbol} had no modifiable OCO; "
+                    f"created fresh protection at sl_true={last_sl_true} ({source}).{self._ltp_suffix_for_symbol(symbol)}"
+                )
+            if alert:
+                return f"⚠️ RESTORE_SL re-arm attempt for {symbol}: {alert}{self._ltp_suffix_for_symbol(symbol)}"
+            return (
+                f"⚠️ RESTORE_SL failed for {symbol}: stale OCO and re-arm did not complete."
+                f"{self._ltp_suffix_for_symbol(symbol)}"
+            )
+
+        if attempted > 0 and success == 0 and failed:
+            return (
+                f"⚠️ RESTORE_SL partial: broker SL restore failed for {symbol} "
+                f"(attempted={attempted}, stale={skipped_stale}, failed={len(failed)}). "
+                f"Last error: {failed[-1]}{self._ltp_suffix_for_symbol(symbol)}"
+            )
+
+        if attempted > 0 and success == 0:
+            return (
+                f"⚠️ RESTORE_SL skipped for {symbol}: no modifiable OCO legs found "
+                f"(attempted={attempted}, stale={skipped_stale}, failed={len(failed)})."
+                f"{self._ltp_suffix_for_symbol(symbol)}"
+            )
+
+        sl_true = float(last_sl_true)
         today = self._today_ist_iso()
         self._update_active_trade_levels(
             symbol,
@@ -3055,7 +3123,11 @@ class Trader:
             vol_sl_needs_restore=False,
             vol_sl_restore_done_for=today,
         )
-        return f"🔁 RESTORE_SL SUCCESS: {symbol} broker SL restored to sl_true={sl_true} ({source}).{self._ltp_suffix_for_symbol(symbol)}"
+        return (
+            f"🔁 RESTORE_SL SUCCESS: {symbol} broker SL restored to sl_true={sl_true} "
+            f"({source}; updated={success}/{attempted}, stale={skipped_stale}, failed={len(failed)})."
+            f"{self._ltp_suffix_for_symbol(symbol)}"
+        )
 
     def run_volatility_sl_schedule_tick(
         self,
@@ -3266,7 +3338,7 @@ class Trader:
                 else:
                     out = res
             else:
-                app_logger.info(
+                app_logger.debug(
                     "[OCO_PAYLOAD] get_smart_order id=%s unexpected_response_type=%s",
                     sid,
                     type(res).__name__,
@@ -3286,7 +3358,7 @@ class Trader:
             sl_blk = "dict" if isinstance(sl_node, dict) else (
                 type(sl_node).__name__ if sl_node is not None else "missing"
             )
-            app_logger.info(
+            app_logger.debug(
                 "[OCO_PAYLOAD] get_smart_order id=%s status=%s expire_at=%s protection_live=%s "
                 "live_reason=%s has_target=%s has_stop=%s target_trigger=%s stop_trigger=%s "
                 "target_block=%s stop_block=%s",
@@ -5894,22 +5966,57 @@ class Trader:
                         f"[STAGE 4] Calling Groww modify_smart_order for {symbol}: "
                         f"sl_true={new_sl} broker_sl={broker_sl}."
                     )
-                    try:
-                        trail_sl_cache: dict[str, dict] = {}
-                        for oid in order_ids:
-                            broker_sl = self._modify_oco_sl(symbol, oid, broker_sl, payload_cache=trail_sl_cache)
-                    except Exception as e:
-                        err = str(e)
-                        if self._is_stale_oco_error(err):
-                            recovered = self._retry_management_after_stale_oco(
-                                symbol,
-                                trade_data,
-                                rec0,
-                                reason=err,
+                    trail_sl_cache: dict[str, dict] = {}
+                    attempted = 0
+                    success = 0
+                    skipped_stale = 0
+                    failed: list[str] = []
+                    last_broker_sl = float(broker_sl)
+                    for oid in order_ids:
+                        attempted += 1
+                        try:
+                            last_broker_sl = self._modify_oco_sl(
+                                symbol, oid, last_broker_sl, payload_cache=trail_sl_cache
                             )
-                            if recovered:
-                                return recovered
-                        raise
+                            success += 1
+                        except Exception as e:
+                            err = str(e)
+                            if self._is_stale_oco_error(err):
+                                skipped_stale += 1
+                                logger.warning(
+                                    f"[STAGE 4] TRAIL_SL skipped stale OCO leg for {symbol} id={oid}: {err}"
+                                )
+                                continue
+                            failed.append(f"{oid}: {err}")
+                            logger.warning(
+                                f"[STAGE 4] TRAIL_SL leg modify failed for {symbol} id={oid}: {err}"
+                            )
+
+                    if attempted > 0 and success == 0 and skipped_stale > 0 and not failed:
+                        recovered = self._retry_management_after_stale_oco(
+                            symbol,
+                            trade_data,
+                            rec0,
+                            reason="stale OCO detected during TRAIL_SL",
+                        )
+                        if recovered:
+                            return recovered
+
+                    if attempted > 0 and success == 0 and failed:
+                        return (
+                            f"⚠️ TRAIL_SL partial: broker SL update failed for {symbol} "
+                            f"(attempted={attempted}, stale={skipped_stale}, failed={len(failed)}). "
+                            f"Last error: {failed[-1]}{self._ltp_suffix_for_symbol(symbol)}"
+                        )
+
+                    if attempted > 0 and success == 0:
+                        return (
+                            f"⚠️ TRAIL_SL skipped for {symbol}: no modifiable OCO legs found "
+                            f"(attempted={attempted}, stale={skipped_stale}, failed={len(failed)})."
+                            f"{self._ltp_suffix_for_symbol(symbol)}"
+                        )
+
+                    broker_sl = float(last_broker_sl)
                     self._update_active_trade_levels(
                         symbol,
                         stop_loss=broker_sl,
@@ -5918,8 +6025,15 @@ class Trader:
                         sl_mode=("WIDENED" if bool(rec0.get("vol_sl_needs_restore")) else "NORMAL"),
                         sl_widen_pct=float(rec0.get("sl_widen_pct") or Config.VOL_SL_WIDEN_PCT),
                     )
-                    logger.info(f"[STAGE 4] TRAIL SUCCESS: {symbol} sl_true={new_sl} broker_sl={broker_sl}.")
-                    return f"📈 TRAIL SUCCESS: Updated {symbol} SL — sl_true={new_sl}, broker_sl={broker_sl}.{self._ltp_suffix_for_symbol(symbol)}"
+                    logger.info(
+                        f"[STAGE 4] TRAIL SUCCESS: {symbol} sl_true={new_sl} broker_sl={broker_sl} "
+                        f"(attempted={attempted}, success={success}, stale={skipped_stale}, failed={len(failed)})."
+                    )
+                    return (
+                        f"📈 TRAIL SUCCESS: Updated {symbol} SL — sl_true={new_sl}, broker_sl={broker_sl} "
+                        f"(updated={success}/{attempted}, stale={skipped_stale}, failed={len(failed)})."
+                        f"{self._ltp_suffix_for_symbol(symbol)}"
+                    )
 
                 elif action == "RESTORE_SL":
                     return self.restore_channel_sl(symbol, source="signal")

@@ -74,3 +74,12 @@ class TestSplitContextAndTail:
         ctx, tail = Assistant._split_context_and_tail(text)
         assert ctx == ""
         assert tail == "child only"
+
+
+class TestUpdateTargetDetection:
+    def test_detect_update_tgt_accepts_plain_target_price(self):
+        assert Assistant._detect_update_tgt("TARGET 52") == 52.0
+
+    def test_detect_update_tgt_ignores_target_hit_progression(self):
+        msg = "TARGET 1 HITS | TSL TO 21.5 | HOLD FOR 52"
+        assert Assistant._detect_update_tgt(msg) is None

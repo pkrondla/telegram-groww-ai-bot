@@ -675,7 +675,20 @@ class Assistant:
         Only fires when the normalised tail contains one of _UPDATE_TGT_PHRASES.
         """
         raw = str(tail or "").strip()
-        if raw and re.match(r"(?:CHANGE\s+TARGET(?:\s+TO)?|TARGET)\s+\d", raw, re.IGNORECASE):
+        if not raw:
+            return None
+
+        # Guard: "TARGET 1 HIT" / "TARGET 2 HITS" are progression updates, not
+        # admin target-price edits. Without this check we can misread "TARGET 1"
+        # as price 1.0 and send a bad UPDATE_TGT.
+        if cls._has_target_hit_phrase(raw):
+            return None
+
+        # Allow shorthand "TARGET 52" only when the reply is not a mixed
+        # progression/trailing message (e.g. "TARGET 1 HITS ... HOLD FOR 52").
+        if re.match(r"^\s*TARGET\s+\d", raw, re.IGNORECASE):
+            if re.search(r"\b(?:HOLD|TSL|TRAIL(?:ING)?\s*SL|SL\s+TO)\b", raw, re.IGNORECASE):
+                return None
             px = cls._extract_update_tgt_price(tail)
             if px is not None:
                 return px

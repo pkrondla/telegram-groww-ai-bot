@@ -340,10 +340,12 @@ class StateEngine:
             logger.info(f"[STAGE 3] Trail SL price: {signal.stop_loss}")
             logger.info(f"[STAGE 3] Forwarding TRAIL_SL {resolved} to executor.")
             trail_msg = self._trader.execute_trade(legacy)
+            trail_text = str(trail_msg or "")
+            trail_ok = trail_text.startswith("📈 TRAIL SUCCESS") or trail_text.startswith("🧪 [DRY RUN] TRAIL_SL")
 
             # Same reply can carry a runner target hint ("HOLD FOR X").
-            # Apply target update after successful trail.
-            if signal.target and signal.target > 0:
+            # Apply target update only when trail SL succeeded.
+            if signal.target and signal.target > 0 and trail_ok:
                 update_payload = dict(legacy)
                 update_payload["action"] = "UPDATE_TGT"
                 update_payload["target"] = signal.target
@@ -355,6 +357,11 @@ class StateEngine:
                 if trail_msg and tgt_msg:
                     return f"{trail_msg}\n{tgt_msg}"
                 return tgt_msg or trail_msg
+            if signal.target and signal.target > 0 and not trail_ok:
+                logger.info(
+                    f"[STAGE 3] TRAIL_SL companion target skipped for {resolved}: "
+                    f"trail did not succeed. trail_msg={trail_text!r}"
+                )
             return trail_msg
 
         logger.info(f"[STAGE 3] Forwarding {signal.action} {resolved} to executor.")

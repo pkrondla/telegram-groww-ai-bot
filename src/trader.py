@@ -242,6 +242,55 @@ class Trader:
         return cls._now_ist().isoformat(timespec="seconds")
 
     @staticmethod
+    def _parse_iso_timestamp_to_ist(raw) -> datetime.datetime | None:
+        """Parse broker ISO timestamps (naive → IST; aware → converted to IST)."""
+        if raw is None:
+            return None
+        s = str(raw).strip()
+        if not s:
+            return None
+        ist = pytz.timezone("Asia/Kolkata")
+        try:
+            if s.endswith("Z"):
+                s = s[:-1] + "+00:00"
+            dt = datetime.datetime.fromisoformat(s)
+            if dt.tzinfo is None:
+                return ist.localize(dt)
+            return dt.astimezone(ist)
+        except (ValueError, TypeError, OSError):
+            return None
+
+    def _smart_order_payload_is_live_protection(self, payload: dict) -> tuple[bool, str]:
+        """
+        True if the OCO smart order can still protect a position: not a terminal
+        status and not past expire_at (exchange day / session end from API).
+        """
+        if not isinstance(payload, dict) or not payload:
+            return False, "empty_payload"
+        st = str(payload.get("status") or "").upper().strip()
+        terminal = {
+            "CANCELLED",
+            "CANCELED",
+            "COMPLETED",
+            "COMPLETE",
+            "FILLED",
+            "REJECTED",
+            "FAILED",
+            "EXPIRED",
+            "REJECT",
+        }
+        if st in terminal:
+            return False, f"status={st}"
+        for key in ("expire_at", "expireAt"):
+            raw = payload.get(key)
+            if not raw:
+                continue
+            exp = self._parse_iso_timestamp_to_ist(raw)
+            if exp is not None and self._now_ist() > exp:
+                return False, f"past_{key}"
+        return True, ""
+
+    @staticmethod
     def _parse_hhmm_ist(s: str) -> tuple[int, int] | None:
         raw = str(s or "").strip()
         m = re.match(r"^(\d{1,2}):(\d{2})$", raw)
@@ -1427,11 +1476,17 @@ class Trader:
             payload = self._get_oco_order_payload_cached(sid, payload_cache)
             has_t = self._oco_payload_has_target(payload)
             has_s = self._oco_payload_has_stop(payload)
+            live_ok, live_rs = self._smart_order_payload_is_live_protection(payload)
             if not has_t:
                 logger.warning(f"[REARM] Missing target leg on broker for {symbol} id={sid}.")
                 return False
             if not has_s:
                 logger.warning(f"[REARM] Missing stop leg on broker for {symbol} id={sid}.")
+                return False
+            if not live_ok:
+                logger.warning(
+                    f"[REARM] OCO not live for {symbol} id={sid} ({live_rs}); needs re-arm."
+                )
                 return False
         return True
 
@@ -1497,10 +1552,16 @@ class Trader:
             # Some broker payloads expose leg IDs but not top-level target/stop keys.
             has_t = bool(self._oco_payload_has_target(payload) or tgt_id)
             has_s = bool(self._oco_payload_has_stop(payload) or sl_id)
+            live_ok, _ = self._smart_order_payload_is_live_protection(payload)
             prev = prev_by_id.get(sid) or {}
-            leg_status = (
-                "ACTIVE" if (has_t and has_s) else ("TARGET_ONLY" if has_t else "SL_ONLY" if has_s else "BROKEN")
-            )
+            if has_t and has_s and not live_ok:
+                leg_status = "STALE"
+            else:
+                leg_status = (
+                    "ACTIVE"
+                    if (has_t and has_s and live_ok)
+                    else ("TARGET_ONLY" if has_t else "SL_ONLY" if has_s else "BROKEN")
+                )
             synced_legs.append(
                 {
                     "smart_order_id": sid,
@@ -1556,6 +1617,8 @@ class Trader:
         Protection integrity check for active positions:
         - Single-target: evaluate current smart_order_id.
         - Multi-target: evaluate each expected OCO leg id from local plan.
+        Target/stop trigger dicts must be present, and the smart order must be
+        "live" (not terminal status, not past API expire_at session end).
         """
         rec_norm = self._normalize_active_trade_record(rec or {})
         expected_legs = self._expected_oco_leg_count_for_open_qty(rec_norm, open_qty)
@@ -1574,8 +1637,15 @@ class Trader:
             payload = self._get_oco_order_payload_cached(sid, payload_cache)
             has_t = self._oco_payload_has_target(payload)
             has_s = self._oco_payload_has_stop(payload)
-            if has_t and has_s:
+            live_ok, live_rs = self._smart_order_payload_is_live_protection(payload)
+            if has_t and has_s and live_ok:
                 return True, ""
+            if has_t and has_s and not live_ok:
+                logger.warning(
+                    f"[REARM] OCO not live for {symbol} id={sid} ({live_rs}); "
+                    f"target={has_t}, stop={has_s}."
+                )
+                return False, f"oco not live ({live_rs})"
             logger.warning(
                 f"[REARM] Incomplete OCO protection for {symbol} id={sid}: target={has_t}, stop={has_s}."
             )
@@ -1592,8 +1662,14 @@ class Trader:
             payload = self._get_oco_order_payload_cached(sid, payload_cache)
             has_t = self._oco_payload_has_target(payload)
             has_s = self._oco_payload_has_stop(payload)
-            if has_t and has_s:
+            live_ok, live_rs = self._smart_order_payload_is_live_protection(payload)
+            if has_t and has_s and live_ok:
                 complete += 1
+            elif has_t and has_s and not live_ok:
+                logger.warning(
+                    f"[REARM] OCO not live for {symbol} id={sid} ({live_rs}); "
+                    f"target={has_t}, stop={has_s}."
+                )
             else:
                 logger.warning(
                     f"[REARM] Incomplete OCO protection for {symbol} id={sid}: target={has_t}, stop={has_s}."
@@ -3170,9 +3246,23 @@ class Trader:
             )
             out: dict = {}
             if isinstance(res, dict):
-                payload = res.get("payload")
-                if isinstance(payload, dict):
-                    out = payload
+                inner = res.get("payload")
+                if isinstance(inner, dict):
+                    out = dict(inner)
+                    for k in (
+                        "expire_at",
+                        "expireAt",
+                        "status",
+                        "smart_order_id",
+                        "trading_symbol",
+                        "quantity",
+                        "updated_at",
+                        "updatedAt",
+                        "created_at",
+                        "createdAt",
+                    ):
+                        if k in res and k not in out:
+                            out[k] = res[k]
                 else:
                     out = res
             else:
@@ -3183,6 +3273,7 @@ class Trader:
                 )
                 return {}
 
+            live_ok, live_rs = self._smart_order_payload_is_live_protection(out)
             has_t = self._oco_payload_has_target(out)
             has_s = self._oco_payload_has_stop(out)
             tgt_trig = self._oco_payload_target_trigger_price(out)
@@ -3196,9 +3287,14 @@ class Trader:
                 type(sl_node).__name__ if sl_node is not None else "missing"
             )
             app_logger.info(
-                "[OCO_PAYLOAD] get_smart_order id=%s has_target=%s has_stop=%s "
-                "target_trigger=%s stop_trigger=%s target_block=%s stop_block=%s",
+                "[OCO_PAYLOAD] get_smart_order id=%s status=%s expire_at=%s protection_live=%s "
+                "live_reason=%s has_target=%s has_stop=%s target_trigger=%s stop_trigger=%s "
+                "target_block=%s stop_block=%s",
                 sid,
+                out.get("status"),
+                out.get("expire_at") or out.get("expireAt"),
+                live_ok,
+                live_rs,
                 has_t,
                 has_s,
                 tgt_trig if tgt_trig > 0 else None,

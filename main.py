@@ -69,9 +69,9 @@ async def run_bot():
 
     try:
         # Non-blocking Groww checks: bot should still start and process Telegram messages.
-        groww_ok = bot.trader.check_connection(log_fail=True)
-        trading_ok = bot.trader.check_trading_access(log_fail=True) if groww_ok else False
-        if not (groww_ok and trading_ok):
+        statuses = bot.multi_account.check_connections()
+        all_ready = all(conn and trade for conn, trade in statuses.values())
+        if not all_ready:
             logger.warning(
                 "Groww auth/trading access not ready at startup. "
                 "Bot will keep running and retry in background."

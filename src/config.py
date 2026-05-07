@@ -1,6 +1,7 @@
 import os
 import sys
 from dotenv import load_dotenv
+from .accounts import AccountConfig, parse_accounts_json
 
 # Load all environment variables from .env
 load_dotenv()
@@ -26,6 +27,7 @@ class Config:
     # Groww
     GROWW_API_KEY = os.getenv("GROWW_API_KEY")
     GROWW_API_SECRET = os.getenv("GROWW_API_SECRET")
+    GROWW_ACCOUNTS_JSON = os.getenv("GROWW_ACCOUNTS_JSON", "").strip()
 
     # Required at startup — bot will not start if any of these are missing.
     _REQUIRED = {
@@ -138,4 +140,29 @@ class Config:
     # When False (default), EXTEND_RANGE for an unknown symbol is rejected instead of
     # silently becoming a fresh BUY. Set True only if you intentionally want that behaviour.
     EXTEND_RANGE_ALLOWS_ENTRY = os.getenv("EXTEND_RANGE_ALLOWS_ENTRY", "false").lower() == "true"
+
+    @classmethod
+    def groww_accounts(cls) -> list[AccountConfig]:
+        """
+        Multi-account resolution with backward compatibility:
+        - Prefer GROWW_ACCOUNTS_JSON when provided.
+        - Fallback to legacy single-account env vars mapped to account_id='primary'.
+        """
+        if cls.GROWW_ACCOUNTS_JSON:
+            accounts = parse_accounts_json(cls.GROWW_ACCOUNTS_JSON)
+            if not accounts:
+                raise ValueError("GROWW_ACCOUNTS_JSON is set but no accounts were parsed.")
+            return accounts
+
+        return [
+            AccountConfig(
+                account_id="primary",
+                display_name="Primary Groww",
+                enabled=True,
+                api_key=str(cls.GROWW_API_KEY or "").strip(),
+                api_secret=str(cls.GROWW_API_SECRET or "").strip(),
+                dry_run=bool(cls.DRY_RUN),
+                overrides={},
+            )
+        ]
 

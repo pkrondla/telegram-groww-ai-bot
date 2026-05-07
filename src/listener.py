@@ -2,12 +2,12 @@ from telethon import TelegramClient, events
 import asyncio
 import datetime
 import re
+import hashlib
 import pytz
 from .config import Config
 from .logger import logger
 from .assistant import Assistant
-from .trader import Trader
-from .state_engine import StateEngine
+from .multi_account_manager import MultiAccountExecutionManager
 from .notifier import Notifier
 from .symbol_manager import symbol_manager
 
@@ -72,14 +72,15 @@ class BotListener:
             flood_sleep_threshold=60,
         )
         self.assistant = Assistant()
-        self.trader = Trader(dry_run=Config.DRY_RUN)
-        self.state_engine = StateEngine(self.trader)
+        self.multi_account = MultiAccountExecutionManager(Config.groww_accounts())
+        self.trader = self.multi_account.first_trader()
+        self.state_engine = self.multi_account.first_state_engine()
         self.notifier = Notifier()
         self._pending_size_override_mode = ""
         self._pending_size_override_reason = ""
         self._pending_size_override_scope = "ALL"
         self._pending_size_override_until_ts = 0.0
-        self._groww_ready_last_state: bool | None = None
+        self._groww_ready_last_state: dict[str, bool] = {}
         self._stop = asyncio.Event()
         self._tasks: list[asyncio.Task] = []
 
@@ -125,22 +126,23 @@ class BotListener:
                     continue
                 if not self._is_broker_window_open_ist():
                     continue
-                pending_items = await asyncio.to_thread(self.trader._load_pending)
-                pending_count = len(pending_items)
-                if pending_count:
-                    logger.info(f"[PENDING] Watcher polling {pending_count} queued item(s)...")
-                messages = await asyncio.to_thread(self.trader.process_pending_queue)
-                for msg in messages:
-                    logger.info(f"PENDING: {msg}")
-                    try:
-                        await self.notifier.send(f"Pending entry\n\n{msg}")
-                    except Exception as notify_err:
-                        logger.error(f"Pending notify error: {notify_err}")
+                for account_id, rt in self.multi_account.runtimes().items():
+                    pending_items = await asyncio.to_thread(rt.trader._load_pending)
+                    pending_count = len(pending_items)
+                    if pending_count:
+                        logger.info(f"[PENDING][{account_id}] Watcher polling {pending_count} queued item(s)...")
+                    messages = await asyncio.to_thread(rt.trader.process_pending_queue)
+                    for msg in messages:
+                        logger.info(f"PENDING[{account_id}]: {msg}")
                         try:
-                            if not self.client.is_connected():
-                                await self.client.connect()
-                        except Exception as reconnect_err:
-                            logger.error(f"Pending watcher reconnect error: {reconnect_err}")
+                            await self.notifier.send(f"Pending entry [{account_id}]\n\n{msg}")
+                        except Exception as notify_err:
+                            logger.error(f"Pending notify error: {notify_err}")
+                            try:
+                                if not self.client.is_connected():
+                                    await self.client.connect()
+                            except Exception as reconnect_err:
+                                logger.error(f"Pending watcher reconnect error: {reconnect_err}")
             except asyncio.CancelledError:
                 raise
             except Exception as e:
@@ -157,15 +159,19 @@ class BotListener:
                 now = datetime.datetime.now(ist)
                 current_time = now.strftime("%H:%M")
                 if current_time in ["14:45", "15:15"]:
-                    active_trades = await asyncio.to_thread(self.trader._load_active_trades)
-                    if active_trades:
-                        trades_list = "\n".join([f"🔹 {s}" for s in active_trades.keys()])
-                        body = (
-                            f"You have {len(active_trades)} active trades:\n{trades_list}\n\n"
-                            "Reply 'EXIT ALL' to liquidate everything, or ignore to Carry Forward (NRML)."
-                        )
-                    else:
-                        body = "No active trades currently open. All clear! ✅"
+                    total_active = 0
+                    body_lines = []
+                    for account_id, rt in self.multi_account.runtimes().items():
+                        active_trades = await asyncio.to_thread(rt.trader._load_active_trades)
+                        total_active += len(active_trades)
+                        if active_trades:
+                            trades_list = "\n".join([f"🔹 {s}" for s in active_trades.keys()])
+                            body_lines.append(f"[{account_id}] {len(active_trades)} active:\n{trades_list}")
+                    body = (
+                        "\n\n".join(body_lines)
+                        if body_lines
+                        else "No active trades currently open across all accounts. All clear! ✅"
+                    )
                     await self.notifier.send_alert(f"MARKET ALERT ({current_time} IST)", body)
                     logger.info(f"Pushed Bot Notification for {current_time}.")
                     await asyncio.sleep(61)
@@ -186,13 +192,14 @@ class BotListener:
                     continue
                 if not self._is_broker_window_open_ist():
                     continue
-                lines = await asyncio.to_thread(self.trader.run_volatility_sl_schedule_tick)
-                for line in lines:
-                    logger.info(f"[VOL_SL] {line}")
-                    try:
-                        await self.notifier.send(line)
-                    except Exception as notify_err:
-                        logger.error(f"VOL_SL notify error: {notify_err}")
+                for account_id, rt in self.multi_account.runtimes().items():
+                    lines = await asyncio.to_thread(rt.trader.run_volatility_sl_schedule_tick)
+                    for line in lines:
+                        logger.info(f"[VOL_SL][{account_id}] {line}")
+                        try:
+                            await self.notifier.send(f"[{account_id}] {line}")
+                        except Exception as notify_err:
+                            logger.error(f"VOL_SL notify error: {notify_err}")
             except asyncio.CancelledError:
                 raise
             except Exception as e:
@@ -209,10 +216,14 @@ class BotListener:
                 await asyncio.sleep(interval)
                 if not self._is_broker_window_open_ist():
                     continue
-                msg = await asyncio.to_thread(self.trader.run_eod_summary_tick)
-                if msg:
+                parts = []
+                for account_id, rt in self.multi_account.runtimes().items():
+                    msg = await asyncio.to_thread(rt.trader.run_eod_summary_tick)
+                    if msg:
+                        parts.append(f"[{account_id}]\n{msg}")
+                if parts:
                     logger.info("[EOD] Sending end-of-day summary alert.")
-                    await self.notifier.send_alert("Market Closing Summary", msg)
+                    await self.notifier.send_alert("Market Closing Summary", "\n\n".join(parts))
             except asyncio.CancelledError:
                 raise
             except Exception as e:
@@ -231,22 +242,23 @@ class BotListener:
                     continue
                 if not self._is_broker_window_open_ist():
                     continue
-                active_trades = await asyncio.to_thread(self.trader._load_active_trades)
-                active_count = len(active_trades)
-                if not active_count:
-                    continue
-                logger.info(f"[RECONCILE] Polling broker for {active_count} active trade(s)...")
-                stats = await asyncio.to_thread(self.trader.maintain_active_trades, include_rearm=False)
-                if stats.get("removed"):
-                    logger.info(
-                        f"[RECONCILE] Maintenance result: active={stats.get('active', 0)} "
-                        f"removed={stats.get('removed', 0)} rearmed={stats.get('rearmed', 0)}"
-                    )
-                for alert in (stats.get("alerts") or []):
-                    try:
-                        await self.notifier.send(f"Protection Maintenance\n\n{alert}")
-                    except Exception as notify_err:
-                        logger.error(f"Active maintenance alert notify error: {notify_err}")
+                for account_id, rt in self.multi_account.runtimes().items():
+                    active_trades = await asyncio.to_thread(rt.trader._load_active_trades)
+                    active_count = len(active_trades)
+                    if not active_count:
+                        continue
+                    logger.info(f"[RECONCILE][{account_id}] Polling broker for {active_count} active trade(s)...")
+                    stats = await asyncio.to_thread(rt.trader.maintain_active_trades, include_rearm=False)
+                    if stats.get("removed"):
+                        logger.info(
+                            f"[RECONCILE][{account_id}] Maintenance result: active={stats.get('active', 0)} "
+                            f"removed={stats.get('removed', 0)} rearmed={stats.get('rearmed', 0)}"
+                        )
+                    for alert in (stats.get("alerts") or []):
+                        try:
+                            await self.notifier.send(f"Protection Maintenance [{account_id}]\n\n{alert}")
+                        except Exception as notify_err:
+                            logger.error(f"Active maintenance alert notify error: {notify_err}")
             except asyncio.CancelledError:
                 raise
             except Exception as e:
@@ -264,21 +276,22 @@ class BotListener:
                     continue
                 if not self._is_broker_window_open_ist():
                     continue
-                active_trades = await asyncio.to_thread(self.trader._load_active_trades)
-                if not active_trades:
-                    continue
-                logger.debug(f"[REARM] Polling broker for {len(active_trades)} active trade(s)...")
-                stats = await asyncio.to_thread(self.trader.run_auto_rearm_protection_tick)
-                if stats.get("rearmed"):
-                    logger.info(
-                        f"[REARM] Maintenance result: active={stats.get('active', 0)} "
-                        f"rearmed={stats.get('rearmed', 0)}"
-                    )
-                for alert in (stats.get("alerts") or []):
-                    try:
-                        await self.notifier.send(f"Protection Maintenance\n\n{alert}")
-                    except Exception as notify_err:
-                        logger.error(f"Auto re-arm alert notify error: {notify_err}")
+                for account_id, rt in self.multi_account.runtimes().items():
+                    active_trades = await asyncio.to_thread(rt.trader._load_active_trades)
+                    if not active_trades:
+                        continue
+                    logger.debug(f"[REARM][{account_id}] Polling broker for {len(active_trades)} active trade(s)...")
+                    stats = await asyncio.to_thread(rt.trader.run_auto_rearm_protection_tick)
+                    if stats.get("rearmed"):
+                        logger.info(
+                            f"[REARM][{account_id}] Maintenance result: active={stats.get('active', 0)} "
+                            f"rearmed={stats.get('rearmed', 0)}"
+                        )
+                    for alert in (stats.get("alerts") or []):
+                        try:
+                            await self.notifier.send(f"Protection Maintenance [{account_id}]\n\n{alert}")
+                        except Exception as notify_err:
+                            logger.error(f"Auto re-arm alert notify error: {notify_err}")
             except asyncio.CancelledError:
                 raise
             except Exception as e:
@@ -296,13 +309,14 @@ class BotListener:
                     continue
                 if not self._is_broker_window_open_ist():
                     continue
-                messages = await asyncio.to_thread(self.trader.process_management_queue)
-                for msg in messages:
-                    logger.info(f"[MGMT_QUEUE] {msg}")
-                    try:
-                        await self.notifier.send(f"Management Queue\n\n{msg}")
-                    except Exception as notify_err:
-                        logger.error(f"Management queue notify error: {notify_err}")
+                for account_id, rt in self.multi_account.runtimes().items():
+                    messages = await asyncio.to_thread(rt.trader.process_management_queue)
+                    for msg in messages:
+                        logger.info(f"[MGMT_QUEUE][{account_id}] {msg}")
+                        try:
+                            await self.notifier.send(f"Management Queue [{account_id}]\n\n{msg}")
+                        except Exception as notify_err:
+                            logger.error(f"Management queue notify error: {notify_err}")
             except asyncio.CancelledError:
                 raise
             except Exception as e:
@@ -321,40 +335,42 @@ class BotListener:
                 await asyncio.sleep(interval)
                 if not self._is_broker_window_open_ist():
                     continue
-                conn_ok = await asyncio.to_thread(self.trader.check_connection, log_fail=False)
-                trade_ok = await asyncio.to_thread(self.trader.check_trading_access, log_fail=False) if conn_ok else False
-                ready = bool(conn_ok and trade_ok)
-                if self._groww_ready_last_state is None:
-                    self._groww_ready_last_state = ready
-                    if not ready:
+                for account_id, rt in self.multi_account.runtimes().items():
+                    conn_ok = await asyncio.to_thread(rt.trader.check_connection, log_fail=False)
+                    trade_ok = await asyncio.to_thread(rt.trader.check_trading_access, log_fail=False) if conn_ok else False
+                    ready = bool(conn_ok and trade_ok)
+                    prev = self._groww_ready_last_state.get(account_id, None)
+                    if prev is None:
+                        self._groww_ready_last_state[account_id] = ready
+                        if not ready:
+                            await self.notifier.send(
+                                f"⚠️ Groww not ready yet for [{account_id}]. Bot is running and will retry automatically."
+                            )
+                        continue
+                    if ready == prev:
+                        continue
+                    self._groww_ready_last_state[account_id] = ready
+                    if ready:
                         await self.notifier.send(
-                            "⚠️ Groww not ready yet. Bot is running and will retry automatically."
+                            f"✅ Groww connection and trading access restored for [{account_id}]."
                         )
-                    continue
-                if ready == self._groww_ready_last_state:
-                    continue
-                self._groww_ready_last_state = ready
-                if ready:
-                    await self.notifier.send(
-                        "✅ Groww connection and trading access restored. Broker actions are live."
-                    )
-                    try:
-                        boot_stats = await asyncio.to_thread(self.trader.maintain_active_trades, include_rearm=False)
-                        logger.info(
-                            f"[GROWW] Post-recovery maintenance: active={boot_stats.get('active', 0)} "
-                            f"removed={boot_stats.get('removed', 0)} rearmed={boot_stats.get('rearmed', 0)}"
+                        try:
+                            boot_stats = await asyncio.to_thread(rt.trader.maintain_active_trades, include_rearm=False)
+                            logger.info(
+                                f"[GROWW][{account_id}] Post-recovery maintenance: active={boot_stats.get('active', 0)} "
+                                f"removed={boot_stats.get('removed', 0)} rearmed={boot_stats.get('rearmed', 0)}"
+                            )
+                            for alert in (boot_stats.get("alerts") or []):
+                                try:
+                                    await self.notifier.send(f"Protection Maintenance [{account_id}]\n\n{alert}")
+                                except Exception as notify_err:
+                                    logger.error(f"Post-recovery maintenance alert notify error: {notify_err}")
+                        except Exception as e:
+                            logger.error(f"[GROWW][{account_id}] Post-recovery maintenance failed: {e}")
+                    else:
+                        await self.notifier.send(
+                            f"⚠️ Groww became unavailable for [{account_id}]. Bot remains online and will keep retrying."
                         )
-                        for alert in (boot_stats.get("alerts") or []):
-                            try:
-                                await self.notifier.send(f"Protection Maintenance\n\n{alert}")
-                            except Exception as notify_err:
-                                logger.error(f"Post-recovery maintenance alert notify error: {notify_err}")
-                    except Exception as e:
-                        logger.error(f"[GROWW] Post-recovery maintenance failed: {e}")
-                else:
-                    await self.notifier.send(
-                        "⚠️ Groww became unavailable. Bot remains online and will keep retrying."
-                    )
             except asyncio.CancelledError:
                 raise
             except Exception as e:
@@ -448,6 +464,13 @@ class BotListener:
             )
         return "\n".join(lines)
 
+    @staticmethod
+    def _format_multi_results(title: str, results: dict[str, str]) -> str:
+        lines = [title]
+        for account_id, msg in sorted(results.items()):
+            lines.append(f"[{account_id}] {msg}")
+        return "\n".join(lines)
+
     async def _handle_override(self, command: str):
         if command == "pause":
             self.state_engine.pause()
@@ -459,20 +482,16 @@ class BotListener:
             self.state_engine.kill()
             await self.notifier.send_status("KILLED", "Kill switch activated. Restart bot to reset.")
         elif command == "status":
-            active = self.trader._load_active_trades()
-            pending = self.trader._load_pending()
-            pending_mgmt = self.trader._load_pending_management()
-            dry = "ON" if not self.trader.execute_orders else "OFF"
-            index_mode = str(Config.INDEX_POSITION_SIZING_MODE or "fixed").strip().lower()
-            stock_mode = str(Config.STOCK_POSITION_SIZING_MODE or "fixed").strip().lower()
-            detail = (
-                f"State: {self.state_engine.status}\n"
-                f"Dry Run (entry orders only): {dry}\n"
-                f"Position sizing: index={index_mode}, stock={stock_mode}\n"
-                f"Active trades: {len(active)}\n"
-                f"Pending entry queue: {len(pending)}\n"
-                f"Pending management queue: {len(pending_mgmt)}"
-            )
+            lines = [f"State: {self.state_engine.status}"]
+            for account_id, rt in self.multi_account.runtimes().items():
+                active = rt.trader._load_active_trades()
+                pending = rt.trader._load_pending()
+                pending_mgmt = rt.trader._load_pending_management()
+                dry = "ON" if not rt.trader.execute_orders else "OFF"
+                lines.append(
+                    f"[{account_id}] DryRun={dry} Active={len(active)} Pending={len(pending)} MgmtPending={len(pending_mgmt)}"
+                )
+            detail = "\n".join(lines)
             await self.notifier.send_status(self.state_engine.status, detail)
         elif command == "sizing_status":
             index_mode = str(Config.INDEX_POSITION_SIZING_MODE or "fixed").strip().lower()
@@ -510,17 +529,43 @@ class BotListener:
             Config.STOCK_POSITION_SIZING_MODE = "risk"
             await self.notifier.send("Stock position sizing set to risk.")
         elif command == "trades":
-            active = self.trader._load_active_trades()
-            await self.notifier.send(self._format_active_trades(active))
+            parts = []
+            for account_id, rt in self.multi_account.runtimes().items():
+                active = rt.trader._load_active_trades()
+                parts.append(f"[{account_id}]\n{self._format_active_trades(active)}")
+            await self.notifier.send("\n\n".join(parts))
         elif command == "exit_all_positions":
-            active = self.trader._load_active_trades()
-            symbols = [str(s) for s in active.keys() if str(s)]
-            if not symbols:
-                await self.notifier.send("ℹ️ EXIT ALL: no active trades to close.")
-                return
-
             out = []
-            for symbol in symbols:
+            total = 0
+            for account_id, rt in self.multi_account.runtimes().items():
+                active = rt.trader._load_active_trades()
+                symbols = [str(s) for s in active.keys() if str(s)]
+                if not symbols:
+                    out.append(f"[{account_id}] no active trades.")
+                    continue
+                for symbol in symbols:
+                    payload = {
+                        "action": "EXIT_ALL",
+                        "stock": symbol,
+                        "trading_symbol": symbol,
+                        "entry_range": [0, 0],
+                        "buy_range_min": 0.0,
+                        "buy_range_max": 0.0,
+                        "stop_loss": 0,
+                        "target": 0,
+                        "is_trade": True,
+                    }
+                    msg = await asyncio.to_thread(rt.trader.execute_trade, payload)
+                    out.append(f"[{account_id}] {symbol}: {msg}")
+                    total += 1
+            await self.notifier.send(
+                "EXIT ALL completed\n"
+                f"Processed {total} active trade(s).\n\n" + "\n".join(out)
+            )
+        elif command.startswith("exit_symbol:"):
+            symbol = command.split(":", 1)[1].strip().upper()
+            out = []
+            for account_id, rt in self.multi_account.runtimes().items():
                 payload = {
                     "action": "EXIT_ALL",
                     "stock": symbol,
@@ -532,27 +577,9 @@ class BotListener:
                     "target": 0,
                     "is_trade": True,
                 }
-                msg = await asyncio.to_thread(self.trader.execute_trade, payload)
-                out.append(f"- {symbol}: {msg}")
-            await self.notifier.send(
-                "EXIT ALL completed\n"
-                f"Processed {len(symbols)} active trade(s).\n\n" + "\n".join(out)
-            )
-        elif command.startswith("exit_symbol:"):
-            symbol = command.split(":", 1)[1].strip().upper()
-            payload = {
-                "action": "EXIT_ALL",
-                "stock": symbol,
-                "trading_symbol": symbol,
-                "entry_range": [0, 0],
-                "buy_range_min": 0.0,
-                "buy_range_max": 0.0,
-                "stop_loss": 0,
-                "target": 0,
-                "is_trade": True,
-            }
-            msg = await asyncio.to_thread(self.trader.execute_trade, payload)
-            await self.notifier.send(f"EXIT {symbol}\n\n{msg}")
+                msg = await asyncio.to_thread(rt.trader.execute_trade, payload)
+                out.append(f"[{account_id}] {msg}")
+            await self.notifier.send(f"EXIT {symbol}\n\n" + "\n".join(out))
         elif command.startswith("admin_tsl:"):
             parts = command.split(":", 2)
             if len(parts) < 3:
@@ -576,8 +603,11 @@ class BotListener:
                 "target": 0,
                 "is_trade": True,
             }
-            msg = await asyncio.to_thread(self.trader.execute_trade, payload)
-            await self.notifier.send(f"TSL {sym} @ {slv}\n\n{msg}")
+            out = []
+            for account_id, rt in self.multi_account.runtimes().items():
+                msg = await asyncio.to_thread(rt.trader.execute_trade, payload)
+                out.append(f"[{account_id}] {msg}")
+            await self.notifier.send(f"TSL {sym} @ {slv}\n\n" + "\n".join(out))
         elif command.startswith("admin_target:"):
             parts = command.split(":", 2)
             if len(parts) < 3:
@@ -602,46 +632,69 @@ class BotListener:
                 "target_leg_index": 0,
                 "is_trade": True,
             }
-            msg = await asyncio.to_thread(self.trader.execute_trade, payload)
-            await self.notifier.send(f"TARGET {sym} @ {tgt}\n\n{msg}")
+            out = []
+            for account_id, rt in self.multi_account.runtimes().items():
+                msg = await asyncio.to_thread(rt.trader.execute_trade, payload)
+                out.append(f"[{account_id}] {msg}")
+            await self.notifier.send(f"TARGET {sym} @ {tgt}\n\n" + "\n".join(out))
         elif command == "rearm":
-            msg = await asyncio.to_thread(self.trader.admin_rearm_protection_for_active_trades)
-            await self.notifier.send(msg)
+            out = []
+            for account_id, rt in self.multi_account.runtimes().items():
+                msg = await asyncio.to_thread(rt.trader.admin_rearm_protection_for_active_trades)
+                out.append(f"[{account_id}] {msg}")
+            await self.notifier.send("\n".join(out))
         elif command == "progress_all":
             logger.info("[STAGE 1] Admin override command: PROGRESS (all active trades)")
-            msg = await asyncio.to_thread(self.trader.admin_sync_target_progression, None)
-            await self.notifier.send(msg)
+            out = []
+            for account_id, rt in self.multi_account.runtimes().items():
+                msg = await asyncio.to_thread(rt.trader.admin_sync_target_progression, None)
+                out.append(f"[{account_id}] {msg}")
+            await self.notifier.send("\n\n".join(out))
         elif command.startswith("progress_symbol:"):
             sym = command.split(":", 1)[1].strip()
             logger.info(f"[STAGE 1] Admin override command: PROGRESS {sym}")
-            msg = await asyncio.to_thread(self.trader.admin_sync_target_progression, sym)
-            await self.notifier.send(msg)
+            out = []
+            for account_id, rt in self.multi_account.runtimes().items():
+                msg = await asyncio.to_thread(rt.trader.admin_sync_target_progression, sym)
+                out.append(f"[{account_id}] {msg}")
+            await self.notifier.send("\n".join(out))
         elif command == "volsl_widen":
             logger.info("[STAGE 1] Admin override command: VOLSL WIDEN")
-            lines = await asyncio.to_thread(
-                lambda: self.trader.run_volatility_sl_schedule_tick(admin_widen=True)
-            )
-            msg = (
-                "\n".join(lines)
-                if lines
-                else "ℹ️ VOLSL WIDEN: no eligible active trades (need OCO ids, open broker qty, sl_true > 0)."
-            )
+            parts = []
+            for account_id, rt in self.multi_account.runtimes().items():
+                lines = await asyncio.to_thread(
+                    lambda r=rt: r.trader.run_volatility_sl_schedule_tick(admin_widen=True)
+                )
+                msg = (
+                    "\n".join(lines)
+                    if lines
+                    else "ℹ️ VOLSL WIDEN: no eligible active trades (need OCO ids, open broker qty, sl_true > 0)."
+                )
+                parts.append(f"[{account_id}] {msg}")
+            msg = "\n".join(parts)
             await self.notifier.send(msg)
         elif command == "volsl_restore":
             logger.info("[STAGE 1] Admin override command: VOLSL RESTORE")
-            lines = await asyncio.to_thread(
-                lambda: self.trader.run_volatility_sl_schedule_tick(admin_restore=True)
-            )
-            msg = (
-                "\n".join(lines)
-                if lines
-                else "ℹ️ VOLSL RESTORE: no eligible trades (need widened state: vol_sl_needs_restore, or use RESTORE SL <SYMBOL>)."
-            )
+            parts = []
+            for account_id, rt in self.multi_account.runtimes().items():
+                lines = await asyncio.to_thread(
+                    lambda r=rt: r.trader.run_volatility_sl_schedule_tick(admin_restore=True)
+                )
+                msg = (
+                    "\n".join(lines)
+                    if lines
+                    else "ℹ️ VOLSL RESTORE: no eligible trades (need widened state: vol_sl_needs_restore, or use RESTORE SL <SYMBOL>)."
+                )
+                parts.append(f"[{account_id}] {msg}")
+            msg = "\n".join(parts)
             await self.notifier.send(msg)
         elif command == "day_summary":
             # On-demand summary uses the same formatter as scheduled market close alert.
-            msg = await asyncio.to_thread(self.trader._build_eod_summary_text)
-            await self.notifier.send_alert("Market Closing Summary", msg)
+            parts = []
+            for account_id, rt in self.multi_account.runtimes().items():
+                msg = await asyncio.to_thread(rt.trader._build_eod_summary_text)
+                parts.append(f"[{account_id}]\n{msg}")
+            await self.notifier.send_alert("Market Closing Summary", "\n\n".join(parts))
         elif command == "help":
             await self.notifier.send(
                 "Bot Command Help\n\n"
@@ -676,22 +729,29 @@ class BotListener:
                 "Examples: EXIT NIFTY26424300PE | TSL 40 NIFTY26424300PE | TARGET 55 NIFTY26424300PE"
             )
         elif command == "dryrun_on":
-            self.trader.execute_orders = False
+            for _account_id, rt in self.multi_account.runtimes().items():
+                rt.trader.execute_orders = False
             await self.notifier.send(
                 "DRY RUN enabled. Entry BUY/SELL (market/limit) are not placed. "
                 "LTP/quotes still use Groww if configured. EXIT/trail/target use the broker only "
                 "for positions opened with a real order id; simulated trades stay local-only."
             )
         elif command == "dryrun_off":
-            self.trader.execute_orders = True
+            for _account_id, rt in self.multi_account.runtimes().items():
+                rt.trader.execute_orders = True
             await self.notifier.send("DRY RUN disabled. LIVE entry orders are now active.")
         elif command == "clear_pending":
-            removed = await asyncio.to_thread(self.trader.clear_pending_entries)
+            parts = []
+            total_removed = 0
+            for account_id, rt in self.multi_account.runtimes().items():
+                removed = await asyncio.to_thread(rt.trader.clear_pending_entries)
+                total_removed += int(removed or 0)
+                parts.append(f"[{account_id}] removed={removed}")
             await self.notifier.send(
                 "Pending entry queue cleared\n"
-                f"Removed {removed} queued item(s)."
+                f"Removed {total_removed} queued item(s).\n" + "\n".join(parts)
             )
-            logger.info(f"[STAGE 1] Admin clear_pending executed: removed={removed}")
+            logger.info(f"[STAGE 1] Admin clear_pending executed: removed={total_removed}")
 
     # ------------------------------------------------------------------
     # Main signal handler
@@ -818,20 +878,27 @@ class BotListener:
                 f"| sl={signal.stop_loss} | tgt={signal.target}"
             )
 
-        # --- Stage 3: State Engine (off event loop — may make synchronous broker API calls) ---
-        result_msg = await asyncio.to_thread(self.state_engine.process, signal)
+        # --- Stage 3: Multi-account fan-out ---
+        symbol = ", ".join(leg.trading_symbol for leg in signal.legs) if signal.is_spread else signal.trading_symbol
+        raw_sid = f"{event.chat_id}:{getattr(event, 'id', '')}:{signal.action}:{symbol}"
+        signal_id = hashlib.sha1(raw_sid.encode("utf-8")).hexdigest()[:20]
+        account_results = await asyncio.to_thread(
+            self.multi_account.process_signal,
+            signal,
+            signal_id=signal_id,
+        )
 
         # --- Stage 4: Notify ---
-        if result_msg:
-            logger.info(f"[STAGE 4] RESULT: {result_msg}")
-            action = signal.action
-            if signal.is_spread:
-                symbol = ", ".join(leg.trading_symbol for leg in signal.legs)
-            else:
-                symbol = signal.trading_symbol
-            await self.notifier.send_signal_result(action, symbol, result_msg)
+        if account_results:
+            for account_id, msg in account_results.items():
+                logger.info(f"[STAGE 4][{account_id}] RESULT: {msg}")
+            await self.notifier.send_signal_result(
+                signal.action,
+                symbol,
+                self._format_multi_results("Account execution results", account_results),
+            )
         else:
-            logger.info("[STAGE 4] No result returned — signal suppressed by state engine.")
+            logger.info("[STAGE 4] No result returned — signal suppressed by all account engines.")
         logger.info("─" * 60)
 
     @staticmethod

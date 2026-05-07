@@ -22,6 +22,7 @@ class StateEngine:
 
     def __init__(self, trader):
         self._trader = trader
+        self._account_id = str(getattr(trader, "account_id", "primary"))
         self._paused = False
         self._killed = False
 
@@ -62,7 +63,7 @@ class StateEngine:
         Returns a result message string, or None if signal was suppressed.
         """
         metrics.increment("signals_received")
-        logger.info(f"[STAGE 3] StateEngine.process: action={signal.action} symbol={signal.trading_symbol} "
+        logger.info(f"[STAGE 3][{self._account_id}] StateEngine.process: action={signal.action} symbol={signal.trading_symbol} "
                     f"bot_status={self.status}")
 
         if self._killed:

@@ -39,7 +39,19 @@ class Trader:
     INDEX_UNDERLYINGS = frozenset({"NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX", "BANKEX"})
     EXIT_LOCK_TTL_SECONDS = 180
     
-    def __init__(self, dry_run=True):
+    def __init__(
+        self,
+        dry_run=True,
+        *,
+        account_id: str = "primary",
+        account_name: str | None = None,
+        api_key: str | None = None,
+        api_secret: str | None = None,
+    ):
+        self.account_id = str(account_id or "primary")
+        self.account_name = str(account_name or self.account_id)
+        self._api_key_override = str(api_key or "")
+        self._api_secret_override = str(api_secret or "")
         self.dry_run = dry_run
         self.active_trades_file = "active_trades.json"
         self.pending_trades_file = "pending_trades.json"
@@ -55,9 +67,11 @@ class Trader:
         self._initialize_groww_client(log_fail=True)
 
     def _initialize_groww_client(self, *, log_fail: bool = True) -> bool:
-        if not Config.GROWW_API_KEY:
+        api_key = self._api_key_override or str(Config.GROWW_API_KEY or "")
+        api_secret = self._api_secret_override or str(Config.GROWW_API_SECRET or "")
+        if not api_key:
             if log_fail:
-                logger.warning("GROWW_API_KEY missing. Groww client not initialized.")
+                logger.warning("GROWW_API_KEY missing for account %s. Groww client not initialized.", self.account_id)
             self.client = None
             return False
         try:
@@ -66,17 +80,17 @@ class Trader:
             # Prefer exchanging API key + secret for an access token.
             # growwapi expects Authorization: Bearer <token> for API calls.
             token = None
-            if Config.GROWW_API_SECRET:
+            if api_secret:
                 try:
                     token = GrowwAPI.get_access_token(
-                        api_key=Config.GROWW_API_KEY, secret=Config.GROWW_API_SECRET
+                        api_key=api_key, secret=api_secret
                     )
                 except Exception as e:
                     if log_fail:
                         logger.error(f"Groww access token fetch failed: {e}")
 
             # Fall back to using GROWW_API_KEY directly (some users store bearer tokens there)
-            self._access_token = token or Config.GROWW_API_KEY
+            self._access_token = token or api_key
             self.client = GrowwAPI(self._access_token)
             if log_fail:
                 if self.place_entry_orders:
@@ -89,7 +103,7 @@ class Trader:
             return True
         except Exception as e:
             if log_fail:
-                logger.error(f"Groww client init failed: {e}")
+                logger.error(f"Groww client init failed for account {self.account_id}: {e}")
             self.client = None
             return False
 
@@ -308,24 +322,24 @@ class Trader:
 
     def _load_completed_trades_book(self, date_iso: str | None = None) -> dict:
         d = str(date_iso or self._today_ist_iso())
-        return db.get_completed_trades_for_date(d)
+        return db.get_completed_trades_for_date(d, account_id=self.account_id)
 
     def _save_completed_trades_book(self, book: dict, date_iso: str | None = None) -> None:
         d = str(date_iso or book.get("date") or self._today_ist_iso())
         # Persist any rows not already in the DB by trade_id.
-        existing_rows = db.get_completed_trades_for_date(d)
+        existing_rows = db.get_completed_trades_for_date(d, account_id=self.account_id)
         existing_ids = {r.get("trade_id") for r in existing_rows.get("trades", [])}
         for row in book.get("trades", []):
             if row.get("trade_id") not in existing_ids:
-                db.insert_completed_trade(d, row)
+                db.insert_completed_trade(d, row, account_id=self.account_id)
             else:
                 # Update in case exit price / PnL was backfilled.
                 trade_id = row.get("trade_id")
                 if trade_id:
-                    db.update_completed_trade_row(trade_id, row)
+                    db.update_completed_trade_row(trade_id, row, account_id=self.account_id)
         eod_sent = bool((book.get("eod") or {}).get("summary_sent_at"))
         if eod_sent:
-            db.mark_eod_sent(d)
+            db.mark_eod_sent(d, account_id=self.account_id)
 
     @staticmethod
     def _num_or(value, default: float = 0.0) -> float:
@@ -2281,10 +2295,10 @@ class Trader:
             os.replace(tmp, path)
 
     def _load_active_trades(self) -> dict:
-        return db.get_active_trades()
+        return db.get_active_trades(account_id=self.account_id)
 
     def _save_all_trades(self, trades_dict: dict) -> None:
-        db.replace_all_active_trades(trades_dict)
+        db.replace_all_active_trades(trades_dict, account_id=self.account_id)
 
     @staticmethod
     def _normalize_active_trade_record(record) -> dict:
@@ -3682,10 +3696,10 @@ class Trader:
         return plans
 
     def _load_pending_management(self) -> list[dict]:
-        return db.get_pending_management()
+        return db.get_pending_management(account_id=self.account_id)
 
     def _save_pending_management(self, items: list[dict]) -> None:
-        db.replace_pending_management(items)
+        db.replace_pending_management(items, account_id=self.account_id)
 
     def _market_window_state_ist(self) -> str:
         now = self._now_ist()
@@ -3858,10 +3872,10 @@ class Trader:
 
 
     def _load_pending(self) -> list:
-        return db.get_pending_entries()
+        return db.get_pending_entries(account_id=self.account_id)
 
     def _save_pending(self, items: list) -> None:
-        db.replace_pending_entries(items)
+        db.replace_pending_entries(items, account_id=self.account_id)
 
     def _append_pending(self, item):
         items = self._load_pending()

@@ -67,6 +67,45 @@ _MIGRATIONS = [
     CREATE TABLE IF NOT EXISTS schema_version (version INTEGER PRIMARY KEY);
     INSERT OR IGNORE INTO schema_version VALUES (1);
     """,
+    # v2 — account-scoped state for multi-account broker execution
+    """
+    ALTER TABLE active_trades ADD COLUMN account_id TEXT;
+    UPDATE active_trades SET account_id='primary' WHERE account_id IS NULL OR account_id='';
+    CREATE TABLE IF NOT EXISTS active_trades_v2 (
+        account_id TEXT NOT NULL,
+        symbol     TEXT NOT NULL,
+        data       TEXT NOT NULL,
+        updated_at REAL NOT NULL,
+        PRIMARY KEY (account_id, symbol)
+    );
+    INSERT OR REPLACE INTO active_trades_v2(account_id,symbol,data,updated_at)
+    SELECT account_id,symbol,data,updated_at FROM active_trades;
+    DROP TABLE active_trades;
+    ALTER TABLE active_trades_v2 RENAME TO active_trades;
+    CREATE INDEX IF NOT EXISTS idx_active_account ON active_trades(account_id);
+
+    ALTER TABLE pending_entries ADD COLUMN account_id TEXT;
+    UPDATE pending_entries SET account_id='primary' WHERE account_id IS NULL OR account_id='';
+    CREATE INDEX IF NOT EXISTS idx_pending_entries_account ON pending_entries(account_id, id);
+
+    ALTER TABLE pending_management ADD COLUMN account_id TEXT;
+    UPDATE pending_management SET account_id='primary' WHERE account_id IS NULL OR account_id='';
+    CREATE INDEX IF NOT EXISTS idx_pending_management_account ON pending_management(account_id, id);
+
+    ALTER TABLE completed_trades ADD COLUMN account_id TEXT;
+    UPDATE completed_trades SET account_id='primary' WHERE account_id IS NULL OR account_id='';
+    CREATE INDEX IF NOT EXISTS idx_ct_date_account ON completed_trades(trade_date, account_id);
+
+    CREATE TABLE IF NOT EXISTS execution_ledger (
+        signal_id   TEXT NOT NULL,
+        account_id  TEXT NOT NULL,
+        action      TEXT NOT NULL,
+        created_at  REAL NOT NULL,
+        PRIMARY KEY (signal_id, account_id, action)
+    );
+    CREATE INDEX IF NOT EXISTS idx_execution_ledger_created ON execution_ledger(created_at);
+    INSERT OR IGNORE INTO schema_version VALUES (2);
+    """,
 ]
 
 
@@ -100,8 +139,21 @@ class Database:
         for i, ddl in enumerate(_MIGRATIONS, start=1):
             if i > cur:
                 with self._lock:
-                    self._conn.executescript(ddl)
-                    self._conn.commit()
+                    try:
+                        self._conn.executescript(ddl)
+                        self._conn.commit()
+                    except sqlite3.OperationalError as e:
+                        # Make migrations idempotent for ALTER TABLE/CREATE INDEX when re-run.
+                        msg = str(e).lower()
+                        if "duplicate column name" in msg or "already exists" in msg:
+                            logger.warning("DB migration step %d already applied: %s", i, e)
+                            self._conn.rollback()
+                            self._conn.execute(
+                                "INSERT OR IGNORE INTO schema_version(version) VALUES (?)", (i,)
+                            )
+                            self._conn.commit()
+                            continue
+                        raise
 
     # ------------------------------------------------------------------
     # JSON → SQLite one-time migration
@@ -207,36 +259,38 @@ class Database:
     # Active trades
     # ------------------------------------------------------------------
 
-    def get_active_trades(self) -> dict:
+    def get_active_trades(self, account_id: str = "primary") -> dict:
         rows = self._conn.execute(
-            "SELECT symbol, data FROM active_trades"
+            "SELECT symbol, data FROM active_trades WHERE account_id=?",
+            (str(account_id),),
         ).fetchall()
         return {r[0]: json.loads(r[1]) for r in rows}
 
-    def upsert_active_trade(self, symbol: str, data: dict) -> None:
+    def upsert_active_trade(self, symbol: str, data: dict, account_id: str = "primary") -> None:
         with self._lock:
             self._conn.execute(
-                "INSERT OR REPLACE INTO active_trades(symbol, data, updated_at) VALUES (?,?,?)",
-                (symbol, json.dumps(data), time.time()),
+                "INSERT OR REPLACE INTO active_trades(account_id, symbol, data, updated_at) VALUES (?,?,?,?)",
+                (str(account_id), symbol, json.dumps(data), time.time()),
             )
             self._conn.commit()
 
-    def delete_active_trade(self, symbol: str) -> None:
+    def delete_active_trade(self, symbol: str, account_id: str = "primary") -> None:
         with self._lock:
             self._conn.execute(
-                "DELETE FROM active_trades WHERE symbol=?", (symbol,)
+                "DELETE FROM active_trades WHERE account_id=? AND symbol=?",
+                (str(account_id), symbol),
             )
             self._conn.commit()
 
-    def replace_all_active_trades(self, trades: dict) -> None:
+    def replace_all_active_trades(self, trades: dict, account_id: str = "primary") -> None:
         """Atomically replace the entire active-trades table."""
         with self._lock:
-            self._conn.execute("DELETE FROM active_trades")
+            self._conn.execute("DELETE FROM active_trades WHERE account_id=?", (str(account_id),))
             now = time.time()
             for symbol, data in trades.items():
                 self._conn.execute(
-                    "INSERT INTO active_trades(symbol, data, updated_at) VALUES (?,?,?)",
-                    (str(symbol), json.dumps(data), now),
+                    "INSERT INTO active_trades(account_id, symbol, data, updated_at) VALUES (?,?,?,?)",
+                    (str(account_id), str(symbol), json.dumps(data), now),
                 )
             self._conn.commit()
 
@@ -244,20 +298,21 @@ class Database:
     # Pending entries
     # ------------------------------------------------------------------
 
-    def get_pending_entries(self) -> list:
+    def get_pending_entries(self, account_id: str = "primary") -> list:
         rows = self._conn.execute(
-            "SELECT data FROM pending_entries ORDER BY id"
+            "SELECT data FROM pending_entries WHERE account_id=? ORDER BY id",
+            (str(account_id),),
         ).fetchall()
         return [json.loads(r[0]) for r in rows]
 
-    def replace_pending_entries(self, items: list) -> None:
+    def replace_pending_entries(self, items: list, account_id: str = "primary") -> None:
         with self._lock:
-            self._conn.execute("DELETE FROM pending_entries")
+            self._conn.execute("DELETE FROM pending_entries WHERE account_id=?", (str(account_id),))
             now = time.time()
             for item in items:
                 self._conn.execute(
-                    "INSERT INTO pending_entries(data, created_at) VALUES (?,?)",
-                    (json.dumps(item), now),
+                    "INSERT INTO pending_entries(account_id, data, created_at) VALUES (?,?,?)",
+                    (str(account_id), json.dumps(item), now),
                 )
             self._conn.commit()
 
@@ -265,20 +320,21 @@ class Database:
     # Pending management
     # ------------------------------------------------------------------
 
-    def get_pending_management(self) -> list:
+    def get_pending_management(self, account_id: str = "primary") -> list:
         rows = self._conn.execute(
-            "SELECT data FROM pending_management ORDER BY id"
+            "SELECT data FROM pending_management WHERE account_id=? ORDER BY id",
+            (str(account_id),),
         ).fetchall()
         return [json.loads(r[0]) for r in rows]
 
-    def replace_pending_management(self, items: list) -> None:
+    def replace_pending_management(self, items: list, account_id: str = "primary") -> None:
         with self._lock:
-            self._conn.execute("DELETE FROM pending_management")
+            self._conn.execute("DELETE FROM pending_management WHERE account_id=?", (str(account_id),))
             now = time.time()
             for item in items:
                 self._conn.execute(
-                    "INSERT INTO pending_management(data, created_at) VALUES (?,?)",
-                    (json.dumps(item), now),
+                    "INSERT INTO pending_management(account_id, data, created_at) VALUES (?,?,?)",
+                    (str(account_id), json.dumps(item), now),
                 )
             self._conn.commit()
 
@@ -286,11 +342,11 @@ class Database:
     # Completed trades
     # ------------------------------------------------------------------
 
-    def get_completed_trades_for_date(self, date_iso: str) -> dict:
+    def get_completed_trades_for_date(self, date_iso: str, account_id: str = "primary") -> dict:
         """Return a book dict matching the old JSON structure."""
         rows = self._conn.execute(
-            "SELECT data, eod_sent FROM completed_trades WHERE trade_date=? ORDER BY id",
-            (date_iso,),
+            "SELECT data, eod_sent FROM completed_trades WHERE trade_date=? AND account_id=? ORDER BY id",
+            (date_iso, str(account_id)),
         ).fetchall()
         trades = [json.loads(r[0]) for r in rows]
         eod_sent_at = "" if not rows or not rows[-1][1] else date_iso
@@ -301,16 +357,19 @@ class Database:
             "eod": {"summary_sent_at": eod_sent_at},
         }
 
-    def insert_completed_trade(self, date_iso: str, row: dict, eod_sent: bool = False) -> None:
+    def insert_completed_trade(
+        self, date_iso: str, row: dict, eod_sent: bool = False, account_id: str = "primary"
+    ) -> None:
         with self._lock:
             self._conn.execute(
                 """INSERT INTO completed_trades
-                   (trade_date,symbol,side,lots,pnl_inr,close_reason,
+                   (trade_date,account_id,symbol,side,lots,pnl_inr,close_reason,
                     entry_avg_price,exit_avg_price,opened_at_ist,closed_at_ist,
                     eod_sent,data,created_at)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     date_iso,
+                    str(account_id),
                     str(row.get("symbol") or ""),
                     str(row.get("side") or ""),
                     float(row.get("lots") or 0),
@@ -327,27 +386,49 @@ class Database:
             )
             self._conn.commit()
 
-    def update_completed_trade_row(self, trade_id: str, row: dict) -> None:
+    def update_completed_trade_row(self, trade_id: str, row: dict, account_id: str = "primary") -> None:
         """Update an existing completed trade row by trade_id field inside data."""
         with self._lock:
             self._conn.execute(
                 """UPDATE completed_trades SET data=?, pnl_inr=?, exit_avg_price=?, eod_sent=?
-                   WHERE json_extract(data,'$.trade_id')=?""",
+                   WHERE account_id=? AND json_extract(data,'$.trade_id')=?""",
                 (
                     json.dumps(row),
                     float(row.get("pnl_inr") or 0),
                     float(row.get("exit_avg_price") or 0),
                     1 if row.get("eod") else 0,
+                    str(account_id),
                     str(trade_id),
                 ),
             )
             self._conn.commit()
 
-    def mark_eod_sent(self, date_iso: str) -> None:
+    def mark_eod_sent(self, date_iso: str, account_id: str = "primary") -> None:
         with self._lock:
             self._conn.execute(
-                "UPDATE completed_trades SET eod_sent=1 WHERE trade_date=?",
-                (date_iso,),
+                "UPDATE completed_trades SET eod_sent=1 WHERE trade_date=? AND account_id=?",
+                (date_iso, str(account_id)),
+            )
+            self._conn.commit()
+
+    # ------------------------------------------------------------------
+    # Idempotency ledger
+    # ------------------------------------------------------------------
+
+    def has_execution(self, signal_id: str, account_id: str, action: str) -> bool:
+        row = self._conn.execute(
+            """SELECT 1 FROM execution_ledger
+               WHERE signal_id=? AND account_id=? AND action=? LIMIT 1""",
+            (str(signal_id), str(account_id), str(action).upper()),
+        ).fetchone()
+        return bool(row)
+
+    def record_execution(self, signal_id: str, account_id: str, action: str) -> None:
+        with self._lock:
+            self._conn.execute(
+                """INSERT OR IGNORE INTO execution_ledger(signal_id, account_id, action, created_at)
+                   VALUES (?,?,?,?)""",
+                (str(signal_id), str(account_id), str(action).upper(), time.time()),
             )
             self._conn.commit()
 

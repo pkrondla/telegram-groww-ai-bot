@@ -21,6 +21,11 @@ class Metrics:
         with self._lock:
             self._counters[name] += by
 
+    def increment_labeled(self, name: str, *, label: str, by: int = 1) -> None:
+        key = f"{name}.{str(label or 'unknown')}"
+        with self._lock:
+            self._counters[key] += by
+
     def snapshot(self) -> dict[str, int]:
         with self._lock:
             return dict(self._counters)

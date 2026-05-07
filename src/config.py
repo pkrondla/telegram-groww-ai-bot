@@ -78,7 +78,6 @@ class Config:
     # Position sizing mode by segment: fixed (configured lots) or risk (SL-distance based).
     INDEX_POSITION_SIZING_MODE = os.getenv("INDEX_POSITION_SIZING_MODE", "fixed").strip().lower()
     STOCK_POSITION_SIZING_MODE = os.getenv("STOCK_POSITION_SIZING_MODE", "fixed").strip().lower()
-    ACCOUNT_CAPITAL_INR = max(0.0, float(os.getenv("ACCOUNT_CAPITAL_INR", "0")))
     RISK_PCT_PER_TRADE = max(0.0, min(1.0, float(os.getenv("RISK_PCT_PER_TRADE", "0.01"))))
     MAX_TOTAL_OPEN_RISK_PCT = max(0.0, min(1.0, float(os.getenv("MAX_TOTAL_OPEN_RISK_PCT", "0.03"))))
     INDEX_MIN_LOTS = max(1, int(os.getenv("INDEX_MIN_LOTS", "1")))

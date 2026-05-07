@@ -13,7 +13,7 @@ class AccountConfig:
     api_key: str = ""
     api_secret: str = ""
     dry_run: bool | None = None
-    overrides: dict[str, Any] = field(default_factory=dict)
+    account_capital_inr: float = 0.0
 
     @property
     def safe_name(self) -> str:
@@ -52,6 +52,10 @@ def parse_accounts_json(raw: str) -> list[AccountConfig]:
             raise ValueError(f"Duplicate account_id '{account_id}'.")
         seen.add(account_id)
         display_name = str(item.get("display_name") or account_id).strip()
+        try:
+            cap = float(item.get("account_capital_inr") or 0)
+        except Exception:
+            cap = 0.0
         out.append(
             AccountConfig(
                 account_id=account_id,
@@ -64,7 +68,7 @@ def parse_accounts_json(raw: str) -> list[AccountConfig]:
                     if item.get("dry_run") is not None
                     else None
                 ),
-                overrides=dict(item.get("overrides") or {}),
+                account_capital_inr=max(0.0, cap),
             )
         )
     return out

@@ -219,16 +219,27 @@ class StateEngine:
         """
         symbol = signal.trading_symbol
         new_tgt = signal.target
+        new_targets = list(signal.targets or [])
+        clear_sl = bool(signal.clear_stop_loss)
 
         if not symbol:
             logger.warning("[STAGE 3] UPDATE_TGT signal has no trading symbol.")
             return "❌ UPDATE_TGT: missing trading symbol."
 
+        if (not new_tgt or new_tgt <= 0) and new_targets:
+            try:
+                new_tgt = float(new_targets[0])
+            except Exception:
+                new_tgt = 0.0
+
         if not new_tgt or new_tgt <= 0:
             logger.warning("[STAGE 3] UPDATE_TGT: no valid new target price.")
             return "❌ UPDATE_TGT: could not extract a valid target price."
 
-        logger.info(f"[STAGE 3] UPDATE_TGT requested for {symbol} — new target: {new_tgt}")
+        logger.info(
+            f"[STAGE 3] UPDATE_TGT requested for {symbol} — new target: {new_tgt}, "
+            f"clear_stop_loss={clear_sl}"
+        )
 
         # 1. Active trade — resolve symbol and forward to executor.
         logger.info(f"[STAGE 3] Active book: {list(self._trader._load_active_trades().keys())}")
@@ -243,7 +254,10 @@ class StateEngine:
             legacy["stock"] = resolved
             legacy["action"] = "UPDATE_TGT"
             legacy["target"] = new_tgt
+            if new_targets:
+                legacy["targets"] = new_targets[:3]
             legacy["target_leg_index"] = int(signal.target_leg_index or 0)
+            legacy["clear_stop_loss"] = bool(clear_sl)
             logger.info(f"[STAGE 3] Forwarding UPDATE_TGT {resolved} to executor.")
             return self._trader.execute_trade(legacy)
 
@@ -256,11 +270,16 @@ class StateEngine:
             td = item.get("trade_data") or {}
             old_tgt = td.get("target", 0)
             td["target"] = new_tgt
+            if new_targets:
+                td["targets"] = new_targets[:3]
+            if clear_sl:
+                td["stop_loss"] = 0.0
             item["trade_data"] = td
             updated = True
             logger.info(
                 f"[STAGE 3] UPDATE_TGT: updated pending queue for {symbol}: "
                 f"target {old_tgt} → {new_tgt}"
+                + (" and cleared SL" if clear_sl else "")
             )
         if updated:
             self._trader._save_pending(pending)

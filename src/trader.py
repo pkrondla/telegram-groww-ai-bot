@@ -47,6 +47,7 @@ class Trader:
         account_name: str | None = None,
         api_key: str | None = None,
         api_secret: str | None = None,
+        account_capital_inr: float = 0.0,
     ):
         self.account_id = str(account_id or "").strip()
         if not self.account_id:
@@ -54,6 +55,10 @@ class Trader:
         self.account_name = str(account_name or self.account_id)
         self._api_key_override = str(api_key or "")
         self._api_secret_override = str(api_secret or "")
+        try:
+            self.account_capital_inr = max(0.0, float(account_capital_inr or 0.0))
+        except Exception:
+            self.account_capital_inr = 0.0
         self.dry_run = dry_run
         self.active_trades_file = "active_trades.json"
         self.pending_trades_file = "pending_trades.json"
@@ -2941,6 +2946,7 @@ class Trader:
         new_target: float,
         *,
         symbol: str | None = None,
+        preserve_sl: bool = True,
         payload_cache: dict[str, dict] | None = None,
     ) -> float:
         """
@@ -2973,7 +2979,7 @@ class Trader:
                 "order_type": "MARKET",
             },
         }
-        if sl_px > 0:
+        if preserve_sl and sl_px > 0:
             sl_r = self._round_price_to_tick(sl_px, mode="nearest")
             if sl_r > 0:
                 modify_kw["stop_loss"] = {
@@ -2984,6 +2990,10 @@ class Trader:
                 logger.debug(
                     f"[OCO] modify_smart_order {symbol or '?'} id={order_id}: target={tgt} + preserve SL={sl_r}"
                 )
+        elif not preserve_sl:
+            logger.debug(
+                f"[OCO] modify_smart_order {symbol or '?'} id={order_id}: target={tgt} + clear SL"
+            )
 
         try:
             self._groww_call(self.client.modify_smart_order, **modify_kw)
@@ -4446,7 +4456,7 @@ class Trader:
             diag["reason"] = "invalid_entry_or_sl"
             return 0, diag
 
-        cap = float(Config.ACCOUNT_CAPITAL_INR)
+        cap = float(self.account_capital_inr or 0.0)
         if cap <= 0:
             diag["reason"] = "missing_account_capital"
             return 0, diag
@@ -6055,9 +6065,11 @@ class Trader:
                     return self.restore_channel_sl(symbol, source="signal")
 
                 elif action == "UPDATE_TGT":
-                    raw_tgt = float(trade_data["target"])
+                    targets = self._signal_targets(trade_data)
+                    raw_tgt = float(targets[0]) if targets else float(trade_data["target"])
                     eff_tgt = self._take_profit_order_price(raw_tgt)
                     target_leg_index = int(self._num_or(trade_data.get("target_leg_index"), 0))
+                    clear_stop_loss = bool(trade_data.get("clear_stop_loss") or trade_data.get("clear_sl"))
                     if eff_tgt <= 0:
                         return (
                             f"⚠️ UPDATE_TGT skipped for {symbol}: buffered target must be > 0 "
@@ -6065,7 +6077,7 @@ class Trader:
                         )
                     logger.info(
                         f"[STAGE 4] Calling Groww modify_smart_order for {symbol}: "
-                        f"target signal {raw_tgt} → broker {eff_tgt}."
+                        f"target signal {raw_tgt} → broker {eff_tgt} (targets={targets})."
                     )
                     rec_live = self._get_active_trade_record(symbol) or {}
                     oco_tgt_modify_cache: dict[str, dict] = {}
@@ -6075,6 +6087,10 @@ class Trader:
                     skipped_stale = 0
                     failed: list[str] = []
                     if isinstance(legs, list) and legs:
+                        # Multi-target update: map targets[] to legs by target_index when provided.
+                        # If only one active leg exists and 2+ targets were provided, mirror the
+                        # single-lot entry policy by preferring T2.
+                        prefer_t2_single_leg = bool(len(legs) == 1 and len(targets) >= 2 and target_leg_index <= 0)
                         for i, leg in enumerate(legs):
                             if not isinstance(leg, dict):
                                 continue
@@ -6085,10 +6101,19 @@ class Trader:
                             if target_leg_index > 0 and leg_target_index != target_leg_index:
                                 continue
                             attempted += 1
-                            if target_leg_index > 0:
-                                leg_target_signal = float(raw_tgt)
+                            if targets:
+                                if target_leg_index > 0:
+                                    # Explicit T1/T2/T3 update: pick that index if present, else fall back.
+                                    idx = max(1, int(target_leg_index))
+                                    leg_target_signal = float(targets[min(idx, len(targets)) - 1])
+                                elif prefer_t2_single_leg:
+                                    leg_target_signal = float(targets[1])
+                                else:
+                                    # Global ladder update: update each leg by its target_index (clamped).
+                                    idx = max(1, int(leg_target_index))
+                                    leg_target_signal = float(targets[min(idx, len(targets)) - 1])
                             else:
-                                # Global target update: unify all active legs to the new channel target.
+                                # Single target update: unify all active legs to the new channel target.
                                 leg_target_signal = float(raw_tgt)
                             leg_target_broker = self._take_profit_order_price(leg_target_signal)
                             if leg_target_broker <= 0:
@@ -6099,6 +6124,7 @@ class Trader:
                                         oid,
                                         leg_target_broker,
                                         symbol=symbol,
+                                        preserve_sl=not clear_stop_loss,
                                         payload_cache=oco_tgt_modify_cache,
                                     )
                                 except Exception as e1:
@@ -6112,6 +6138,7 @@ class Trader:
                                             oid,
                                             leg_target_broker,
                                             symbol=symbol,
+                                            preserve_sl=not clear_stop_loss,
                                             payload_cache=oco_tgt_modify_cache,
                                         )
                                     else:
@@ -6135,7 +6162,8 @@ class Trader:
                             self._save_active_trade(
                                 symbol,
                                 order_id,
-                                target=raw_tgt,
+                                target=float(targets[0] if targets else raw_tgt),
+                                signal_targets=list(targets or []),
                                 oco_legs=legs,
                             )
                     else:
@@ -6144,7 +6172,11 @@ class Trader:
                             try:
                                 try:
                                     self._modify_oco_target(
-                                        oid, eff_tgt, symbol=symbol, payload_cache=oco_tgt_modify_cache
+                                        oid,
+                                        eff_tgt,
+                                        symbol=symbol,
+                                        preserve_sl=not clear_stop_loss,
+                                        payload_cache=oco_tgt_modify_cache,
                                     )
                                 except Exception as e1:
                                     em1 = str(e1)
@@ -6154,7 +6186,11 @@ class Trader:
                                         )
                                         time.sleep(0.8)
                                         self._modify_oco_target(
-                                            oid, eff_tgt, symbol=symbol, payload_cache=oco_tgt_modify_cache
+                                            oid,
+                                            eff_tgt,
+                                            symbol=symbol,
+                                            preserve_sl=not clear_stop_loss,
+                                            payload_cache=oco_tgt_modify_cache,
                                         )
                                     else:
                                         raise
@@ -6187,22 +6223,40 @@ class Trader:
                             f"Last error: {failed[-1]}{self._ltp_suffix_for_symbol(symbol)}"
                         )
                     if isinstance(legs, list) and legs and success > 0:
+                        if clear_stop_loss:
+                            for leg in legs:
+                                if isinstance(leg, dict):
+                                    leg["stop_order_id"] = ""
                         self._save_active_trade(
                             symbol,
                             order_id,
-                            target=raw_tgt,
+                            target=float(targets[0] if targets else raw_tgt),
+                            stop_loss=(0.0 if clear_stop_loss else None),
                             oco_legs=legs,
+                            signal_targets=list(targets or []),
                         )
                     if target_leg_index <= 0 and success > 0:
-                        self._update_active_trade_levels(symbol, target=raw_tgt)
+                        self._update_active_trade_levels(
+                            symbol,
+                            target=float(targets[0] if targets else raw_tgt),
+                            stop_loss=(0.0 if clear_stop_loss else None),
+                            sl_true=(0.0 if clear_stop_loss else None),
+                            sl_widened=(0.0 if clear_stop_loss else None),
+                            sl_mode=("NORMAL" if clear_stop_loss else None),
+                            vol_sl_needs_restore=(False if clear_stop_loss else None),
+                            vol_sl_widen_done_for=("" if clear_stop_loss else None),
+                            vol_sl_restore_done_for=("" if clear_stop_loss else None),
+                        )
                     logger.info(
                         f"[STAGE 4] UPDATE_TGT SUCCESS: {symbol} broker target {eff_tgt} "
                         f"(signal {raw_tgt}, target_leg_index={target_leg_index or 'ALL'}, "
+                        f"clear_stop_loss={clear_stop_loss}, "
                         f"attempted={attempted}, success={success}, stale={skipped_stale}, failed={len(failed)})."
                     )
                     return (
                         f"🎯 UPDATE_TGT SUCCESS: {symbol} target {eff_tgt} (signal {raw_tgt}; "
                         f"target_leg={'ALL' if target_leg_index <= 0 else target_leg_index}; "
+                        f"sl={'CLEARED' if clear_stop_loss else 'UNCHANGED'}; "
                         f"updated={success}/{attempted}, stale={skipped_stale}, failed={len(failed)})."
                         f"{self._ltp_suffix_for_symbol(symbol)}"
                     )

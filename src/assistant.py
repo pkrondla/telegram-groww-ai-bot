@@ -514,6 +514,24 @@ class Assistant:
         return None
 
     @staticmethod
+    def _has_explicit_zero_sl(text: str) -> bool:
+        """
+        Detect explicit SL-zero intents like:
+        - "SL : 0"
+        - "STOP LOSS = 0.0"
+        """
+        raw = str(text or "")
+        if not raw.strip():
+            return False
+        return bool(
+            re.search(
+                r"\b(?:TSL|SL|STOP\s*LOSS|STOPLOSS)\b\s*(?:[:=]|TO|AT)?\s*0+(?:\.0+)?\b",
+                raw,
+                re.IGNORECASE,
+            )
+        )
+
+    @staticmethod
     def _extract_range_extend_price(text: str) -> float | None:
         """
         Extract the upper price limit from range-extension messages.
@@ -850,6 +868,10 @@ class Assistant:
                 return None, "update_tgt_invalid_price"
             if not self._has_symbol_fields(data) and not self._has_option_hint(parent_text):
                 return None, "update_tgt_missing_symbol"
+            if self._has_explicit_zero_sl(child_text):
+                data["clear_stop_loss"] = True
+            else:
+                data["clear_stop_loss"] = bool(data.get("clear_stop_loss"))
 
         if action == "RECONCILE":
             if not self._has_symbol_fields(data) and not self._has_option_hint(parent_text):
@@ -1350,14 +1372,17 @@ Rules:
                     is_reply=has_context,
                 )
                 if data and data.get("is_trade"):
+                    clear_sl = self._has_explicit_zero_sl(tail or child_text)
                     data["action"] = "UPDATE_TGT"
                     data["target"] = update_tgt_price
                     data["target_leg_index"] = int(target_leg_index or 0)
+                    data["clear_stop_loss"] = bool(clear_sl)
                     data = self._apply_alias_to_data(data)
                     data = self._apply_symbol_factory(data)
                     logger.info(
                         f"[STAGE 2] Signal ready: UPDATE_TGT {data.get('stock')} "
-                        f"new_target={update_tgt_price} target_leg_index={data.get('target_leg_index', 0) or 'ALL'}"
+                        f"new_target={update_tgt_price} target_leg_index={data.get('target_leg_index', 0) or 'ALL'} "
+                        f"clear_stop_loss={clear_sl}"
                     )
                     return data
                 else:
@@ -1853,7 +1878,7 @@ Return is_trade: false for:
             logger.info(f"[STAGE 2] Validator passed: {reason}")
             data = self._apply_alias_to_data(data)
             data = self._apply_symbol_factory(data)
-            if str(data.get("action") or "").upper() == "BUY":
+            if str(data.get("action") or "").upper() in ("BUY", "UPDATE_TGT"):
                 # Preserve line boundaries so "TARGETS: ..." parsing does not
                 # bleed into the next appended message fragment (which can
                 # introduce strike values as fake extra targets).

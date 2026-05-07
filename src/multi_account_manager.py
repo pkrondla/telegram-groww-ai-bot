@@ -33,6 +33,7 @@ class MultiAccountExecutionManager:
                 account_name=acc.display_name,
                 api_key=acc.api_key,
                 api_secret=acc.api_secret,
+                account_capital_inr=acc.account_capital_inr,
             )
             self._runtimes[acc.account_id] = AccountRuntime(
                 config=acc,

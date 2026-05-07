@@ -31,7 +31,7 @@ from src.trader import Trader  # noqa: E402
 
 @pytest.fixture()
 def trader():
-    return Trader(dry_run=True)
+    return Trader(dry_run=True, account_id="test-account", api_key="x")
 
 
 class TestBuildOcoLegsPlan:

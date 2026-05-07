@@ -22,7 +22,9 @@ class StateEngine:
 
     def __init__(self, trader):
         self._trader = trader
-        self._account_id = str(getattr(trader, "account_id", "primary"))
+        self._account_id = str(getattr(trader, "account_id", "") or "").strip()
+        if not self._account_id:
+            raise ValueError("StateEngine requires trader.account_id")
         self._paused = False
         self._killed = False
 

@@ -61,7 +61,7 @@ def main() -> int:
 
     trader = Trader(dry_run=True)
     if trader.client is None:
-        print("ERROR: Groww client not initialized. Check GROWW_API_KEY / GROWW_API_SECRET.")
+        print("ERROR: Groww client not initialized. Check GROWW_ACCOUNTS_JSON credentials.")
         return 2
 
     print("Ready to Groww!")

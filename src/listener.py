@@ -73,8 +73,6 @@ class BotListener:
         )
         self.assistant = Assistant()
         self.multi_account = MultiAccountExecutionManager(Config.groww_accounts())
-        self.trader = self.multi_account.first_trader()
-        self.state_engine = self.multi_account.first_state_engine()
         self.notifier = Notifier()
         self._pending_size_override_mode = ""
         self._pending_size_override_reason = ""
@@ -122,7 +120,7 @@ class BotListener:
         while not self._stop.is_set():
             try:
                 await asyncio.sleep(interval)
-                if not self.state_engine.is_active():
+                if not self.multi_account.any_active():
                     continue
                 if not self._is_broker_window_open_ist():
                     continue
@@ -188,7 +186,7 @@ class BotListener:
         while not self._stop.is_set():
             try:
                 await asyncio.sleep(interval)
-                if not self.state_engine.is_active():
+                if not self.multi_account.any_active():
                     continue
                 if not self._is_broker_window_open_ist():
                     continue
@@ -238,7 +236,7 @@ class BotListener:
         while not self._stop.is_set():
             try:
                 await asyncio.sleep(interval)
-                if not self.state_engine.is_active():
+                if not self.multi_account.any_active():
                     continue
                 if not self._is_broker_window_open_ist():
                     continue
@@ -272,7 +270,7 @@ class BotListener:
         while not self._stop.is_set():
             try:
                 await asyncio.sleep(interval)
-                if not self.state_engine.is_active():
+                if not self.multi_account.any_active():
                     continue
                 if not self._is_broker_window_open_ist():
                     continue
@@ -305,7 +303,7 @@ class BotListener:
         while not self._stop.is_set():
             try:
                 await asyncio.sleep(interval)
-                if not self.state_engine.is_active():
+                if not self.multi_account.any_active():
                     continue
                 if not self._is_broker_window_open_ist():
                     continue
@@ -473,16 +471,16 @@ class BotListener:
 
     async def _handle_override(self, command: str):
         if command == "pause":
-            self.state_engine.pause()
+            self.multi_account.pause_all()
             await self.notifier.send_status("PAUSED", "Bot will ignore all signals until RESUME.")
         elif command == "resume":
-            self.state_engine.resume()
+            self.multi_account.resume_all()
             await self.notifier.send_status("ACTIVE", "Bot is now active and processing signals.")
         elif command == "kill":
-            self.state_engine.kill()
+            self.multi_account.kill_all()
             await self.notifier.send_status("KILLED", "Kill switch activated. Restart bot to reset.")
         elif command == "status":
-            lines = [f"State: {self.state_engine.status}"]
+            lines = [f"State: {self.multi_account.status_summary()}"]
             for account_id, rt in self.multi_account.runtimes().items():
                 active = rt.trader._load_active_trades()
                 pending = rt.trader._load_pending()
@@ -492,7 +490,7 @@ class BotListener:
                     f"[{account_id}] DryRun={dry} Active={len(active)} Pending={len(pending)} MgmtPending={len(pending_mgmt)}"
                 )
             detail = "\n".join(lines)
-            await self.notifier.send_status(self.state_engine.status, detail)
+            await self.notifier.send_status(self.multi_account.status_summary(), detail)
         elif command == "sizing_status":
             index_mode = str(Config.INDEX_POSITION_SIZING_MODE or "fixed").strip().lower()
             stock_mode = str(Config.STOCK_POSITION_SIZING_MODE or "fixed").strip().lower()
@@ -952,7 +950,8 @@ class BotListener:
             logger.info(f"Resolved 'me' to ID: {Config.ADMIN_ID}")
 
         # Refresh symbol map (downloads from Groww or loads cache)
-        symbol_manager.refresh(trader=self.trader)
+        traders = [rt.trader for rt in self.multi_account.runtimes().values()]
+        symbol_manager.refresh(traders=traders)
 
         try:
             target_entity = await self.client.get_entity(self.target_chat_id)

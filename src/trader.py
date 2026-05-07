@@ -43,12 +43,14 @@ class Trader:
         self,
         dry_run=True,
         *,
-        account_id: str = "primary",
+        account_id: str,
         account_name: str | None = None,
         api_key: str | None = None,
         api_secret: str | None = None,
     ):
-        self.account_id = str(account_id or "primary")
+        self.account_id = str(account_id or "").strip()
+        if not self.account_id:
+            raise ValueError("Trader requires non-empty account_id")
         self.account_name = str(account_name or self.account_id)
         self._api_key_override = str(api_key or "")
         self._api_secret_override = str(api_secret or "")
@@ -67,11 +69,11 @@ class Trader:
         self._initialize_groww_client(log_fail=True)
 
     def _initialize_groww_client(self, *, log_fail: bool = True) -> bool:
-        api_key = self._api_key_override or str(Config.GROWW_API_KEY or "")
-        api_secret = self._api_secret_override or str(Config.GROWW_API_SECRET or "")
+        api_key = str(self._api_key_override or "").strip()
+        api_secret = str(self._api_secret_override or "").strip()
         if not api_key:
             if log_fail:
-                logger.warning("GROWW_API_KEY missing for account %s. Groww client not initialized.", self.account_id)
+                logger.warning("Groww api_key missing for account %s. Groww client not initialized.", self.account_id)
             self.client = None
             return False
         try:
@@ -89,7 +91,7 @@ class Trader:
                     if log_fail:
                         logger.error(f"Groww access token fetch failed: {e}")
 
-            # Fall back to using GROWW_API_KEY directly (some users store bearer tokens there)
+            # Fall back to using api_key directly (some users store bearer tokens there)
             self._access_token = token or api_key
             self.client = GrowwAPI(self._access_token)
             if log_fail:
@@ -206,7 +208,7 @@ class Trader:
                 if "unregistered ip" in msg.lower():
                     logger.error(
                         "Groww trading access denied: Request from unregistered IP address. "
-                        "Update static IP in Groww API dashboard (primary/secondary) and retry."
+                        "Update static IP in Groww API dashboard (slot 1/slot 2) and retry."
                     )
                 else:
                     logger.error(f"Groww trading access check failed: {msg}")
@@ -2604,9 +2606,9 @@ class Trader:
                 oid = str(leg.get("smart_order_id") or "")
                 if oid and oid not in ids:
                     ids.append(oid)
-        primary = str(rec.get("smart_order_id") or "")
-        if primary and primary not in ids:
-            ids.append(primary)
+        root_id = str(rec.get("smart_order_id") or "")
+        if root_id and root_id not in ids:
+            ids.append(root_id)
         return ids
 
     @staticmethod
@@ -3042,7 +3044,7 @@ class Trader:
             )
 
         if not self.client:
-            return f"⚠️ NO GROWW CLIENT: Cannot RESTORE_SL for {symbol}. Configure GROWW_API_KEY.{self._ltp_suffix_for_symbol(symbol)}"
+                    return f"⚠️ NO GROWW CLIENT: Cannot RESTORE_SL for {symbol}. Configure GROWW_ACCOUNTS_JSON account credentials.{self._ltp_suffix_for_symbol(symbol)}"
 
         sl_true = float(rec.get("sl_true") or rec.get("stop_loss") or 0)
         if sl_true <= 0:
@@ -5840,7 +5842,7 @@ class Trader:
                     )
 
                 if not self.client:
-                    return f"⚠️ NO GROWW CLIENT: Cannot {action} for {symbol}. Configure GROWW_API_KEY.{self._ltp_suffix_for_symbol(symbol)}"
+                    return f"⚠️ NO GROWW CLIENT: Cannot {action} for {symbol}. Configure GROWW_ACCOUNTS_JSON account credentials.{self._ltp_suffix_for_symbol(symbol)}"
 
                 if action == "EXIT_ALL":
                     lock = self._get_exit_lock(symbol)

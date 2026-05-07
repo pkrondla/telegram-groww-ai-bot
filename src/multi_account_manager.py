@@ -42,19 +42,36 @@ class MultiAccountExecutionManager:
         if not self._runtimes:
             raise ValueError("No enabled Groww accounts configured.")
 
-    def account_ids(self) -> list[str]:
-        return list(self._runtimes.keys())
-
     def runtimes(self) -> dict[str, AccountRuntime]:
         return dict(self._runtimes)
 
-    def first_trader(self) -> Trader:
-        first_id = self.account_ids()[0]
-        return self._runtimes[first_id].trader
+    # ------------------------------------------------------------------
+    # Global control (applies to all accounts)
+    # ------------------------------------------------------------------
 
-    def first_state_engine(self) -> StateEngine:
-        first_id = self.account_ids()[0]
-        return self._runtimes[first_id].state_engine
+    def pause_all(self) -> None:
+        for rt in self._runtimes.values():
+            rt.state_engine.pause()
+
+    def resume_all(self) -> None:
+        for rt in self._runtimes.values():
+            rt.state_engine.resume()
+
+    def kill_all(self) -> None:
+        for rt in self._runtimes.values():
+            rt.state_engine.kill()
+
+    def any_active(self) -> bool:
+        return any(rt.state_engine.is_active() for rt in self._runtimes.values())
+
+    def status_summary(self) -> str:
+        # Derive a single global status: KILLED > PAUSED > ACTIVE
+        statuses = {rt.state_engine.status for rt in self._runtimes.values()}
+        if "KILLED" in statuses:
+            return "KILLED"
+        if "PAUSED" in statuses:
+            return "PAUSED"
+        return "ACTIVE"
 
     def process_signal(self, signal, *, signal_id: str = "") -> dict[str, str]:
         """

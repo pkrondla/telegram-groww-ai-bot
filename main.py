@@ -15,8 +15,14 @@ async def run_bot():
     global _bot
     logger.info("Initializing Industrial-Standard Trading Bot...")
 
-    if not Config.GROWW_API_KEY or not Config.GROWW_API_SECRET:
-        logger.warning("GROWW_API credentials missing. Groww client features may not work.")
+    try:
+        accounts = Config.groww_accounts()
+        any_key = any(str(a.api_key or "").strip() for a in accounts)
+        if not any_key:
+            logger.warning("GROWW_API credentials missing. Groww client features may not work.")
+    except Exception:
+        # Config.groww_accounts() can raise if GROWW_ACCOUNTS_JSON is malformed.
+        logger.warning("GROWW accounts config invalid/missing. Groww client features may not work.")
 
     bot = BotListener()
     _bot = bot

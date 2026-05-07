@@ -30,21 +30,21 @@ class QueueManager:
     # Pending entries (LTP queue)
     # ------------------------------------------------------------------
 
-    def load_entries(self) -> list[dict]:
-        return db.get_pending_entries()
+    def load_entries(self, *, account_id: str) -> list[dict]:
+        return db.get_pending_entries(account_id=str(account_id))
 
-    def save_entries(self, items: list[dict]) -> None:
-        db.replace_pending_entries(items)
+    def save_entries(self, items: list[dict]), *, account_id: str) -> None:
+        db.replace_pending_entries(items, account_id=str(account_id))
 
-    def append_entry(self, item: dict) -> None:
-        items = self.load_entries()
+    def append_entry(self, item: dict, *, account_id: str) -> None:
+        items = self.load_entries(account_id=account_id)
         items.append(item)
-        self.save_entries(items)
+        self.save_entries(items, account_id=account_id)
 
-    def clear_entries(self) -> int:
-        items = self.load_entries()
+    def clear_entries(self, *, account_id: str) -> int:
+        items = self.load_entries(account_id=account_id)
         count = len(items)
-        self.save_entries([])
+        self.save_entries([], account_id=account_id)
         logger.info("QueueManager: cleared %d pending entry item(s).", count)
         return count
 
@@ -52,16 +52,16 @@ class QueueManager:
     # Pending management queue (EXIT/TRAIL/etc retries)
     # ------------------------------------------------------------------
 
-    def load_management(self) -> list[dict]:
-        return db.get_pending_management()
+    def load_management(self, *, account_id: str) -> list[dict]:
+        return db.get_pending_management(account_id=str(account_id))
 
-    def save_management(self, items: list[dict]) -> None:
-        db.replace_pending_management(items)
+    def save_management(self, items: list[dict], *, account_id: str) -> None:
+        db.replace_pending_management(items, account_id=str(account_id))
 
-    def append_management(self, item: dict) -> None:
-        items = self.load_management()
+    def append_management(self, item: dict, *, account_id: str) -> None:
+        items = self.load_management(account_id=account_id)
         items.append(item)
-        self.save_management(items)
+        self.save_management(items, account_id=account_id)
 
     def build_management_item(
         self,
@@ -94,9 +94,10 @@ class QueueManager:
         payload: dict,
         reason: str,
         priority: int = 5,
+        account_id: str,
     ) -> None:
         """Add a management action to the retry queue (idempotent by dedupe_key)."""
-        items = self.load_management()
+        items = self.load_management(account_id=account_id)
         dedupe_key = f"{symbol}:{action}"
         if any(i.get("dedupe_key") == dedupe_key for i in items):
             logger.debug(
@@ -108,7 +109,7 @@ class QueueManager:
             reason=reason, priority=priority,
         )
         items.append(item)
-        self.save_management(items)
+        self.save_management(items, account_id=account_id)
         logger.info("QueueManager: enqueued %s %s (reason: %s)", action, symbol, reason)
 
 

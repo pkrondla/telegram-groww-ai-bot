@@ -38,7 +38,7 @@ class SymbolManager:
     # Public API
     # ------------------------------------------------------------------
 
-    def refresh(self, trader=None) -> None:
+    def refresh(self, traders: list | None = None) -> None:
         """
         Called once on bot startup.
         Downloads fresh data if cache is stale; otherwise loads from cache.
@@ -49,7 +49,7 @@ class SymbolManager:
             return
 
         logger.info("SymbolManager: refreshing symbol list from Groww instruments...")
-        symbols = self._download_symbols(trader)
+        symbols = self._download_symbols(traders or [])
 
         if not symbols:
             logger.warning("SymbolManager: download failed, falling back to existing cache.")
@@ -144,13 +144,15 @@ class SymbolManager:
     # Download
     # ------------------------------------------------------------------
 
-    def _download_symbols(self, trader=None) -> list[str]:
+    def _download_symbols(self, traders: list) -> list[str]:
         """
         Try Groww API first (via trader client), then fall back to packaged CSV.
         Returns list of unique underlying_symbol strings for FNO segment.
         """
-        # Try via trader's Groww client
-        if trader is not None and getattr(trader, "client", None) is not None:
+        # Try via any trader's Groww client
+        for trader in (traders or []):
+            if trader is None or getattr(trader, "client", None) is None:
+                continue
             try:
                 instruments = trader.client.get_all_instruments()
                 if instruments is not None:

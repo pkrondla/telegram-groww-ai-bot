@@ -25,8 +25,6 @@ class Config:
     OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 
     # Groww
-    GROWW_API_KEY = os.getenv("GROWW_API_KEY")
-    GROWW_API_SECRET = os.getenv("GROWW_API_SECRET")
     GROWW_ACCOUNTS_JSON = os.getenv("GROWW_ACCOUNTS_JSON", "").strip()
 
     # Required at startup — bot will not start if any of these are missing.
@@ -144,25 +142,16 @@ class Config:
     @classmethod
     def groww_accounts(cls) -> list[AccountConfig]:
         """
-        Multi-account resolution with backward compatibility:
-        - Prefer GROWW_ACCOUNTS_JSON when provided.
-        - Fallback to legacy single-account env vars mapped to account_id='primary'.
+        Multi-account resolution (strict):
+        - GROWW_ACCOUNTS_JSON must be provided and must contain at least one enabled account with api_key.
         """
-        if cls.GROWW_ACCOUNTS_JSON:
-            accounts = parse_accounts_json(cls.GROWW_ACCOUNTS_JSON)
-            if not accounts:
-                raise ValueError("GROWW_ACCOUNTS_JSON is set but no accounts were parsed.")
-            return accounts
-
-        return [
-            AccountConfig(
-                account_id="primary",
-                display_name="Primary Groww",
-                enabled=True,
-                api_key=str(cls.GROWW_API_KEY or "").strip(),
-                api_secret=str(cls.GROWW_API_SECRET or "").strip(),
-                dry_run=bool(cls.DRY_RUN),
-                overrides={},
-            )
-        ]
+        if not cls.GROWW_ACCOUNTS_JSON:
+            raise ValueError("Missing GROWW_ACCOUNTS_JSON (multi-account mode is required).")
+        accounts = parse_accounts_json(cls.GROWW_ACCOUNTS_JSON)
+        enabled = [a for a in accounts if a.enabled]
+        if not enabled:
+            raise ValueError("GROWW_ACCOUNTS_JSON has no enabled accounts.")
+        if not any(str(a.api_key or "").strip() for a in enabled):
+            raise ValueError("GROWW_ACCOUNTS_JSON enabled accounts missing api_key.")
+        return accounts
 

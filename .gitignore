@@ -31,6 +31,9 @@ session_name.session
 session_name.session-journal
 *.session
 *.session-journal
+trading_bot.db
+trading_bot.db-shm
+trading_bot.db-wal
 logs/
 completed_trades/
 active_trades.json

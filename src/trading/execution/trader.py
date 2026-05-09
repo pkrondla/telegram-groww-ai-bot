@@ -11,10 +11,10 @@ import threading
 import datetime
 import math
 import pytz
-from .config import Config
-from .metrics import metrics
-from .db import db
-from .logger import logger as app_logger
+from src.core.config import Config
+from src.core.metrics import metrics
+from src.persistence.db import db
+from src.core.logger import logger as app_logger
 
 logger = logging.getLogger(__name__)
 
@@ -1092,46 +1092,74 @@ class Trader:
             )
             if widened is not None and widened > 0:
                 broker_sl = float(widened)
-
-        active_legs = [l for l in self._sorted_oco_legs(rec_norm) if str(l.get("status") or "").upper() == "ACTIVE"]
-        if not active_legs:
-            raw_tgt = float(self._num_or(rec_norm.get("target"), 0.0))
-            if raw_tgt <= 0:
-                return False, None
-            active_legs = [
-                {
-                    "target_index": 1,
-                    "target_signal": raw_tgt,
-                    "qty": int(qty),
-                    "status": "ACTIVE",
-                }
-            ]
-
-        base_sum = sum(max(0, int(self._num_or(l.get("qty"), 0))) for l in active_legs)
-        if base_sum <= 0:
-            base_sum = len(active_legs)
-            for l in active_legs:
-                l["qty"] = 1
-        rebuilt_plan: list[dict] = []
-        used = 0
-        for i, leg in enumerate(active_legs):
-            base_q = max(1, int(self._num_or(leg.get("qty"), 1)))
-            if i == len(active_legs) - 1:
-                alloc = max(0, int(qty - used))
-            else:
-                alloc = int(math.floor((qty * base_q) / float(base_sum)))
-                if qty >= len(active_legs):
-                    alloc = max(1, alloc)
-            used += alloc
-            if alloc <= 0:
-                continue
-            rebuilt_plan.append(
-                {
-                    "qty": int(alloc),
-                    "target_index": int(self._num_or(leg.get("target_index"), i + 1)),
-                    "target_signal": float(self._num_or(leg.get("target_signal"), rec_norm.get("target"))),
-                }
+        broker_sl = self._round_price_to_tick(broker_sl, mode="nearest")
+        if broker_sl <= 0:
+            logger.warning(
+                f"[REARM] Skip {symbol}: invalid broker SL after tick-rounding "
+                f"(raw_true_sl={raw_true_sl}, rounded={broker_sl})."
             )
+            return (
+                False,
+                f"⚠️ OCO re-arm skipped for {symbol}: invalid SL after tick-rounding (sl_true={raw_true_sl}).",
+            )
+
+        remaining_plan = self._remaining_plan_legs_for_open_qty(rec_norm, qty)
+        rebuilt_plan: list[dict] = []
+        if remaining_plan:
+            for i, leg in enumerate(remaining_plan):
+                rebuilt_plan.append(
+                    {
+                        "logical_leg_id": str(leg.get("logical_leg_id") or f"L{i+1}"),
+                        "qty": int(self._num_or(leg.get("allocated_qty"), 0)),
+                        "target_index": int(self._num_or(leg.get("target_index"), i + 1)),
+                        "target_signal": float(
+                            self._num_or(
+                                leg.get("target_signal_current"),
+                                leg.get("target_signal_original"),
+                            )
+                        ),
+                    }
+                )
+        else:
+            # Fallback only when no durable plan exists (legacy rows).
+            active_legs = [l for l in self._sorted_oco_legs(rec_norm) if str(l.get("status") or "").upper() == "ACTIVE"]
+            if not active_legs:
+                raw_tgt = float(self._num_or(rec_norm.get("target"), 0.0))
+                if raw_tgt <= 0:
+                    return False, None
+                active_legs = [
+                    {
+                        "target_index": 1,
+                        "target_signal": raw_tgt,
+                        "qty": int(qty),
+                        "status": "ACTIVE",
+                    }
+                ]
+            base_sum = sum(max(0, int(self._num_or(l.get("qty"), 0))) for l in active_legs)
+            if base_sum <= 0:
+                base_sum = len(active_legs)
+                for l in active_legs:
+                    l["qty"] = 1
+            used = 0
+            for i, leg in enumerate(active_legs):
+                base_q = max(1, int(self._num_or(leg.get("qty"), 1)))
+                if i == len(active_legs) - 1:
+                    alloc = max(0, int(qty - used))
+                else:
+                    alloc = int(math.floor((qty * base_q) / float(base_sum)))
+                    if qty >= len(active_legs):
+                        alloc = max(1, alloc)
+                used += alloc
+                if alloc <= 0:
+                    continue
+                rebuilt_plan.append(
+                    {
+                        "logical_leg_id": f"L{int(self._num_or(leg.get('target_index'), i + 1))}",
+                        "qty": int(alloc),
+                        "target_index": int(self._num_or(leg.get("target_index"), i + 1)),
+                        "target_signal": float(self._num_or(leg.get("target_signal"), rec_norm.get("target"))),
+                    }
+                )
         if not rebuilt_plan:
             return False, None
 
@@ -1229,6 +1257,14 @@ class Trader:
             eff_tgt = self._take_profit_order_price(raw_tgt)
             if eff_tgt <= 0:
                 continue
+            leg_target = self._round_price_to_tick(eff_tgt, mode="down")
+            leg_sl = self._round_price_to_tick(broker_sl, mode="nearest")
+            if leg_target <= 0 or leg_sl <= 0:
+                logger.warning(
+                    f"[REARM] Skip OCO leg create for {symbol}: invalid rounded prices "
+                    f"(target={leg_target}, sl={leg_sl}, raw_target={raw_tgt}, raw_sl={broker_sl})."
+                )
+                continue
             def _create_rearm_leg(ref: str):
                 resp = self.client.create_smart_order(
                     smart_order_type=self.client.SMART_ORDER_TYPE_OCO,
@@ -1242,18 +1278,18 @@ class Trader:
                     exchange=exchange,
                     duration="DAY",
                     target={
-                        "trigger_price": eff_tgt,
+                        "trigger_price": float(leg_target),
                         "price": None,
                         "order_type": "MARKET",
                     },
                     stop_loss={
-                        "trigger_price": float(broker_sl),
-                        "price": float(broker_sl),
+                        "trigger_price": float(leg_sl),
+                        "price": float(leg_sl),
                         "order_type": "SL",
                     },
                 )
                 logger.info(
-                    f"[REARM] OCO create response {symbol}: ref={ref} target={eff_tgt} sl={broker_sl} "
+                    f"[REARM] OCO create response {symbol}: ref={ref} target={leg_target} sl={leg_sl} "
                     f"resp={(str(resp) or '')[:800]}"
                 )
                 sid = self._extract_smart_order_id(resp, fallback=ref)
@@ -1269,7 +1305,7 @@ class Trader:
             rearm_ref = str(uuid.uuid4())[:15]
             logger.info(
                 f"[REARM] Creating OCO for {symbol}: qty={leg['qty']}, sl_true={raw_true_sl}, "
-                f"broker_sl={broker_sl}, target(signal={raw_tgt}, broker={eff_tgt})"
+                f"broker_sl={leg_sl}, target(signal={raw_tgt}, broker={leg_target})"
             )
             try:
                 new_id, target_order_id, stop_order_id, has_target, has_stop = _create_rearm_leg(rearm_ref)
@@ -1320,10 +1356,11 @@ class Trader:
 
             created_legs.append(
                 {
+                    "logical_leg_id": str(leg.get("logical_leg_id") or f"L{int(leg.get('target_index') or 1)}"),
                     "smart_order_id": str(new_id or ""),
                     "qty": int(leg["qty"]),
                     "target_signal": float(raw_tgt),
-                    "target_broker": float(eff_tgt),
+                    "target_broker": float(leg_target),
                     "target_index": int(leg.get("target_index") or 1),
                     "status": (
                         "ACTIVE"
@@ -1336,6 +1373,28 @@ class Trader:
             )
         if not created_legs:
             return False, f"⚠️ OCO re-arm skipped for {symbol}: no valid active target legs to re-arm."
+        protection_plan_legs: list[dict] = []
+        for leg in created_legs:
+            logical_leg_id = str(leg.get("logical_leg_id") or f"L{int(leg.get('target_index') or 1)}")
+            protection_plan_legs.append(
+                {
+                    "logical_leg_id": logical_leg_id,
+                    "target_index": int(self._num_or(leg.get("target_index"), 0)),
+                    "allocated_qty": int(self._num_or(leg.get("qty"), 0)),
+                    "target_signal_original": float(self._num_or(leg.get("target_signal"), 0.0)),
+                    "target_signal_current": float(self._num_or(leg.get("target_signal"), 0.0)),
+                    "target_broker_current": float(self._num_or(leg.get("target_broker"), 0.0)),
+                    "sl_true_current": float(raw_true_sl),
+                    "leg_state": (
+                        "ACTIVE"
+                        if str(leg.get("status") or "").upper() in ("ACTIVE", "TARGET_ONLY", "SL_ONLY")
+                        else str(leg.get("status") or "STALE").upper()
+                    ),
+                    "current_smart_order_id": str(leg.get("smart_order_id") or ""),
+                    "prior_smart_order_ids": [],
+                    "last_broker_sync_at": self._now_ist_iso(),
+                }
+            )
         new_id = str(created_legs[0].get("smart_order_id") or "")
         self._save_active_trade(
             symbol,
@@ -1345,6 +1404,7 @@ class Trader:
             sl_progress_stage=str(rec_norm.get("sl_progress_stage") or "NONE"),
             signal_targets=rec_norm.get("signal_targets"),
             oco_legs=created_legs,
+            protection_plan_legs=protection_plan_legs,
         )
         self._update_active_trade_levels(
             symbol,
@@ -1520,6 +1580,9 @@ class Trader:
         if qty <= 0:
             return 0
         rec_norm = self._normalize_active_trade_record(rec or {})
+        planned_remaining = self._remaining_plan_legs_for_open_qty(rec_norm, qty)
+        if planned_remaining:
+            return len([p for p in planned_remaining if int(self._num_or(p.get("allocated_qty"), 0)) > 0])
         raw_targets = rec_norm.get("signal_targets")
         signal_targets: list[float] = []
         if isinstance(raw_targets, list):
@@ -1625,6 +1688,50 @@ class Trader:
             return rec_norm
         live = self._normalize_active_trade_record(trades.get(symbol))
         live["oco_legs"] = synced_legs
+        # Keep persistent logical-leg plan as source-of-truth and refresh broker mapping.
+        plan_legs = self._sorted_protection_plan_legs(live)
+        if plan_legs:
+            plan_by_idx = {int(self._num_or(leg.get("target_index"), 0)): dict(leg) for leg in plan_legs}
+            for leg in synced_legs:
+                idx = int(self._num_or(leg.get("target_index"), 0))
+                if idx <= 0:
+                    continue
+                row = plan_by_idx.get(idx) or {
+                    "logical_leg_id": f"L{idx}",
+                    "target_index": idx,
+                    "allocated_qty": int(self._num_or(leg.get("qty"), 0)),
+                    "target_signal_original": float(self._num_or(leg.get("target_signal"), 0.0)),
+                    "target_signal_current": float(self._num_or(leg.get("target_signal"), 0.0)),
+                    "target_broker_current": float(self._num_or(leg.get("target_broker"), 0.0)),
+                    "sl_true_current": float(self._num_or(live.get("sl_true"), live.get("stop_loss"))),
+                    "leg_state": "ACTIVE",
+                    "current_smart_order_id": "",
+                    "prior_smart_order_ids": [],
+                    "last_broker_sync_at": "",
+                }
+                prev_id = str(row.get("current_smart_order_id") or "")
+                new_id = str(leg.get("smart_order_id") or "")
+                if prev_id and new_id and prev_id != new_id:
+                    prev_ids = row.get("prior_smart_order_ids") if isinstance(row.get("prior_smart_order_ids"), list) else []
+                    if prev_id not in prev_ids:
+                        prev_ids.append(prev_id)
+                    row["prior_smart_order_ids"] = prev_ids
+                row["current_smart_order_id"] = new_id
+                row["allocated_qty"] = int(self._num_or(leg.get("qty"), row.get("allocated_qty")))
+                row["target_signal_current"] = float(self._num_or(leg.get("target_signal"), row.get("target_signal_current")))
+                row["target_broker_current"] = float(self._num_or(leg.get("target_broker"), row.get("target_broker_current")))
+                st = str(leg.get("status") or "").upper()
+                if st == "FILLED":
+                    row["leg_state"] = "FILLED"
+                elif st in ("STALE", "BROKEN"):
+                    row["leg_state"] = "STALE"
+                else:
+                    row["leg_state"] = "ACTIVE"
+                row["last_broker_sync_at"] = self._now_ist_iso()
+                plan_by_idx[idx] = row
+            live["protection_plan_legs"] = sorted(plan_by_idx.values(), key=lambda x: int(x.get("target_index") or 0))
+            live["protection_materialized_at"] = self._now_ist_iso()
+            live["protection_plan_version"] = max(1, int(self._num_or(live.get("protection_plan_version"), 1)))
         if synced_legs:
             live["smart_order_id"] = str(synced_legs[0].get("smart_order_id") or live.get("smart_order_id") or "")
         trades[symbol] = live
@@ -1747,11 +1854,13 @@ class Trader:
         retry = " +retry" if retried else ""
         detail_up = str(detail or "").upper()
         integrity_ok = "INTEGRITY=OK" in detail_up and "INTEGRITY_FAILED" not in detail_up
-        if success:
+        if success and ("RE-ARMED" in detail_up or "INTEGRITY_RETRY=OK" in detail_up):
             status = "✅"
         elif integrity_ok:
-            # Re-arm action may fail/skip while protection remains intact.
-            status = "⚠️"
+            # Re-arm action may skip because protection already remains intact.
+            status = "ℹ️"
+        elif success:
+            status = "✅"
         else:
             status = "❌"
         msg = f"{status} REARM[{source}] {symbol}: {mode}{retry}"
@@ -1789,6 +1898,16 @@ class Trader:
         force_reasons: list[str] = []
         if force_initial:
             force_reasons.append("manual_force")
+        integrity_ok_pre, integrity_reason_pre = self._reconcile_protection_legs(
+            symbol=symbol,
+            rec=rec_norm,
+            pos=pos,
+            source=source,
+            payload_cache=payload_cache,
+        )
+        if not integrity_ok_pre and not force_rearm:
+            force_rearm = True
+            force_reasons.append(f"reconcile:{integrity_reason_pre}")
 
         if rec_norm.get("smart_order_id") != self.DRY_RUN_PLACEHOLDER_ORDER_ID and not force_rearm:
             oco_ids = self._oco_ids_from_record(rec_norm)
@@ -1874,6 +1993,49 @@ class Trader:
             "success": bool(success),
             "primary_alert": str(alert or ""),
         }
+
+    def _reconcile_protection_legs(
+        self,
+        *,
+        symbol: str,
+        rec: dict,
+        pos: dict,
+        source: str,
+        payload_cache: dict[str, dict] | None = None,
+    ) -> tuple[bool, str]:
+        """
+        Deterministic integrity reconciler for protection legs.
+        Returns (ok, reason). When not ok, caller should trigger force re-arm.
+        """
+        open_qty = abs(self._position_quantity(pos or {}))
+        if open_qty <= 0:
+            return True, "no_open_qty"
+        rec_norm = self._normalize_active_trade_record(rec or {})
+        rec_norm = self._sync_oco_snapshot_from_broker(symbol, rec_norm, payload_cache=payload_cache)
+        expected = self._expected_oco_leg_count_for_open_qty(rec_norm, open_qty)
+        complete, reason = self._has_complete_oco_protection(
+            symbol,
+            rec_norm,
+            open_qty,
+            payload_cache=payload_cache,
+        )
+        if complete:
+            return True, f"integrity_ok(expected={expected})"
+        mode = str(getattr(Config, "OCO_PLAN_ENFORCEMENT_MODE", "ENFORCE") or "ENFORCE").upper().strip()
+        if mode == "SHADOW":
+            logger.warning(
+                f"[REARM] OCO plan integrity mismatch (shadow) for {symbol}: expected={expected}, reason={reason}"
+            )
+            return True, f"shadow_only(expected={expected}, reason={reason})"
+        # Keep state explicit for alerts/observability.
+        trades = self._load_active_trades()
+        if symbol in trades:
+            live = self._normalize_active_trade_record(trades.get(symbol))
+            live["protection_integrity"] = "DEGRADED"
+            live["protection_materialized_at"] = self._now_ist_iso()
+            trades[symbol] = live
+            self._save_all_trades(trades)
+        return False, f"{source}: expected={expected}, reason={reason}"
 
     def _run_scheduled_rearm_for_symbols(
         self,
@@ -2071,7 +2233,11 @@ class Trader:
                 primary_alert = str(result.get("primary_alert") or "")
                 attempted = bool(result.get("attempted"))
                 success = bool(result.get("success"))
-                if primary_alert and "already attached" in primary_alert.lower():
+                line_up = str(line or "").upper()
+                if (
+                    (primary_alert and "already attached" in primary_alert.lower())
+                    or ("INTEGRITY=OK" in line_up and "RE-ARMED" not in line_up)
+                ):
                     already += 1
                 elif primary_alert and not success:
                     failed += 1
@@ -2364,6 +2530,98 @@ class Trader:
                         inferred.append(t)
                 if inferred:
                     out["signal_targets"] = inferred[:3]
+            # Durable logical-leg protection plan (backward-compatible migration from oco_legs).
+            raw_plan_legs = out.get("protection_plan_legs")
+            norm_plan_legs: list[dict] = []
+            if isinstance(raw_plan_legs, list):
+                for i, item in enumerate(raw_plan_legs):
+                    if not isinstance(item, dict):
+                        continue
+                    logical_leg_id = str(item.get("logical_leg_id") or f"L{i+1}")
+                    try:
+                        alloc_qty = max(0, int(float(item.get("allocated_qty") or item.get("qty") or 0)))
+                    except Exception:
+                        alloc_qty = 0
+                    try:
+                        t_idx = int(float(item.get("target_index") or (i + 1)))
+                    except Exception:
+                        t_idx = i + 1
+                    try:
+                        ts_orig = float(item.get("target_signal_original") or item.get("target_signal") or 0.0)
+                    except Exception:
+                        ts_orig = 0.0
+                    try:
+                        ts_cur = float(item.get("target_signal_current") or ts_orig or 0.0)
+                    except Exception:
+                        ts_cur = ts_orig
+                    try:
+                        tb_cur = float(item.get("target_broker_current") or item.get("target_broker") or 0.0)
+                    except Exception:
+                        tb_cur = 0.0
+                    try:
+                        sl_cur = float(item.get("sl_true_current") or out.get("sl_true") or out.get("stop_loss") or 0.0)
+                    except Exception:
+                        sl_cur = 0.0
+                    leg_state = str(item.get("leg_state") or item.get("status") or "ACTIVE").upper().strip() or "ACTIVE"
+                    cur_sid = str(item.get("current_smart_order_id") or item.get("smart_order_id") or "")
+                    prev_ids = item.get("prior_smart_order_ids")
+                    norm_prev_ids: list[str] = []
+                    if isinstance(prev_ids, list):
+                        for pv in prev_ids:
+                            sid = str(pv or "").strip()
+                            if sid and sid not in norm_prev_ids:
+                                norm_prev_ids.append(sid)
+                    norm_plan_legs.append(
+                        {
+                            "logical_leg_id": logical_leg_id,
+                            "target_index": max(1, t_idx),
+                            "allocated_qty": alloc_qty,
+                            "target_signal_original": ts_orig,
+                            "target_signal_current": ts_cur if ts_cur > 0 else ts_orig,
+                            "target_broker_current": tb_cur,
+                            "sl_true_current": sl_cur,
+                            "leg_state": leg_state,
+                            "current_smart_order_id": cur_sid,
+                            "prior_smart_order_ids": norm_prev_ids,
+                            "last_broker_sync_at": str(item.get("last_broker_sync_at") or ""),
+                        }
+                    )
+            if not norm_plan_legs and norm_legs:
+                # Migration path: initialize logical plan from existing oco_legs.
+                for i, leg in enumerate(sorted(norm_legs, key=lambda x: int(x.get("target_index") or 0))):
+                    t_idx = int(leg.get("target_index") or (i + 1))
+                    status = str(leg.get("status") or "ACTIVE").upper().strip() or "ACTIVE"
+                    norm_plan_legs.append(
+                        {
+                            "logical_leg_id": f"L{t_idx}",
+                            "target_index": max(1, t_idx),
+                            "allocated_qty": max(0, int(leg.get("qty") or 0)),
+                            "target_signal_original": float(leg.get("target_signal") or 0.0),
+                            "target_signal_current": float(leg.get("target_signal") or 0.0),
+                            "target_broker_current": float(leg.get("target_broker") or 0.0),
+                            "sl_true_current": float(out.get("sl_true") or out.get("stop_loss") or 0.0),
+                            "leg_state": ("ACTIVE" if status in ("ACTIVE", "TARGET_ONLY", "SL_ONLY", "BROKEN", "STALE") else status),
+                            "current_smart_order_id": str(leg.get("smart_order_id") or ""),
+                            "prior_smart_order_ids": [],
+                            "last_broker_sync_at": "",
+                        }
+                    )
+            if norm_plan_legs:
+                norm_plan_legs.sort(key=lambda x: int(x.get("target_index") or 0))
+                out["protection_plan_legs"] = norm_plan_legs
+            if "protection_plan_version" in out:
+                try:
+                    out["protection_plan_version"] = max(1, int(float(out.get("protection_plan_version") or 1)))
+                except Exception:
+                    out["protection_plan_version"] = 1
+            elif norm_plan_legs:
+                out["protection_plan_version"] = 1
+            if "protection_integrity" in out and out.get("protection_integrity") is not None:
+                out["protection_integrity"] = str(out.get("protection_integrity") or "HEALTHY").upper().strip() or "HEALTHY"
+            elif norm_plan_legs:
+                out["protection_integrity"] = "HEALTHY"
+            if "protection_materialized_at" in out and out.get("protection_materialized_at") is not None:
+                out["protection_materialized_at"] = str(out.get("protection_materialized_at") or "")
             if "stop_loss" in out:
                 try:
                     out["stop_loss"] = float(out.get("stop_loss") or 0)
@@ -2519,6 +2777,7 @@ class Trader:
         oco_legs: list[dict] | None = None,
         signal_targets: list[float] | None = None,
         sl_progress_stage: str | None = None,
+        protection_plan_legs: list[dict] | None = None,
     ):
         trades = self._load_active_trades()
         current = self._normalize_active_trade_record(trades.get(symbol))
@@ -2581,6 +2840,92 @@ class Trader:
                 )
             if current.get("oco_legs") and not current.get("smart_order_id"):
                 current["smart_order_id"] = str(current["oco_legs"][0].get("smart_order_id") or "")
+            if protection_plan_legs is None and current.get("oco_legs"):
+                inferred_plan: list[dict] = []
+                for i, leg in enumerate(self._sorted_oco_legs(current)):
+                    t_idx = int(self._num_or(leg.get("target_index"), i + 1))
+                    inferred_plan.append(
+                        {
+                            "logical_leg_id": f"L{t_idx}",
+                            "target_index": t_idx,
+                            "allocated_qty": int(self._num_or(leg.get("qty"), 0)),
+                            "target_signal_original": float(self._num_or(leg.get("target_signal"), 0.0)),
+                            "target_signal_current": float(self._num_or(leg.get("target_signal"), 0.0)),
+                            "target_broker_current": float(self._num_or(leg.get("target_broker"), 0.0)),
+                            "sl_true_current": float(self._num_or(current.get("sl_true"), current.get("stop_loss"))),
+                            "leg_state": (
+                                "FILLED"
+                                if str(leg.get("status") or "").upper() == "FILLED"
+                                else "ACTIVE"
+                            ),
+                            "current_smart_order_id": str(leg.get("smart_order_id") or ""),
+                            "prior_smart_order_ids": [],
+                            "last_broker_sync_at": "",
+                        }
+                    )
+                current["protection_plan_legs"] = inferred_plan
+                current["protection_plan_version"] = max(1, int(self._num_or(current.get("protection_plan_version"), 1)))
+                current["protection_integrity"] = str(current.get("protection_integrity") or "HEALTHY").upper()
+        if protection_plan_legs is not None:
+            norm_plan_legs: list[dict] = []
+            for i, leg in enumerate(protection_plan_legs):
+                if not isinstance(leg, dict):
+                    continue
+                logical_leg_id = str(leg.get("logical_leg_id") or f"L{i+1}")
+                try:
+                    t_idx = int(float(leg.get("target_index") or (i + 1)))
+                except Exception:
+                    t_idx = i + 1
+                try:
+                    alloc_qty = max(0, int(float(leg.get("allocated_qty") or leg.get("qty") or 0)))
+                except Exception:
+                    alloc_qty = 0
+                try:
+                    ts_orig = float(leg.get("target_signal_original") or leg.get("target_signal") or 0.0)
+                except Exception:
+                    ts_orig = 0.0
+                try:
+                    ts_cur = float(leg.get("target_signal_current") or ts_orig or 0.0)
+                except Exception:
+                    ts_cur = ts_orig
+                try:
+                    tb_cur = float(leg.get("target_broker_current") or leg.get("target_broker") or 0.0)
+                except Exception:
+                    tb_cur = 0.0
+                try:
+                    sl_cur = float(leg.get("sl_true_current") or current.get("sl_true") or current.get("stop_loss") or 0.0)
+                except Exception:
+                    sl_cur = 0.0
+                leg_state = str(leg.get("leg_state") or leg.get("status") or "ACTIVE").upper().strip() or "ACTIVE"
+                cur_sid = str(leg.get("current_smart_order_id") or leg.get("smart_order_id") or "")
+                prev_ids = leg.get("prior_smart_order_ids")
+                norm_prev_ids: list[str] = []
+                if isinstance(prev_ids, list):
+                    for pv in prev_ids:
+                        sid = str(pv or "").strip()
+                        if sid and sid not in norm_prev_ids:
+                            norm_prev_ids.append(sid)
+                norm_plan_legs.append(
+                    {
+                        "logical_leg_id": logical_leg_id,
+                        "target_index": max(1, t_idx),
+                        "allocated_qty": alloc_qty,
+                        "target_signal_original": ts_orig,
+                        "target_signal_current": ts_cur if ts_cur > 0 else ts_orig,
+                        "target_broker_current": tb_cur,
+                        "sl_true_current": sl_cur,
+                        "leg_state": leg_state,
+                        "current_smart_order_id": cur_sid,
+                        "prior_smart_order_ids": norm_prev_ids,
+                        "last_broker_sync_at": str(leg.get("last_broker_sync_at") or ""),
+                    }
+                )
+            norm_plan_legs.sort(key=lambda x: int(x.get("target_index") or 0))
+            current["protection_plan_legs"] = norm_plan_legs
+            if norm_plan_legs:
+                current["protection_plan_version"] = max(1, int(self._num_or(current.get("protection_plan_version"), 1)))
+                current["protection_integrity"] = str(current.get("protection_integrity") or "HEALTHY").upper()
+                current["protection_materialized_at"] = self._now_ist_iso()
         if oid and oid != self.DRY_RUN_PLACEHOLDER_ORDER_ID:
             current["protection_armed_date"] = self._today_ist_iso()
         trades[symbol] = current
@@ -2638,6 +2983,73 @@ class Trader:
             out.append(row)
         out.sort(key=lambda x: int(x.get("target_index") or 0))
         return out
+
+    @staticmethod
+    def _sorted_protection_plan_legs(rec: dict | None) -> list[dict]:
+        legs = (rec or {}).get("protection_plan_legs")
+        out: list[dict] = []
+        if not isinstance(legs, list):
+            return out
+        for i, leg in enumerate(legs):
+            if not isinstance(leg, dict):
+                continue
+            row = dict(leg)
+            try:
+                row["target_index"] = int(float(row.get("target_index") or (i + 1)))
+            except Exception:
+                row["target_index"] = i + 1
+            try:
+                row["allocated_qty"] = max(0, int(float(row.get("allocated_qty") or row.get("qty") or 0)))
+            except Exception:
+                row["allocated_qty"] = 0
+            row["logical_leg_id"] = str(row.get("logical_leg_id") or f"L{row['target_index']}")
+            row["leg_state"] = str(row.get("leg_state") or row.get("status") or "ACTIVE").upper().strip() or "ACTIVE"
+            row["current_smart_order_id"] = str(row.get("current_smart_order_id") or row.get("smart_order_id") or "")
+            out.append(row)
+        out.sort(key=lambda x: int(x.get("target_index") or 0))
+        return out
+
+    def _remaining_plan_legs_for_open_qty(self, rec: dict, open_qty: int) -> list[dict]:
+        """
+        Source-of-truth remaining logical legs.
+        Uses persisted protection plan when available; falls back to ACTIVE oco_legs.
+        """
+        qty = int(abs(open_qty or 0))
+        if qty <= 0:
+            return []
+        rec_norm = self._normalize_active_trade_record(rec or {})
+        plan_legs = self._sorted_protection_plan_legs(rec_norm)
+        if not plan_legs:
+            return []
+        candidates = [
+            dict(leg)
+            for leg in plan_legs
+            if str(leg.get("leg_state") or "").upper() not in ("FILLED", "CANCELLED")
+        ]
+        if not candidates:
+            return []
+
+        base_sum = sum(max(0, int(self._num_or(l.get("allocated_qty"), 0))) for l in candidates)
+        if base_sum <= 0:
+            base_sum = len(candidates)
+            for leg in candidates:
+                leg["allocated_qty"] = 1
+        rebuilt: list[dict] = []
+        used = 0
+        for i, leg in enumerate(candidates):
+            base_q = max(1, int(self._num_or(leg.get("allocated_qty"), 1)))
+            if i == len(candidates) - 1:
+                alloc = max(0, int(qty - used))
+            else:
+                alloc = int(math.floor((qty * base_q) / float(base_sum)))
+                if qty >= len(candidates):
+                    alloc = max(1, alloc)
+            used += alloc
+            if alloc <= 0:
+                continue
+            leg["allocated_qty"] = int(alloc)
+            rebuilt.append(leg)
+        return rebuilt
 
     @classmethod
     def _derive_progression_sl_true(cls, rec: dict, hit_stage: str) -> float:
@@ -2804,8 +3216,26 @@ class Trader:
                 for leg in rec["oco_legs"]:
                     if isinstance(leg, dict):
                         leg["target_signal"] = float(target)
+            if isinstance(rec.get("protection_plan_legs"), list):
+                for leg in rec["protection_plan_legs"]:
+                    if not isinstance(leg, dict):
+                        continue
+                    state = str(leg.get("leg_state") or "").upper()
+                    if state in ("FILLED", "CANCELLED"):
+                        continue
+                    leg["target_signal_current"] = float(target)
+                    if float(self._num_or(leg.get("target_signal_original"), 0.0)) <= 0:
+                        leg["target_signal_original"] = float(target)
         if sl_true is not None:
             rec["sl_true"] = float(sl_true)
+            if isinstance(rec.get("protection_plan_legs"), list):
+                for leg in rec["protection_plan_legs"]:
+                    if not isinstance(leg, dict):
+                        continue
+                    state = str(leg.get("leg_state") or "").upper()
+                    if state in ("FILLED", "CANCELLED"):
+                        continue
+                    leg["sl_true_current"] = float(sl_true)
         if sl_widened is not None:
             if float(sl_widened) <= 0:
                 rec.pop("sl_widened", None)
@@ -2825,6 +3255,9 @@ class Trader:
             rec["vol_sl_widen_done_for"] = str(vol_sl_widen_done_for or "").strip()
         if vol_sl_restore_done_for is not None:
             rec["vol_sl_restore_done_for"] = str(vol_sl_restore_done_for or "").strip()
+        if isinstance(rec.get("protection_plan_legs"), list):
+            rec["protection_plan_version"] = max(1, int(self._num_or(rec.get("protection_plan_version"), 1))) + 1
+            rec["protection_materialized_at"] = self._now_ist_iso()
         trades[symbol] = rec
         self._save_all_trades(trades)
 
@@ -4436,6 +4869,9 @@ class Trader:
             "mode": "risk",
             "reason": "",
             "risk_budget_inr": 0.0,
+            "per_trade_budget_inr": 0.0,
+            "portfolio_budget_inr": 0.0,
+            "remaining_portfolio_budget_inr": 0.0,
             "risk_per_lot_inr": 0.0,
             "open_portfolio_risk_inr": 0.0,
             "entry_ref": 0.0,
@@ -4465,6 +4901,9 @@ class Trader:
         open_risk = self._open_portfolio_risk_inr()
         remaining = max(portfolio_budget - open_risk, 0.0)
         effective_budget = min(per_trade_budget, remaining)
+        diag["per_trade_budget_inr"] = per_trade_budget
+        diag["portfolio_budget_inr"] = portfolio_budget
+        diag["remaining_portfolio_budget_inr"] = remaining
 
         risk_per_lot = (entry_ref - sl) * float(lot_size)
         if risk_per_lot <= 0 or effective_budget <= 0:
@@ -4763,10 +5202,11 @@ class Trader:
             verify_payload = self._get_oco_order_payload(str(smart_order_id or ""))
             target_order_id, stop_order_id = self._extract_oco_leg_child_order_ids(verify_payload)
             has_target = self._oco_payload_has_target(verify_payload)
-            if not has_target:
+            has_stop = self._oco_payload_has_stop(verify_payload)
+            if not (has_target and has_stop):
                 logger.warning(
-                    f"OCO leg verify failed (target missing) for {symbol} id={smart_order_id}. "
-                    "Retrying with MARKET target leg."
+                    f"OCO leg verify failed for {symbol} id={smart_order_id} "
+                    f"(target={has_target}, stop={has_stop}). Retrying once."
                 )
                 # Cancel potentially partial SL-only protection before re-create.
                 try:
@@ -4809,27 +5249,55 @@ class Trader:
                 verify_payload = self._get_oco_order_payload(str(smart_order_id or ""))
                 target_order_id, stop_order_id = self._extract_oco_leg_child_order_ids(verify_payload)
                 has_target = self._oco_payload_has_target(verify_payload)
-                if not has_target:
+                has_stop = self._oco_payload_has_stop(verify_payload)
+                if not (has_target and has_stop):
                     warn = (
-                        f"Target leg missing on broker for {symbol} leg T{int(leg.get('target_index') or 1)} "
-                        f"after create+retry."
+                        f"OCO leg incomplete on broker for {symbol} leg T{int(leg.get('target_index') or 1)} "
+                        f"after create+retry (target={has_target}, stop={has_stop})."
                     )
                     logger.error(f"[STAGE 4] {warn}")
                     oco_warnings.append(warn)
             created_legs.append(
                 {
+                    "logical_leg_id": f"L{int(leg.get('target_index') or (len(created_legs) + 1))}",
                     "smart_order_id": str(smart_order_id or ""),
                     "qty": leg_qty,
                     "target_signal": leg_tgt_signal,
                     "target_broker": eff_tgt,
                     "target_index": int(leg.get("target_index") or 0),
-                    "status": ("ACTIVE" if has_target else "SL_ONLY"),
+                    "status": (
+                        "ACTIVE"
+                        if (has_target and has_stop)
+                        else ("TARGET_ONLY" if has_target else "SL_ONLY" if has_stop else "BROKEN")
+                    ),
                     "target_order_id": str(target_order_id or ""),
                     "stop_order_id": str(stop_order_id or ""),
                 }
             )
 
         primary_order_id = str(created_legs[0]["smart_order_id"])
+        protection_plan_legs: list[dict] = []
+        for leg in created_legs:
+            logical_leg_id = str(leg.get("logical_leg_id") or f"L{int(leg.get('target_index') or 1)}")
+            protection_plan_legs.append(
+                {
+                    "logical_leg_id": logical_leg_id,
+                    "target_index": int(self._num_or(leg.get("target_index"), 0)),
+                    "allocated_qty": int(self._num_or(leg.get("qty"), 0)),
+                    "target_signal_original": float(self._num_or(leg.get("target_signal"), 0.0)),
+                    "target_signal_current": float(self._num_or(leg.get("target_signal"), 0.0)),
+                    "target_broker_current": float(self._num_or(leg.get("target_broker"), 0.0)),
+                    "sl_true_current": float(self._num_or(trade_data.get("stop_loss"), 0.0)),
+                    "leg_state": (
+                        "ACTIVE"
+                        if str(leg.get("status") or "").upper() in ("ACTIVE", "TARGET_ONLY", "SL_ONLY")
+                        else str(leg.get("status") or "STALE").upper()
+                    ),
+                    "current_smart_order_id": str(leg.get("smart_order_id") or ""),
+                    "prior_smart_order_ids": [],
+                    "last_broker_sync_at": self._now_ist_iso(),
+                }
+            )
         self._save_active_trade(
             symbol,
             primary_order_id,
@@ -4845,7 +5313,32 @@ class Trader:
             oco_legs=created_legs,
             signal_targets=list(signal_targets or []),
             sl_progress_stage="NONE",
+            protection_plan_legs=protection_plan_legs,
         )
+        # If broker accepted entry but protection is partial, immediately force a full
+        # re-arm so the position ends up with complete multi-target OCO legs.
+        all_legs_complete = all(str(l.get("status") or "").upper() == "ACTIVE" for l in created_legs)
+        if not all_legs_complete:
+            pos, pos_qty = self._get_open_position_for_symbol(symbol)
+            if pos_qty > 0:
+                try:
+                    rec_now = self._get_active_trade_record(symbol) or {}
+                    rec_now["protection_armed_date"] = ""
+                    repaired, repair_alert = self._rearm_oco_for_open_position(
+                        symbol, rec_now, pos or {}, force=True
+                    )
+                    if repaired:
+                        refreshed = self._get_active_trade_record(symbol) or {}
+                        created_legs = self._sorted_oco_legs(refreshed)
+                        oco_warnings.append("Initial OCO attach was partial; auto re-arm completed.")
+                    elif repair_alert:
+                        oco_warnings.append(str(repair_alert))
+                except Exception as e:
+                    oco_warnings.append(f"Auto re-arm after partial OCO attach failed: {e}")
+            else:
+                oco_warnings.append(
+                    f"Initial OCO attach partial for {symbol}; position not yet visible for immediate re-arm."
+                )
         try:
             entry_basis = float(entry_avg_price or 0.0)
         except (TypeError, ValueError):
@@ -4983,13 +5476,7 @@ class Trader:
             entry_avg_price=float(fill.get("avg_price") or 0.0),
         )
         if oco_line:
-            sizing_mode = str(trade_data.get("sizing_mode_used") or "").upper() or "FIXED"
-            override_reason = str(trade_data.get("size_override_reason") or "").strip()
-            sizing_line = (
-                f"📦 Sizing: {sizing_mode}"
-                + (f" (override: {override_reason})" if override_reason else "")
-                + f", qty={quantity}"
-            )
+            sizing_line = self._sizing_line(trade_data, qty=int(quantity))
             rr_line = self._risk_reward_line(trade_data, qty=quantity, entry_ref=float(ltp or 0.0))
             return f"✅ SUCCESS: {action} {symbol} @ {ltp}.\n{sizing_line}\n{oco_line}\n{rr_line}"
         # More explicit operator message for why OCO wasn't attached.
@@ -5071,7 +5558,11 @@ class Trader:
                 entry_ref=float(fill.get("avg_price") or ltp or 0.0),
             )
             if oco_line:
-                return f"✅ LIMIT BUY filled {symbol} @ ~{ltp}. {oco_line}\n{rr_line}"
+                sizing_line = self._sizing_line(
+                    trade_data,
+                    qty=int(fill.get("filled_qty") or trade_data.get("quantity") or 0),
+                )
+                return f"✅ LIMIT BUY filled {symbol} @ ~{ltp}.\n{sizing_line}\n{oco_line}\n{rr_line}"
             return f"✅ LIMIT BUY filled {symbol} @ ~{ltp}. (No OCO.)"
         return f"✅ LIMIT {action} filled {symbol} @ ~{ltp}."
 
@@ -5536,11 +6027,35 @@ class Trader:
         if lot_size > 0 and qty > 0:
             lots = float(qty) / float(lot_size)
             lots_text = f"{lots:.2f}".rstrip("0").rstrip(".")
-        return (
+        line = (
             f"📦 Sizing: {mode}"
             + (f" (override: {override_reason})" if override_reason else "")
             + f", qty={int(qty or 0)}, lot_size={lot_size if lot_size > 0 else 'n/a'}, lots={lots_text}"
         )
+        diag = trade_data.get("sizing_diag") or {}
+        try:
+            if str(diag.get("mode") or "").lower() == "risk":
+                per_trade_budget = float(diag.get("per_trade_budget_inr") or 0.0)
+                portfolio_budget = float(diag.get("portfolio_budget_inr") or 0.0)
+                remaining_budget = float(diag.get("remaining_portfolio_budget_inr") or 0.0)
+                open_risk = float(diag.get("open_portfolio_risk_inr") or 0.0)
+                notes: list[str] = []
+                if per_trade_budget > 0:
+                    notes.append(f"RISK_PCT_PER_TRADE cap ₹{per_trade_budget:.2f}")
+                if portfolio_budget > 0:
+                    if remaining_budget <= 0:
+                        notes.append(
+                            f"MAX_TOTAL_OPEN_RISK_PCT reached (open ₹{open_risk:.2f}/{portfolio_budget:.2f})"
+                        )
+                    else:
+                        notes.append(
+                            f"open risk ₹{open_risk:.2f}/{portfolio_budget:.2f} remaining ₹{remaining_budget:.2f}"
+                        )
+                if notes:
+                    line += " | " + " | ".join(notes)
+        except Exception:
+            pass
+        return line
 
     @classmethod
     def _chase_rr_target(cls, trade_data: dict) -> tuple[float, int]:

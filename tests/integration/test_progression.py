@@ -22,7 +22,7 @@ class _FakeAPI:
 growwapi_stub.GrowwAPI = _FakeAPI
 sys.modules.setdefault("growwapi", growwapi_stub)
 
-from src.trader import Trader  # noqa: E402
+from src.trading.execution.trader import Trader  # noqa: E402
 
 
 @pytest.fixture()

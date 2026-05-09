@@ -5,7 +5,7 @@ import json
 import os
 import re
 import datetime
-from .logger import logger
+from src.core.logger import logger
 
 
 _CACHE_FILE = "symbol_map.json"

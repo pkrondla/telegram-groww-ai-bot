@@ -14,7 +14,7 @@ os.environ.setdefault("TELEGRAM_TARGET_CHAT_ID","1")
 os.environ.setdefault("TELEGRAM_ADMIN_ID",     "1")
 os.environ.setdefault("OPENAI_API_KEY",        "x")
 
-from src.assistant import Assistant  # noqa: E402
+from src.integrations.ai.assistant import Assistant  # noqa: E402
 
 
 class TestExtractSignalTargets:

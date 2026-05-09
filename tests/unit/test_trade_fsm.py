@@ -5,7 +5,7 @@ import sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import pytest
-from src.trade_fsm import TradeState, can_transition, state_from_record
+from src.trading.state.trade_fsm import TradeState, can_transition, state_from_record
 
 
 class TestCanTransition:

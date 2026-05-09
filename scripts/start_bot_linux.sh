@@ -25,6 +25,6 @@ else
   PYTHON_CMD="python3"
 fi
 
-nohup "$PYTHON_CMD" "$ROOT_DIR/main.py" >> "$LOG_FILE" 2>&1 &
+nohup "$PYTHON_CMD" -m app.main >> "$LOG_FILE" 2>&1 &
 echo $! > "$PID_FILE"
 echo "Bot started. PID=$(cat "$PID_FILE")"

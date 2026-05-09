@@ -24,10 +24,13 @@ import os
 import sqlite3
 import threading
 import time
+from pathlib import Path
+
+from src.core.config import Config
 
 logger = logging.getLogger(__name__)
 
-_DB_PATH = "trading_bot.db"
+_DB_PATH = Config.DB_PATH
 _MIGRATIONS = [
     # v1 — initial schema
     """
@@ -113,10 +116,13 @@ class Database:
     """Thread-safe SQLite wrapper. Use the module-level `db` singleton."""
 
     def __init__(self, path: str = _DB_PATH):
-        self._path = path
+        self._path = str(Path(path).expanduser())
+        parent = Path(self._path).parent
+        if str(parent) not in ("", "."):
+            parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
-        is_new = not os.path.exists(path)
-        self._conn = sqlite3.connect(path, check_same_thread=False)
+        is_new = not os.path.exists(self._path)
+        self._conn = sqlite3.connect(self._path, check_same_thread=False)
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA foreign_keys=ON")
         self._apply_migrations()

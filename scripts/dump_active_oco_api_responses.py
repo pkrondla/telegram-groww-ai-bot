@@ -7,8 +7,8 @@ PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
-from src.db import Database
-from src.trader import Trader
+from src.persistence.db import Database
+from src.trading.execution.trader import Trader
 
 DEFAULT_DB_PATH = os.path.join(PROJECT_ROOT, "trading_bot.db")
 

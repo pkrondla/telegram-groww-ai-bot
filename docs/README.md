@@ -5,8 +5,8 @@ This repository is organized to support clean local development and upcoming CI/
 ## Source Layout
 
 - `src/` - application source code
-- `main.py` - runtime entrypoint
-- `tests/` - automated tests (placeholder folder for CI)
+- `app/main.py` - runtime entrypoint
+- `tests/unit/` and `tests/integration/` - automated tests
 - `.github/workflows/` - CI/CD pipeline definitions (placeholder folder)
 - `docs/` - project and operational documentation
 

@@ -1,7 +1,7 @@
 import os
 import sys
 from dotenv import load_dotenv
-from .accounts import AccountConfig, parse_accounts_json
+from src.trading.execution.accounts import AccountConfig, parse_accounts_json
 
 # Load all environment variables from .env
 load_dotenv()
@@ -16,6 +16,12 @@ class Config:
     API_ID = int(os.getenv("TELEGRAM_API_ID") or 0) or None
     API_HASH = os.getenv("TELEGRAM_API_HASH")
     SESSION_NAME = os.getenv("TELEGRAM_SESSION_NAME", "session_name")
+    DATA_DIR = os.getenv("DATA_DIR", "").strip()
+    SESSION_PATH = (
+        os.getenv("SESSION_PATH")
+        or os.getenv("TELEGRAM_SESSION_PATH")
+        or (os.path.join(DATA_DIR, SESSION_NAME) if DATA_DIR else SESSION_NAME)
+    )
     TARGET_CHAT_ID = int(os.getenv("TELEGRAM_TARGET_CHAT_ID") or 0) or None
     ADMIN_ID = int(os.getenv("TELEGRAM_ADMIN_ID") or 0) or None
     BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
@@ -26,6 +32,13 @@ class Config:
 
     # Groww
     GROWW_ACCOUNTS_JSON = os.getenv("GROWW_ACCOUNTS_JSON", "").strip()
+
+    # Persistent state paths. In Azure Container Apps, point these at the
+    # Azure Files mount (for example, /data/trading_bot.db and /data/session_name).
+    DB_PATH = os.getenv(
+        "DB_PATH",
+        os.path.join(DATA_DIR, "trading_bot.db") if DATA_DIR else "trading_bot.db",
+    )
 
     # Required at startup — bot will not start if any of these are missing.
     _REQUIRED = {
@@ -108,6 +121,10 @@ class Config:
     # Auto re-arm OCO for carry-forward positions. Keep FALSE when broker already carries OCO overnight.
     AUTO_REARM_PROTECTION = os.getenv("AUTO_REARM_PROTECTION", "false").lower() == "true"
     AUTO_REARM_POLL_SEC = max(10, int(os.getenv("AUTO_REARM_POLL_SEC", "60")))
+    # OCO protection plan integrity enforcement rollout:
+    # - SHADOW: log mismatches only (no strict failure semantics)
+    # - ENFORCE: mark integrity degraded and force repair paths.
+    OCO_PLAN_ENFORCEMENT_MODE = os.getenv("OCO_PLAN_ENFORCEMENT_MODE", "ENFORCE").strip().upper()
 
     # Volatility schedule: widen OCO SL before close, restore next morning (IST). Policy 1: admin TRAIL_SL
     # still updates broker SL immediately; sl_true in active_trades tracks the channel's true SL.

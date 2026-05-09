@@ -1,9 +1,9 @@
 import asyncio
 import signal
-from pathlib import Path
-from src.listener import BotListener
-from src.logger import logger
-from src.config import Config
+from src.integrations.telegram.listener import BotListener
+from src.core.logger import logger
+from src.core.config import Config
+from app.bootstrap import runtime_dir
 
 _bot: BotListener | None = None
 
@@ -26,8 +26,16 @@ async def run_bot():
 
     bot = BotListener()
     _bot = bot
-    stop_file = Path(__file__).resolve().parent / "runtime" / "bot.stop"
+    stop_file = runtime_dir() / "bot.stop"
     stop_watcher_task: asyncio.Task | None = None
+
+    # If a previous stop task left the flag behind, clear it so startup can proceed.
+    if stop_file.exists():
+        try:
+            stop_file.unlink()
+            logger.info(f"Removed stale stop flag at startup: {stop_file}")
+        except Exception as e:
+            logger.warning(f"Unable to remove stale stop flag ({stop_file}): {e}")
 
     loop = asyncio.get_running_loop()
     shutdown_lock = asyncio.Lock()
@@ -91,6 +99,9 @@ async def run_bot():
         # Start Telegram listener regardless of Groww readiness.
         stop_watcher_task = asyncio.create_task(_stop_file_watcher())
         await bot.start()
+    except asyncio.CancelledError:
+        # Graceful shutdown can cancel in-flight Telethon startup calls.
+        logger.info("Bot startup cancelled due to shutdown request.")
     except Exception as e:
         logger.error(f"Bot Crash Encountered: {str(e)}", exc_info=True)
     finally:

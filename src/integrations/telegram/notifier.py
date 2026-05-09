@@ -1,8 +1,8 @@
 from __future__ import annotations
 import asyncio
 import requests
-from .config import Config
-from .logger import logger
+from src.core.config import Config
+from src.core.logger import logger
 
 
 class Notifier:
@@ -63,6 +63,7 @@ class Notifier:
             "PAUSED": "⏸️",
             "KILLED": "🔴",
             "STARTED": "🚀",
+            "STOPPED": "🛑",
         }
         icon = icons.get(status.upper(), "ℹ️")
         msg = f"{icon} Bot Status: {status}"

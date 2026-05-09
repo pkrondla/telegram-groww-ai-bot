@@ -20,7 +20,7 @@ import logging
 import time
 import uuid
 
-from .db import db
+from src.persistence.db import db
 
 logger = logging.getLogger(__name__)
 

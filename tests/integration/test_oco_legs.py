@@ -26,7 +26,7 @@ class _FakeAPI:
 growwapi_stub.GrowwAPI = _FakeAPI
 sys.modules.setdefault("growwapi", growwapi_stub)
 
-from src.trader import Trader  # noqa: E402
+from src.trading.execution.trader import Trader  # noqa: E402
 
 
 @pytest.fixture()
@@ -106,3 +106,46 @@ class TestBuildOcoLegsPlan:
         )
         for leg in plan:
             assert leg["qty"] % lot == 0, f"leg qty {leg['qty']} not multiple of {lot}"
+
+
+class TestProtectionPlanLegs:
+    def test_normalize_migrates_legacy_oco_legs_to_plan(self, trader):
+        rec = {
+            "smart_order_id": "O1",
+            "sl_true": 20.0,
+            "oco_legs": [
+                {"smart_order_id": "O1", "qty": 200, "target_signal": 51.0, "target_index": 1, "status": "ACTIVE"},
+                {"smart_order_id": "O2", "qty": 400, "target_signal": 75.0, "target_index": 2, "status": "ACTIVE"},
+            ],
+        }
+        out = trader._normalize_active_trade_record(rec)
+        plan = out.get("protection_plan_legs") or []
+        assert len(plan) == 2
+        assert [p["logical_leg_id"] for p in plan] == ["L1", "L2"]
+        assert [p["allocated_qty"] for p in plan] == [200, 400]
+
+    def test_expected_leg_count_uses_remaining_plan_not_signal_fallback(self, trader):
+        rec = {
+            "target": 51.0,
+            "signal_targets": [51.0, 75.0, 100.0],
+            "protection_plan_legs": [
+                {"logical_leg_id": "L1", "target_index": 1, "allocated_qty": 200, "leg_state": "FILLED"},
+                {"logical_leg_id": "L2", "target_index": 2, "allocated_qty": 200, "leg_state": "ACTIVE"},
+                {"logical_leg_id": "L3", "target_index": 3, "allocated_qty": 200, "leg_state": "ACTIVE"},
+            ],
+        }
+        count = trader._expected_oco_leg_count_for_open_qty(rec, open_qty=400)
+        assert count == 2
+
+    def test_remaining_plan_legs_preserves_two_leg_structure(self, trader):
+        rec = {
+            "protection_plan_legs": [
+                {"logical_leg_id": "L1", "target_index": 1, "allocated_qty": 200, "leg_state": "FILLED"},
+                {"logical_leg_id": "L2", "target_index": 2, "allocated_qty": 200, "leg_state": "ACTIVE"},
+                {"logical_leg_id": "L3", "target_index": 3, "allocated_qty": 400, "leg_state": "ACTIVE"},
+            ]
+        }
+        legs = trader._remaining_plan_legs_for_open_qty(rec, open_qty=600)
+        assert len(legs) == 2
+        assert [l["logical_leg_id"] for l in legs] == ["L2", "L3"]
+        assert sum(int(l["allocated_qty"]) for l in legs) == 600

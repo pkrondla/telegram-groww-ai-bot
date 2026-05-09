@@ -4,12 +4,12 @@ import datetime
 import re
 import hashlib
 import pytz
-from .config import Config
-from .logger import logger
-from .assistant import Assistant
-from .multi_account_manager import MultiAccountExecutionManager
-from .notifier import Notifier
-from .symbol_manager import symbol_manager
+from src.core.config import Config
+from src.core.logger import logger
+from src.integrations.ai.assistant import Assistant
+from src.trading.execution.multi_account_manager import MultiAccountExecutionManager
+from src.integrations.telegram.notifier import Notifier
+from src.trading.reference.symbol_manager import symbol_manager
 
 
 # Admin override commands (sent by admin to their own chat or bot)
@@ -59,7 +59,7 @@ class BotListener:
     def __init__(self):
         self.api_id = Config.API_ID
         self.api_hash = Config.API_HASH
-        self.session_name = Config.SESSION_NAME
+        self.session_name = Config.SESSION_PATH
         self.target_chat_id = Config.TARGET_CHAT_ID
 
         self.client = TelegramClient(
@@ -997,6 +997,10 @@ class BotListener:
             task.cancel()
         if self._tasks:
             await asyncio.gather(*self._tasks, return_exceptions=True)
+        try:
+            await self.notifier.send_status("STOPPED", "Bot shutdown completed gracefully.")
+        except Exception as e:
+            logger.warning(f"Failed to send shutdown status notification: {e}")
         try:
             await self.client.disconnect()
         except Exception as e:

@@ -1,0 +1,91 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "location": {
+      "value": "eastus"
+    },
+    "appName": {
+      "value": "telegram-groww-ai-bot"
+    },
+    "image": {
+      "value": "ghcr.io/YOUR_GITHUB_OWNER/YOUR_REPOSITORY:latest"
+    },
+    "registryServer": {
+      "value": "ghcr.io"
+    },
+    "registryUsername": {
+      "value": ""
+    },
+    "registryPassword": {
+      "value": ""
+    },
+    "appSecrets": {
+      "value": {
+        "telegram-api-id": "replace-me",
+        "telegram-api-hash": "replace-me",
+        "telegram-target-chat-id": "replace-me",
+        "telegram-admin-id": "replace-me",
+        "telegram-bot-token": "replace-me",
+        "openai-api-key": "replace-me",
+        "groww-accounts-json": "replace-me"
+      }
+    },
+    "appEnv": {
+      "value": [
+        {
+          "name": "DB_PATH",
+          "value": "/data/trading_bot.db"
+        },
+        {
+          "name": "SESSION_PATH",
+          "value": "/data/session_name"
+        },
+        {
+          "name": "TELEGRAM_SESSION_NAME",
+          "value": "session_name"
+        },
+        {
+          "name": "TELEGRAM_API_ID",
+          "secretRef": "telegram-api-id"
+        },
+        {
+          "name": "TELEGRAM_API_HASH",
+          "secretRef": "telegram-api-hash"
+        },
+        {
+          "name": "TELEGRAM_TARGET_CHAT_ID",
+          "secretRef": "telegram-target-chat-id"
+        },
+        {
+          "name": "TELEGRAM_ADMIN_ID",
+          "secretRef": "telegram-admin-id"
+        },
+        {
+          "name": "TELEGRAM_BOT_TOKEN",
+          "secretRef": "telegram-bot-token"
+        },
+        {
+          "name": "OPENAI_API_KEY",
+          "secretRef": "openai-api-key"
+        },
+        {
+          "name": "OPENAI_MODEL",
+          "value": "gpt-4o-mini"
+        },
+        {
+          "name": "GROWW_ACCOUNTS_JSON",
+          "secretRef": "groww-accounts-json"
+        },
+        {
+          "name": "DRY_RUN",
+          "value": "True"
+        },
+        {
+          "name": "LOG_LEVEL",
+          "value": "INFO"
+        }
+      ]
+    }
+  }
+}

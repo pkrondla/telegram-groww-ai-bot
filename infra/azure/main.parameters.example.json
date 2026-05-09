@@ -5,8 +5,17 @@
     "location": {
       "value": "eastus"
     },
+    "clientCode": {
+      "value": "techron"
+    },
+    "projectCode": {
+      "value": "growwbot"
+    },
+    "environment": {
+      "value": "prod"
+    },
     "appName": {
-      "value": "telegram-groww-ai-bot"
+      "value": ""
     },
     "image": {
       "value": "ghcr.io/YOUR_GITHUB_OWNER/YOUR_REPOSITORY:latest"
@@ -82,8 +91,200 @@
           "value": "True"
         },
         {
+          "name": "INDEX_ORDER_LOTS_COUNT",
+          "value": "1"
+        },
+        {
+          "name": "STOCK_ORDER_LOTS_COUNT",
+          "value": "1"
+        },
+        {
+          "name": "ORDER_QUANTITY",
+          "value": "1"
+        },
+        {
+          "name": "TARGET_BUFFER_PCT",
+          "value": "0.02"
+        },
+        {
+          "name": "MULTI_TARGET_ENABLED",
+          "value": "true"
+        },
+        {
+          "name": "TARGET_SPLIT_2",
+          "value": "20:80"
+        },
+        {
+          "name": "TARGET_SPLIT_3",
+          "value": "10:20:70"
+        },
+        {
+          "name": "TARGET_PRICE_TICK_SIZE",
+          "value": "0.05"
+        },
+        {
+          "name": "INDEX_POSITION_SIZING_MODE",
+          "value": "fixed"
+        },
+        {
+          "name": "STOCK_POSITION_SIZING_MODE",
+          "value": "risk"
+        },
+        {
+          "name": "RISK_PCT_PER_TRADE",
+          "value": "0.015"
+        },
+        {
+          "name": "MAX_TOTAL_OPEN_RISK_PCT",
+          "value": "0.05"
+        },
+        {
+          "name": "INDEX_MIN_LOTS",
+          "value": "1"
+        },
+        {
+          "name": "INDEX_MAX_LOTS",
+          "value": "15"
+        },
+        {
+          "name": "STOCK_MIN_LOTS",
+          "value": "1"
+        },
+        {
+          "name": "STOCK_MAX_LOTS",
+          "value": "10"
+        },
+        {
+          "name": "RISK_MODE_ON_ZERO_LOTS",
+          "value": "fixed"
+        },
+        {
           "name": "LOG_LEVEL",
           "value": "INFO"
+        },
+        {
+          "name": "ENTRY_QUEUE_ENABLED",
+          "value": "true"
+        },
+        {
+          "name": "ENTRY_QUEUE_POLL_SEC",
+          "value": "30"
+        },
+        {
+          "name": "ENTRY_QUEUE_MAX_WAIT_MIN",
+          "value": "60"
+        },
+        {
+          "name": "SIZE_ADVISORY_TTL_SEC",
+          "value": "900"
+        },
+        {
+          "name": "ENTRY_SINGLE_LIMIT_ORDER",
+          "value": "true"
+        },
+        {
+          "name": "CHASE_MIN_RR",
+          "value": "1.0"
+        },
+        {
+          "name": "CHASE_RR_TARGET_INDEX",
+          "value": "2"
+        },
+        {
+          "name": "ACTIVE_RECONCILE_ENABLED",
+          "value": "true"
+        },
+        {
+          "name": "ACTIVE_RECONCILE_POLL_SEC",
+          "value": "60"
+        },
+        {
+          "name": "AUTO_REARM_PROTECTION",
+          "value": "false"
+        },
+        {
+          "name": "AUTO_REARM_POLL_SEC",
+          "value": "60"
+        },
+        {
+          "name": "OCO_PLAN_ENFORCEMENT_MODE",
+          "value": "ENFORCE"
+        },
+        {
+          "name": "VOL_SL_SCHEDULE_ENABLED",
+          "value": "false"
+        },
+        {
+          "name": "VOL_SL_WIDEN_TIME_IST",
+          "value": "15:15"
+        },
+        {
+          "name": "VOL_SL_RESTORE_TIME_IST",
+          "value": "09:25"
+        },
+        {
+          "name": "VOL_SL_WIDEN_PCT",
+          "value": "0.10"
+        },
+        {
+          "name": "VOL_SL_SCHEDULE_POLL_SEC",
+          "value": "30"
+        },
+        {
+          "name": "VOL_SL_SKIP_WEEKENDS",
+          "value": "true"
+        },
+        {
+          "name": "EOD_SUMMARY_ENABLED",
+          "value": "true"
+        },
+        {
+          "name": "EOD_SUMMARY_POLL_SEC",
+          "value": "30"
+        },
+        {
+          "name": "EOD_SUMMARY_SKIP_WEEKENDS",
+          "value": "true"
+        },
+        {
+          "name": "MGMT_QUEUE_ENABLED",
+          "value": "true"
+        },
+        {
+          "name": "MGMT_QUEUE_POLL_SEC",
+          "value": "10"
+        },
+        {
+          "name": "MGMT_QUEUE_MAX_RETRIES",
+          "value": "20"
+        },
+        {
+          "name": "MGMT_QUEUE_TTL_MIN",
+          "value": "360"
+        },
+        {
+          "name": "MARKET_OPEN_TIME_IST",
+          "value": "09:15"
+        },
+        {
+          "name": "MARKET_CLOSE_TIME_IST",
+          "value": "15:30"
+        },
+        {
+          "name": "BROKER_WINDOW_PREOPEN_MIN",
+          "value": "15"
+        },
+        {
+          "name": "BROKER_WINDOW_POSTCLOSE_MIN",
+          "value": "15"
+        },
+        {
+          "name": "GROWW_AUTH_POLL_SEC",
+          "value": "60"
+        },
+        {
+          "name": "EXTEND_RANGE_ALLOWS_ENTRY",
+          "value": "false"
         }
       ]
     }

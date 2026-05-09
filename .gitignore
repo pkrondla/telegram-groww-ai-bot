@@ -3,6 +3,7 @@
 .env.local
 .env.*.local
 infra/azure/main.parameters.json
+infra/azure/main.parameters.generated.json
 
 ### Python
 __pycache__/
@@ -33,6 +34,7 @@ session_name.session-journal
 *.session
 *.session-journal
 trading_bot.db
+scripts/trading_bot.db
 trading_bot.db-shm
 trading_bot.db-wal
 logs/
@@ -47,3 +49,7 @@ src/__pycache__/
 
 ### Local generated caches
 symbol_map.json
+
+### Obsolete placeholders
+.github/workflows/.gitkeep
+tests/.gitkeep

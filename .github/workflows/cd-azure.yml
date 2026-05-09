@@ -1,0 +1,261 @@
+name: CD - Provision Infra and Deploy
+
+on:
+  workflow_run:
+    workflows:
+      - CI - Build and Validate
+    types:
+      - completed
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "Image tag to deploy. Use a commit SHA from CI, or latest."
+        required: false
+        default: latest
+
+permissions:
+  contents: read
+  packages: read
+
+env:
+  REGISTRY: ghcr.io
+  AZURE_LOCATION: ${{ vars.AZURE_LOCATION || 'eastus' }}
+  AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID || secrets.AZURE_SUBSCRIPTION_ID }}
+  CLIENT_CODE: ${{ vars.CLIENT_CODE || 'techron' }}
+  PROJECT_CODE: ${{ vars.PROJECT_CODE || 'growwbot' }}
+  DEPLOY_ENVIRONMENT: ${{ vars.DEPLOY_ENVIRONMENT || 'prod' }}
+  AZURE_RESOURCE_GROUP_OVERRIDE: ${{ vars.AZURE_RESOURCE_GROUP }}
+  AZURE_CONTAINER_APP_NAME_OVERRIDE: ${{ vars.AZURE_CONTAINER_APP_NAME }}
+
+jobs:
+  provision-and-deploy:
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve image
+        run: |
+          IMAGE_NAME="${REGISTRY}/${GITHUB_REPOSITORY,,}"
+          if [ "${{ github.event_name }}" = "workflow_run" ]; then
+            IMAGE_TAG="${{ github.event.workflow_run.head_sha }}"
+          else
+            IMAGE_TAG="${{ inputs.image_tag }}"
+          fi
+          echo "IMAGE_NAME=$IMAGE_NAME" >> "$GITHUB_ENV"
+          echo "IMAGE_TAG=$IMAGE_TAG" >> "$GITHUB_ENV"
+          echo "IMAGE=$IMAGE_NAME:$IMAGE_TAG" >> "$GITHUB_ENV"
+
+      - name: Azure login
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Provision infrastructure and deploy image
+        uses: azure/cli@v2
+        env:
+          LOCATION: ${{ env.AZURE_LOCATION }}
+          SUBSCRIPTION_ID: ${{ env.AZURE_SUBSCRIPTION_ID }}
+          CLIENT_CODE: ${{ env.CLIENT_CODE }}
+          PROJECT_CODE: ${{ env.PROJECT_CODE }}
+          DEPLOY_ENVIRONMENT: ${{ env.DEPLOY_ENVIRONMENT }}
+          RESOURCE_GROUP_OVERRIDE: ${{ env.AZURE_RESOURCE_GROUP_OVERRIDE }}
+          APP_NAME_OVERRIDE: ${{ env.AZURE_CONTAINER_APP_NAME_OVERRIDE }}
+          REGISTRY_SERVER: ghcr.io
+          REGISTRY_USERNAME: ${{ secrets.GHCR_USERNAME }}
+          REGISTRY_PASSWORD: ${{ secrets.GHCR_TOKEN }}
+          TELEGRAM_API_ID: ${{ secrets.TELEGRAM_API_ID }}
+          TELEGRAM_API_HASH: ${{ secrets.TELEGRAM_API_HASH }}
+          TELEGRAM_TARGET_CHAT_ID: ${{ secrets.TELEGRAM_TARGET_CHAT_ID }}
+          TELEGRAM_ADMIN_ID: ${{ secrets.TELEGRAM_ADMIN_ID }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENAI_MODEL: ${{ vars.OPENAI_MODEL || 'gpt-4o-mini' }}
+          GROWW_ACCOUNTS_JSON: ${{ secrets.GROWW_ACCOUNTS_JSON }}
+          DRY_RUN: ${{ vars.DRY_RUN || 'True' }}
+          INDEX_ORDER_LOTS_COUNT: ${{ vars.INDEX_ORDER_LOTS_COUNT || '1' }}
+          STOCK_ORDER_LOTS_COUNT: ${{ vars.STOCK_ORDER_LOTS_COUNT || '1' }}
+          ORDER_QUANTITY: ${{ vars.ORDER_QUANTITY || '1' }}
+          TARGET_BUFFER_PCT: ${{ vars.TARGET_BUFFER_PCT || '0.02' }}
+          MULTI_TARGET_ENABLED: ${{ vars.MULTI_TARGET_ENABLED || 'true' }}
+          TARGET_SPLIT_2: ${{ vars.TARGET_SPLIT_2 || '20:80' }}
+          TARGET_SPLIT_3: ${{ vars.TARGET_SPLIT_3 || '10:20:70' }}
+          TARGET_PRICE_TICK_SIZE: ${{ vars.TARGET_PRICE_TICK_SIZE || '0.05' }}
+          INDEX_POSITION_SIZING_MODE: ${{ vars.INDEX_POSITION_SIZING_MODE || 'fixed' }}
+          STOCK_POSITION_SIZING_MODE: ${{ vars.STOCK_POSITION_SIZING_MODE || 'risk' }}
+          RISK_PCT_PER_TRADE: ${{ vars.RISK_PCT_PER_TRADE || '0.015' }}
+          MAX_TOTAL_OPEN_RISK_PCT: ${{ vars.MAX_TOTAL_OPEN_RISK_PCT || '0.05' }}
+          INDEX_MIN_LOTS: ${{ vars.INDEX_MIN_LOTS || '1' }}
+          INDEX_MAX_LOTS: ${{ vars.INDEX_MAX_LOTS || '15' }}
+          STOCK_MIN_LOTS: ${{ vars.STOCK_MIN_LOTS || '1' }}
+          STOCK_MAX_LOTS: ${{ vars.STOCK_MAX_LOTS || '10' }}
+          RISK_MODE_ON_ZERO_LOTS: ${{ vars.RISK_MODE_ON_ZERO_LOTS || 'fixed' }}
+          LOG_LEVEL: ${{ vars.LOG_LEVEL || 'INFO' }}
+          ENTRY_QUEUE_ENABLED: ${{ vars.ENTRY_QUEUE_ENABLED || 'true' }}
+          ENTRY_QUEUE_POLL_SEC: ${{ vars.ENTRY_QUEUE_POLL_SEC || '30' }}
+          ENTRY_QUEUE_MAX_WAIT_MIN: ${{ vars.ENTRY_QUEUE_MAX_WAIT_MIN || '60' }}
+          SIZE_ADVISORY_TTL_SEC: ${{ vars.SIZE_ADVISORY_TTL_SEC || '900' }}
+          ENTRY_SINGLE_LIMIT_ORDER: ${{ vars.ENTRY_SINGLE_LIMIT_ORDER || 'true' }}
+          CHASE_MIN_RR: ${{ vars.CHASE_MIN_RR || '1.0' }}
+          CHASE_RR_TARGET_INDEX: ${{ vars.CHASE_RR_TARGET_INDEX || '2' }}
+          ACTIVE_RECONCILE_ENABLED: ${{ vars.ACTIVE_RECONCILE_ENABLED || 'true' }}
+          ACTIVE_RECONCILE_POLL_SEC: ${{ vars.ACTIVE_RECONCILE_POLL_SEC || '60' }}
+          AUTO_REARM_PROTECTION: ${{ vars.AUTO_REARM_PROTECTION || 'false' }}
+          AUTO_REARM_POLL_SEC: ${{ vars.AUTO_REARM_POLL_SEC || '60' }}
+          OCO_PLAN_ENFORCEMENT_MODE: ${{ vars.OCO_PLAN_ENFORCEMENT_MODE || 'ENFORCE' }}
+          VOL_SL_SCHEDULE_ENABLED: ${{ vars.VOL_SL_SCHEDULE_ENABLED || 'false' }}
+          VOL_SL_WIDEN_TIME_IST: ${{ vars.VOL_SL_WIDEN_TIME_IST || '15:15' }}
+          VOL_SL_RESTORE_TIME_IST: ${{ vars.VOL_SL_RESTORE_TIME_IST || '09:25' }}
+          VOL_SL_WIDEN_PCT: ${{ vars.VOL_SL_WIDEN_PCT || '0.10' }}
+          VOL_SL_SCHEDULE_POLL_SEC: ${{ vars.VOL_SL_SCHEDULE_POLL_SEC || '30' }}
+          VOL_SL_SKIP_WEEKENDS: ${{ vars.VOL_SL_SKIP_WEEKENDS || 'true' }}
+          EOD_SUMMARY_ENABLED: ${{ vars.EOD_SUMMARY_ENABLED || 'true' }}
+          EOD_SUMMARY_POLL_SEC: ${{ vars.EOD_SUMMARY_POLL_SEC || '30' }}
+          EOD_SUMMARY_SKIP_WEEKENDS: ${{ vars.EOD_SUMMARY_SKIP_WEEKENDS || 'true' }}
+          MGMT_QUEUE_ENABLED: ${{ vars.MGMT_QUEUE_ENABLED || 'true' }}
+          MGMT_QUEUE_POLL_SEC: ${{ vars.MGMT_QUEUE_POLL_SEC || '10' }}
+          MGMT_QUEUE_MAX_RETRIES: ${{ vars.MGMT_QUEUE_MAX_RETRIES || '20' }}
+          MGMT_QUEUE_TTL_MIN: ${{ vars.MGMT_QUEUE_TTL_MIN || '360' }}
+          MARKET_OPEN_TIME_IST: ${{ vars.MARKET_OPEN_TIME_IST || '09:15' }}
+          MARKET_CLOSE_TIME_IST: ${{ vars.MARKET_CLOSE_TIME_IST || '15:30' }}
+          BROKER_WINDOW_PREOPEN_MIN: ${{ vars.BROKER_WINDOW_PREOPEN_MIN || '15' }}
+          BROKER_WINDOW_POSTCLOSE_MIN: ${{ vars.BROKER_WINDOW_POSTCLOSE_MIN || '15' }}
+          GROWW_AUTH_POLL_SEC: ${{ vars.GROWW_AUTH_POLL_SEC || '60' }}
+          EXTEND_RANGE_ALLOWS_ENTRY: ${{ vars.EXTEND_RANGE_ALLOWS_ENTRY || 'false' }}
+        with:
+          inlineScript: |
+            set -euo pipefail
+
+            if [ -z "${SUBSCRIPTION_ID:-}" ]; then
+              echo "AZURE_SUBSCRIPTION_ID must be set as a GitHub repository variable or secret."
+              exit 1
+            fi
+
+            az account set --subscription "$SUBSCRIPTION_ID"
+
+            RESOURCE_GROUP="${RESOURCE_GROUP_OVERRIDE:-rg-${CLIENT_CODE}-${PROJECT_CODE}-${DEPLOY_ENVIRONMENT}}"
+
+            az group create \
+              --name "$RESOURCE_GROUP" \
+              --location "$LOCATION" \
+              --tags \
+                client="$CLIENT_CODE" \
+                project="$PROJECT_CODE" \
+                environment="$DEPLOY_ENVIRONMENT" \
+                workload="telegram-groww-ai-bot" \
+                managedBy="github-actions"
+
+            python3 - <<'PY'
+            import json
+            import os
+
+            params = {
+                "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
+                "contentVersion": "1.0.0.0",
+                "parameters": {
+                    "location": {"value": os.environ["LOCATION"]},
+                    "clientCode": {"value": os.environ["CLIENT_CODE"]},
+                    "projectCode": {"value": os.environ["PROJECT_CODE"]},
+                    "environment": {"value": os.environ["DEPLOY_ENVIRONMENT"]},
+                    "appName": {"value": os.environ.get("APP_NAME_OVERRIDE", "")},
+                    "image": {"value": os.environ["IMAGE"]},
+                    "registryServer": {"value": os.environ["REGISTRY_SERVER"]},
+                    "registryUsername": {"value": os.environ.get("REGISTRY_USERNAME", "")},
+                    "registryPassword": {"value": os.environ.get("REGISTRY_PASSWORD", "")},
+                    "appSecrets": {
+                        "value": {
+                            "telegram-api-id": os.environ["TELEGRAM_API_ID"],
+                            "telegram-api-hash": os.environ["TELEGRAM_API_HASH"],
+                            "telegram-target-chat-id": os.environ["TELEGRAM_TARGET_CHAT_ID"],
+                            "telegram-admin-id": os.environ["TELEGRAM_ADMIN_ID"],
+                            "telegram-bot-token": os.environ.get("TELEGRAM_BOT_TOKEN", ""),
+                            "openai-api-key": os.environ["OPENAI_API_KEY"],
+                            "groww-accounts-json": os.environ["GROWW_ACCOUNTS_JSON"],
+                        }
+                    },
+                    "appEnv": {
+                        "value": [
+                            {"name": "DB_PATH", "value": "/data/trading_bot.db"},
+                            {"name": "SESSION_PATH", "value": "/data/session_name"},
+                            {"name": "TELEGRAM_SESSION_NAME", "value": "session_name"},
+                            {"name": "TELEGRAM_API_ID", "secretRef": "telegram-api-id"},
+                            {"name": "TELEGRAM_API_HASH", "secretRef": "telegram-api-hash"},
+                            {"name": "TELEGRAM_TARGET_CHAT_ID", "secretRef": "telegram-target-chat-id"},
+                            {"name": "TELEGRAM_ADMIN_ID", "secretRef": "telegram-admin-id"},
+                            {"name": "TELEGRAM_BOT_TOKEN", "secretRef": "telegram-bot-token"},
+                            {"name": "OPENAI_API_KEY", "secretRef": "openai-api-key"},
+                            {"name": "OPENAI_MODEL", "value": os.environ["OPENAI_MODEL"]},
+                            {"name": "GROWW_ACCOUNTS_JSON", "secretRef": "groww-accounts-json"},
+                        ]
+                    },
+                },
+            }
+
+            plain_env_names = [
+                "DRY_RUN",
+                "INDEX_ORDER_LOTS_COUNT",
+                "STOCK_ORDER_LOTS_COUNT",
+                "ORDER_QUANTITY",
+                "TARGET_BUFFER_PCT",
+                "MULTI_TARGET_ENABLED",
+                "TARGET_SPLIT_2",
+                "TARGET_SPLIT_3",
+                "TARGET_PRICE_TICK_SIZE",
+                "INDEX_POSITION_SIZING_MODE",
+                "STOCK_POSITION_SIZING_MODE",
+                "RISK_PCT_PER_TRADE",
+                "MAX_TOTAL_OPEN_RISK_PCT",
+                "INDEX_MIN_LOTS",
+                "INDEX_MAX_LOTS",
+                "STOCK_MIN_LOTS",
+                "STOCK_MAX_LOTS",
+                "RISK_MODE_ON_ZERO_LOTS",
+                "LOG_LEVEL",
+                "ENTRY_QUEUE_ENABLED",
+                "ENTRY_QUEUE_POLL_SEC",
+                "ENTRY_QUEUE_MAX_WAIT_MIN",
+                "SIZE_ADVISORY_TTL_SEC",
+                "ENTRY_SINGLE_LIMIT_ORDER",
+                "CHASE_MIN_RR",
+                "CHASE_RR_TARGET_INDEX",
+                "ACTIVE_RECONCILE_ENABLED",
+                "ACTIVE_RECONCILE_POLL_SEC",
+                "AUTO_REARM_PROTECTION",
+                "AUTO_REARM_POLL_SEC",
+                "OCO_PLAN_ENFORCEMENT_MODE",
+                "VOL_SL_SCHEDULE_ENABLED",
+                "VOL_SL_WIDEN_TIME_IST",
+                "VOL_SL_RESTORE_TIME_IST",
+                "VOL_SL_WIDEN_PCT",
+                "VOL_SL_SCHEDULE_POLL_SEC",
+                "VOL_SL_SKIP_WEEKENDS",
+                "EOD_SUMMARY_ENABLED",
+                "EOD_SUMMARY_POLL_SEC",
+                "EOD_SUMMARY_SKIP_WEEKENDS",
+                "MGMT_QUEUE_ENABLED",
+                "MGMT_QUEUE_POLL_SEC",
+                "MGMT_QUEUE_MAX_RETRIES",
+                "MGMT_QUEUE_TTL_MIN",
+                "MARKET_OPEN_TIME_IST",
+                "MARKET_CLOSE_TIME_IST",
+                "BROKER_WINDOW_PREOPEN_MIN",
+                "BROKER_WINDOW_POSTCLOSE_MIN",
+                "GROWW_AUTH_POLL_SEC",
+                "EXTEND_RANGE_ALLOWS_ENTRY",
+            ]
+            params["parameters"]["appEnv"]["value"].extend(
+                {"name": name, "value": os.environ[name]} for name in plain_env_names
+            )
+
+            with open("infra/azure/main.parameters.generated.json", "w", encoding="utf-8") as f:
+                json.dump(params, f)
+            PY
+
+            az deployment group create \
+              --resource-group "$RESOURCE_GROUP" \
+              --template-file infra/azure/main.bicep \
+              --parameters @infra/azure/main.parameters.generated.json

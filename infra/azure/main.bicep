@@ -3,23 +3,32 @@ targetScope = 'resourceGroup'
 @description('Azure region for all resources.')
 param location string = resourceGroup().location
 
-@description('Container App name.')
-param appName string = 'telegram-groww-ai-bot'
+@description('Client code used in resource names. Use lowercase letters/numbers only for storage compatibility.')
+param clientCode string = 'techron'
 
-@description('Container Apps managed environment name.')
-param environmentName string = '${appName}-env'
+@description('Project code used in resource names. Use lowercase letters/numbers only for storage compatibility.')
+param projectCode string = 'growwbot'
+
+@description('Deployment environment code, for example dev, test, uat, or prod.')
+param environment string = 'prod'
+
+@description('Optional Container App name override. Defaults to ca-{clientCode}-{projectCode}-{environment}.')
+param appName string = ''
+
+@description('Optional Container Apps managed environment name override. Defaults to cae-{clientCode}-{projectCode}-{environment}.')
+param environmentName string = ''
 
 @description('Container image to run, for example ghcr.io/owner/repo:sha.')
 param image string
 
-@description('Globally unique storage account name. Lowercase letters and numbers only.')
-param storageAccountName string = toLower('st${uniqueString(resourceGroup().id, appName)}')
+@description('Optional globally unique storage account name override. Lowercase letters and numbers only.')
+param storageAccountName string = ''
 
-@description('Azure Files share used for SQLite and the Telethon session.')
-param fileShareName string = 'botdata'
+@description('Optional Azure Files share name override. Defaults to fs-{clientCode}-{projectCode}-{environment}.')
+param fileShareName string = ''
 
-@description('Storage binding name inside the Container Apps environment.')
-param storageMountName string = 'botdata'
+@description('Optional storage binding name inside the Container Apps environment.')
+param storageMountName string = ''
 
 @description('Container registry server. Use ghcr.io for GitHub Container Registry.')
 param registryServer string = 'ghcr.io'
@@ -47,6 +56,24 @@ param appEnv array = [
   }
 ]
 
+@description('Additional tags to apply to provisioned Azure resources.')
+param tags object = {}
+
+var effectiveAppName = empty(appName) ? 'ca-${clientCode}-${projectCode}-${environment}' : appName
+var effectiveEnvironmentName = empty(environmentName) ? 'cae-${clientCode}-${projectCode}-${environment}' : environmentName
+var effectiveStorageAccountName = empty(storageAccountName)
+  ? toLower('st${take(clientCode, 6)}${take(projectCode, 8)}${environment}${take(uniqueString(resourceGroup().id, clientCode, projectCode, environment), 4)}')
+  : storageAccountName
+var effectiveFileShareName = empty(fileShareName) ? 'fs-${clientCode}-${projectCode}-${environment}' : fileShareName
+var effectiveStorageMountName = empty(storageMountName) ? 'afs-${clientCode}-${projectCode}-${environment}' : storageMountName
+var dataVolumeName = 'vol-botdata'
+var resourceTags = union({
+  client: clientCode
+  project: projectCode
+  environment: environment
+  workload: 'telegram-groww-ai-bot'
+  managedBy: 'bicep'
+}, tags)
 var registrySecretName = 'registry-password'
 var appSecretArray = [
   for secret in items(appSecrets): {
@@ -69,8 +96,9 @@ var registryConfig = empty(registryPassword) ? [] : [
 ]
 
 resource storage 'Microsoft.Storage/storageAccounts@2023-05-01' = {
-  name: storageAccountName
+  name: effectiveStorageAccountName
   location: location
+  tags: resourceTags
   sku: {
     name: 'Standard_LRS'
   }
@@ -88,7 +116,7 @@ resource fileService 'Microsoft.Storage/storageAccounts/fileServices@2023-05-01'
 
 resource fileShare 'Microsoft.Storage/storageAccounts/fileServices/shares@2023-05-01' = {
   parent: fileService
-  name: fileShareName
+  name: effectiveFileShareName
   properties: {
     shareQuota: 1
     enabledProtocols: 'SMB'
@@ -96,14 +124,15 @@ resource fileShare 'Microsoft.Storage/storageAccounts/fileServices/shares@2023-0
 }
 
 resource managedEnv 'Microsoft.App/managedEnvironments@2023-05-01' = {
-  name: environmentName
+  name: effectiveEnvironmentName
   location: location
+  tags: resourceTags
   properties: {}
 }
 
 resource envStorage 'Microsoft.App/managedEnvironments/storages@2023-05-01' = {
   parent: managedEnv
-  name: storageMountName
+  name: effectiveStorageMountName
   properties: {
     azureFile: {
       accountName: storage.name
@@ -115,8 +144,9 @@ resource envStorage 'Microsoft.App/managedEnvironments/storages@2023-05-01' = {
 }
 
 resource containerApp 'Microsoft.App/containerApps@2023-05-01' = {
-  name: appName
+  name: effectiveAppName
   location: location
+  tags: resourceTags
   properties: {
     managedEnvironmentId: managedEnv.id
     configuration: {
@@ -136,7 +166,7 @@ resource containerApp 'Microsoft.App/containerApps@2023-05-01' = {
           }
           volumeMounts: [
             {
-              volumeName: 'botdata'
+              volumeName: dataVolumeName
               mountPath: '/data'
             }
           ]
@@ -148,7 +178,7 @@ resource containerApp 'Microsoft.App/containerApps@2023-05-01' = {
       }
       volumes: [
         {
-          name: 'botdata'
+          name: dataVolumeName
           storageType: 'AzureFile'
           storageName: envStorage.name
         }
@@ -160,3 +190,10 @@ resource containerApp 'Microsoft.App/containerApps@2023-05-01' = {
 output containerAppName string = containerApp.name
 output storageShare string = '${storage.name}/${fileShare.name}'
 output persistentMountPath string = '/data'
+output resourceNames object = {
+  containerApp: containerApp.name
+  containerAppsEnvironment: managedEnv.name
+  storageAccount: storage.name
+  fileShare: fileShare.name
+  storageBinding: envStorage.name
+}

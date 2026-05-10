@@ -141,6 +141,12 @@ jobs:
             import json
             import os
 
+            def arm_parameter_string(value):
+                value = str(value or "")
+                # ARM parameter files treat strings starting with '[' as
+                # template expressions. Prefix another '[' to pass a literal.
+                return "[" + value if value.startswith("[") else value
+
             params = {
                 "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
                 "contentVersion": "1.0.0.0",
@@ -162,7 +168,7 @@ jobs:
                             "telegram-admin-id": os.environ["TELEGRAM_ADMIN_ID"],
                             "telegram-bot-token": os.environ.get("TELEGRAM_BOT_TOKEN", ""),
                             "openai-api-key": os.environ["OPENAI_API_KEY"],
-                            "groww-accounts-json": os.environ["GROWW_ACCOUNTS_JSON"],
+                            "groww-accounts-json": arm_parameter_string(os.environ["GROWW_ACCOUNTS_JSON"]),
                         }
                     },
                     "appEnv": {

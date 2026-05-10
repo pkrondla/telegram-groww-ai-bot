@@ -22,6 +22,11 @@ class Config:
         or os.getenv("TELEGRAM_SESSION_PATH")
         or (os.path.join(DATA_DIR, SESSION_NAME) if DATA_DIR else SESSION_NAME)
     )
+    # Persistent copy of the session file on durable storage (e.g. Azure Files /data/).
+    # When set, main.py copies {SESSION_PERSISTENT_PATH}.session → {SESSION_PATH}.session
+    # at startup and back again on clean shutdown.  This lets Telethon work against a
+    # local path (no SMB locking) while still surviving container restarts.
+    SESSION_PERSISTENT_PATH = os.getenv("SESSION_PERSISTENT_PATH", "").strip()
     TARGET_CHAT_ID = int(os.getenv("TELEGRAM_TARGET_CHAT_ID") or 0) or None
     ADMIN_ID = int(os.getenv("TELEGRAM_ADMIN_ID") or 0) or None
     BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")

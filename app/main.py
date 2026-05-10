@@ -1,9 +1,56 @@
 import asyncio
+import os
+import shutil
 import signal
 from src.integrations.telegram.listener import BotListener
 from src.core.logger import logger
 from src.core.config import Config
 from app.bootstrap import runtime_dir
+
+
+def _session_file(path: str) -> str:
+    return path + ".session"
+
+
+def _restore_session() -> None:
+    """Copy session file from persistent storage (Azure Files) to local path on startup.
+
+    Telethon's SQLite session uses its own sqlite3 connection which has no
+    retry logic.  On Azure Files SMB that connection fails with 'database is
+    locked'.  Keeping the active session file on local /tmp storage avoids the
+    SMB locking entirely; this function seeds /tmp from the durable copy on
+    container start.
+    """
+    persistent = Config.SESSION_PERSISTENT_PATH
+    local = Config.SESSION_PATH
+    if not persistent or persistent == local:
+        return
+    src = _session_file(persistent)
+    dst = _session_file(local)
+    os.makedirs(os.path.dirname(os.path.abspath(dst)), exist_ok=True)
+    if os.path.exists(src):
+        shutil.copy2(src, dst)
+        logger.info("Session restored from persistent storage: %s → %s", src, dst)
+    else:
+        logger.warning(
+            "No persistent session found at %s — Telegram re-auth may be required.", src
+        )
+
+
+def _save_session() -> None:
+    """Copy local session file back to persistent storage (Azure Files) on shutdown."""
+    persistent = Config.SESSION_PERSISTENT_PATH
+    local = Config.SESSION_PATH
+    if not persistent or persistent == local:
+        return
+    src = _session_file(local)
+    dst = _session_file(persistent)
+    if os.path.exists(src):
+        try:
+            shutil.copy2(src, dst)
+            logger.info("Session saved to persistent storage: %s → %s", src, dst)
+        except Exception as e:
+            logger.warning("Failed to save session to persistent storage: %s", e)
 
 _bot: BotListener | None = None
 
@@ -14,6 +61,7 @@ async def run_bot():
     """
     global _bot
     logger.info("Initializing Industrial-Standard Trading Bot...")
+    _restore_session()
 
     try:
         accounts = Config.groww_accounts()
@@ -109,6 +157,7 @@ async def run_bot():
             stop_watcher_task.cancel()
             await asyncio.gather(stop_watcher_task, return_exceptions=True)
         await _graceful_shutdown("run_bot finalizer")
+        _save_session()
         logger.info("Bot Process Terminated.")
 
 

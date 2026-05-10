@@ -122,12 +122,28 @@ class Database:
             parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
         is_new = not os.path.exists(self._path)
-        self._conn = sqlite3.connect(self._path, check_same_thread=False)
-        self._conn.execute("PRAGMA journal_mode=WAL")
+        timeout_sec = max(1, int(os.getenv("SQLITE_BUSY_TIMEOUT_MS", "30000")) // 1000)
+        self._conn = sqlite3.connect(self._path, timeout=timeout_sec, check_same_thread=False)
+        self._conn.execute(f"PRAGMA busy_timeout={timeout_sec * 1000}")
+        self._configure_journal_mode()
         self._conn.execute("PRAGMA foreign_keys=ON")
         self._apply_migrations()
         if is_new:
             self._migrate_from_json()
+
+    def _configure_journal_mode(self) -> None:
+        journal_mode = os.getenv("SQLITE_JOURNAL_MODE", "").strip().upper()
+        if not journal_mode:
+            # Azure Files is SMB-backed; WAL can fail with locking errors there.
+            journal_mode = "DELETE" if self._path.replace("\\", "/").startswith("/data/") else "WAL"
+        try:
+            self._conn.execute(f"PRAGMA journal_mode={journal_mode}")
+        except sqlite3.OperationalError as e:
+            if journal_mode != "DELETE":
+                logger.warning("SQLite journal_mode=%s failed (%s); falling back to DELETE.", journal_mode, e)
+                self._conn.execute("PRAGMA journal_mode=DELETE")
+                return
+            raise
 
     # ------------------------------------------------------------------
     # Schema

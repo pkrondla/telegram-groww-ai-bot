@@ -114,6 +114,8 @@ jobs:
           BROKER_WINDOW_POSTCLOSE_MIN: ${{ vars.BROKER_WINDOW_POSTCLOSE_MIN || '5' }}
           GROWW_AUTH_POLL_SEC: ${{ vars.GROWW_AUTH_POLL_SEC || '60' }}
           EXTEND_RANGE_ALLOWS_ENTRY: ${{ vars.EXTEND_RANGE_ALLOWS_ENTRY || 'false' }}
+          SQLITE_JOURNAL_MODE: ${{ vars.SQLITE_JOURNAL_MODE || 'DELETE' }}
+          SQLITE_BUSY_TIMEOUT_MS: ${{ vars.SQLITE_BUSY_TIMEOUT_MS || '30000' }}
         with:
           inlineScript: |
             set -euo pipefail
@@ -175,6 +177,8 @@ jobs:
                         "value": [
                             {"name": "DB_PATH", "value": "/data/trading_bot.db"},
                             {"name": "SESSION_PATH", "value": "/data/session_name"},
+                            {"name": "SQLITE_JOURNAL_MODE", "value": os.environ["SQLITE_JOURNAL_MODE"]},
+                            {"name": "SQLITE_BUSY_TIMEOUT_MS", "value": os.environ["SQLITE_BUSY_TIMEOUT_MS"]},
                             {"name": "TELEGRAM_SESSION_NAME", "value": "session_name"},
                             {"name": "TELEGRAM_API_ID", "secretRef": "telegram-api-id"},
                             {"name": "TELEGRAM_API_HASH", "secretRef": "telegram-api-hash"},

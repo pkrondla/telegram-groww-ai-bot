@@ -117,6 +117,8 @@ Plain environment variables:
 ```text
 DB_PATH=/data/trading_bot.db
 SESSION_PATH=/data/session_name
+SQLITE_JOURNAL_MODE=DELETE
+SQLITE_BUSY_TIMEOUT_MS=30000
 TELEGRAM_SESSION_NAME=session_name
 OPENAI_MODEL=gpt-4o-mini
 DRY_RUN=True

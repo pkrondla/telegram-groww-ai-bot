@@ -51,6 +51,14 @@
           "value": "/data/session_name"
         },
         {
+          "name": "SQLITE_JOURNAL_MODE",
+          "value": "DELETE"
+        },
+        {
+          "name": "SQLITE_BUSY_TIMEOUT_MS",
+          "value": "30000"
+        },
+        {
           "name": "TELEGRAM_SESSION_NAME",
           "value": "session_name"
         },

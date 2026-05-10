@@ -59,6 +59,10 @@
           "value": "30000"
         },
         {
+          "name": "SQLITE_LOCK_RETRY_SEC",
+          "value": "180"
+        },
+        {
           "name": "TELEGRAM_SESSION_NAME",
           "value": "session_name"
         },

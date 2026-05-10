@@ -123,13 +123,42 @@ class Database:
         self._lock = threading.Lock()
         is_new = not os.path.exists(self._path)
         timeout_sec = max(1, int(os.getenv("SQLITE_BUSY_TIMEOUT_MS", "30000")) // 1000)
+        self._lock_retry_sec = max(0, int(os.getenv("SQLITE_LOCK_RETRY_SEC", "180")))
         self._conn = sqlite3.connect(self._path, timeout=timeout_sec, check_same_thread=False)
-        self._conn.execute(f"PRAGMA busy_timeout={timeout_sec * 1000}")
+        self._with_lock_retry(
+            lambda: self._conn.execute(f"PRAGMA busy_timeout={timeout_sec * 1000}"),
+            "set SQLite busy_timeout",
+        )
         self._configure_journal_mode()
-        self._conn.execute("PRAGMA foreign_keys=ON")
+        self._with_lock_retry(
+            lambda: self._conn.execute("PRAGMA foreign_keys=ON"),
+            "enable SQLite foreign_keys",
+        )
         self._apply_migrations()
         if is_new:
             self._migrate_from_json()
+
+    @staticmethod
+    def _is_locked_error(exc: sqlite3.OperationalError) -> bool:
+        return "database is locked" in str(exc).lower() or "database table is locked" in str(exc).lower()
+
+    def _with_lock_retry(self, operation, label: str):
+        deadline = time.monotonic() + self._lock_retry_sec
+        attempt = 0
+        while True:
+            try:
+                return operation()
+            except sqlite3.OperationalError as e:
+                if not self._is_locked_error(e) or time.monotonic() >= deadline:
+                    raise
+                attempt += 1
+                try:
+                    self._conn.rollback()
+                except Exception:
+                    pass
+                if attempt == 1 or attempt % 10 == 0:
+                    logger.warning("%s waiting for SQLite lock to clear: %s", label, e)
+                time.sleep(2)
 
     def _configure_journal_mode(self) -> None:
         journal_mode = os.getenv("SQLITE_JOURNAL_MODE", "").strip().upper()
@@ -137,11 +166,17 @@ class Database:
             # Azure Files is SMB-backed; WAL can fail with locking errors there.
             journal_mode = "DELETE" if self._path.replace("\\", "/").startswith("/data/") else "WAL"
         try:
-            self._conn.execute(f"PRAGMA journal_mode={journal_mode}")
+            self._with_lock_retry(
+                lambda: self._conn.execute(f"PRAGMA journal_mode={journal_mode}"),
+                f"set SQLite journal_mode={journal_mode}",
+            )
         except sqlite3.OperationalError as e:
             if journal_mode != "DELETE":
                 logger.warning("SQLite journal_mode=%s failed (%s); falling back to DELETE.", journal_mode, e)
-                self._conn.execute("PRAGMA journal_mode=DELETE")
+                self._with_lock_retry(
+                    lambda: self._conn.execute("PRAGMA journal_mode=DELETE"),
+                    "set SQLite fallback journal_mode=DELETE",
+                )
                 return
             raise
 
@@ -151,9 +186,12 @@ class Database:
 
     def _apply_migrations(self) -> None:
         try:
-            cur_version = self._conn.execute(
-                "SELECT version FROM schema_version ORDER BY version DESC LIMIT 1"
-            ).fetchone()
+            cur_version = self._with_lock_retry(
+                lambda: self._conn.execute(
+                    "SELECT version FROM schema_version ORDER BY version DESC LIMIT 1"
+                ).fetchone(),
+                "read SQLite schema_version",
+            )
             cur = cur_version[0] if cur_version else 0
         except Exception:
             # schema_version table doesn't exist yet — start from scratch.
@@ -162,8 +200,10 @@ class Database:
             if i > cur:
                 with self._lock:
                     try:
-                        self._conn.executescript(ddl)
-                        self._conn.commit()
+                        self._with_lock_retry(
+                            lambda ddl=ddl: self._execute_migration_script(ddl),
+                            f"apply SQLite migration step {i}",
+                        )
                     except sqlite3.OperationalError as e:
                         # Make migrations idempotent for ALTER TABLE/CREATE INDEX when re-run.
                         msg = str(e).lower()
@@ -176,6 +216,10 @@ class Database:
                             self._conn.commit()
                             continue
                         raise
+
+    def _execute_migration_script(self, ddl: str) -> None:
+        self._conn.executescript(ddl)
+        self._conn.commit()
 
     # ------------------------------------------------------------------
     # JSON → SQLite one-time migration

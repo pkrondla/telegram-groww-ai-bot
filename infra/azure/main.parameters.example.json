@@ -44,7 +44,7 @@
       "value": [
         {
           "name": "DB_PATH",
-          "value": "/data/trading_bot.db"
+          "value": "/tmp/trading_bot.db"
         },
         {
           "name": "SESSION_PATH",

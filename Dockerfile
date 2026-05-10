@@ -3,7 +3,7 @@ FROM python:3.12-slim
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
-    DB_PATH=/data/trading_bot.db \
+    DB_PATH=/tmp/trading_bot.db \
     SESSION_PATH=/data/session_name \
     SQLITE_JOURNAL_MODE=DELETE \
     SQLITE_BUSY_TIMEOUT_MS=30000 \

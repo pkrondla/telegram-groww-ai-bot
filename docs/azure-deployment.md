@@ -7,7 +7,7 @@ Azure Container App replica with Azure Files mounted at `/data` for durable stat
 
 - Azure Container App: runs `python -m app.main` from the Docker image.
 - Azure Files share: mounted at `/data`.
-- SQLite database: `/data/trading_bot.db`.
+- SQLite database: `/tmp/trading_bot.db`.
 - Telethon session: `/data/session_name.session`.
 - GitHub Container Registry: stores the Docker image at no extra cost.
 
@@ -115,7 +115,7 @@ Secret-backed variables:
 Plain environment variables:
 
 ```text
-DB_PATH=/data/trading_bot.db
+DB_PATH=/tmp/trading_bot.db
 SESSION_PATH=/data/session_name
 SQLITE_JOURNAL_MODE=DELETE
 SQLITE_BUSY_TIMEOUT_MS=30000
@@ -180,6 +180,11 @@ live trading.
 
 No secrets are required at Docker build time. The image should be reusable across
 environments; all credentials are injected by Azure Container Apps at runtime.
+
+`DB_PATH` intentionally uses `/tmp` on Azure Container Apps. Azure Files is
+SMB-backed and can hold SQLite locks indefinitely, so only the Telethon session is
+kept on the `/data` Azure Files mount. Move the trade database to a managed DB
+before relying on persisted trade state across restarts.
 
 ## GitHub Actions Secrets
 

@@ -121,6 +121,7 @@ class Database:
         if str(parent) not in ("", "."):
             parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
+        self._cleanup_stale_journal_files()
         is_new = not os.path.exists(self._path)
         timeout_sec = max(1, int(os.getenv("SQLITE_BUSY_TIMEOUT_MS", "30000")) // 1000)
         self._lock_retry_sec = max(0, int(os.getenv("SQLITE_LOCK_RETRY_SEC", "180")))
@@ -130,6 +131,20 @@ class Database:
             "set SQLite busy_timeout",
         )
         self._configure_journal_mode()
+        # Acquire and hold the exclusive file lock for the life of this connection.
+        # On Azure Files SMB, per-transaction locking is unreliable; holding the lock
+        # once at startup avoids "database is locked" errors on every commit.
+        self._with_lock_retry(
+            lambda: self._conn.execute("PRAGMA locking_mode=EXCLUSIVE"),
+            "set SQLite locking_mode=EXCLUSIVE",
+        )
+        # Trigger the actual exclusive lock acquisition immediately (locking_mode=EXCLUSIVE
+        # only takes effect on the first write; committing an empty BEGIN EXCLUSIVE here
+        # forces SQLite to grab the file lock right now rather than on the first migration).
+        self._with_lock_retry(
+            lambda: (self._conn.execute("BEGIN EXCLUSIVE"), self._conn.commit()),
+            "acquire SQLite exclusive lock",
+        )
         self._with_lock_retry(
             lambda: self._conn.execute("PRAGMA foreign_keys=ON"),
             "enable SQLite foreign_keys",
@@ -137,6 +152,24 @@ class Database:
         self._apply_migrations()
         if is_new:
             self._migrate_from_json()
+
+    def _cleanup_stale_journal_files(self) -> None:
+        """Remove SQLite journal/WAL files left by a previous container instance.
+
+        On Azure Files SMB, the old SMB lease may outlive the container and keep
+        these files locked.  Deleting them before opening the connection forces
+        SQLite to start clean rather than attempting to recover a stale journal
+        through the SMB lock that is still held by the previous instance.
+        """
+        for suffix in ("-journal", "-wal", "-shm"):
+            stale = self._path + suffix
+            try:
+                os.remove(stale)
+                logger.warning("Removed stale SQLite file %s (leftover from previous container)", stale)
+            except FileNotFoundError:
+                pass
+            except OSError as e:
+                logger.warning("Could not remove stale SQLite file %s: %s", stale, e)
 
     @staticmethod
     def _is_locked_error(exc: sqlite3.OperationalError) -> bool:
@@ -218,7 +251,14 @@ class Database:
                         raise
 
     def _execute_migration_script(self, ddl: str) -> None:
-        self._conn.executescript(ddl)
+        # Avoid executescript(): it issues an implicit COMMIT before running the DDL,
+        # which requires acquiring an exclusive file lock.  On Azure Files SMB that
+        # lock acquisition fails ("database is locked") because the previous container's
+        # SMB lease may still be alive.  Executing statements individually inside an
+        # explicit transaction sidesteps the implicit COMMIT entirely.
+        statements = [s.strip() for s in ddl.split(";") if s.strip()]
+        for stmt in statements:
+            self._conn.execute(stmt)
         self._conn.commit()
 
     # ------------------------------------------------------------------

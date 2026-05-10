@@ -114,9 +114,9 @@ jobs:
           BROKER_WINDOW_POSTCLOSE_MIN: ${{ vars.BROKER_WINDOW_POSTCLOSE_MIN || '5' }}
           GROWW_AUTH_POLL_SEC: ${{ vars.GROWW_AUTH_POLL_SEC || '60' }}
           EXTEND_RANGE_ALLOWS_ENTRY: ${{ vars.EXTEND_RANGE_ALLOWS_ENTRY || 'false' }}
-          SQLITE_JOURNAL_MODE: ${{ vars.SQLITE_JOURNAL_MODE || 'DELETE' }}
+          SQLITE_JOURNAL_MODE: ${{ vars.SQLITE_JOURNAL_MODE || 'MEMORY' }}
           SQLITE_BUSY_TIMEOUT_MS: ${{ vars.SQLITE_BUSY_TIMEOUT_MS || '30000' }}
-          SQLITE_LOCK_RETRY_SEC: ${{ vars.SQLITE_LOCK_RETRY_SEC || '180' }}
+          SQLITE_LOCK_RETRY_SEC: ${{ vars.SQLITE_LOCK_RETRY_SEC || '600' }}
         with:
           inlineScript: |
             set -euo pipefail

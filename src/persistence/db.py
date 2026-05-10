@@ -131,20 +131,6 @@ class Database:
             "set SQLite busy_timeout",
         )
         self._configure_journal_mode()
-        # Acquire and hold the exclusive file lock for the life of this connection.
-        # On Azure Files SMB, per-transaction locking is unreliable; holding the lock
-        # once at startup avoids "database is locked" errors on every commit.
-        self._with_lock_retry(
-            lambda: self._conn.execute("PRAGMA locking_mode=EXCLUSIVE"),
-            "set SQLite locking_mode=EXCLUSIVE",
-        )
-        # Trigger the actual exclusive lock acquisition immediately (locking_mode=EXCLUSIVE
-        # only takes effect on the first write; committing an empty BEGIN EXCLUSIVE here
-        # forces SQLite to grab the file lock right now rather than on the first migration).
-        self._with_lock_retry(
-            lambda: (self._conn.execute("BEGIN EXCLUSIVE"), self._conn.commit()),
-            "acquire SQLite exclusive lock",
-        )
         self._with_lock_retry(
             lambda: self._conn.execute("PRAGMA foreign_keys=ON"),
             "enable SQLite foreign_keys",
@@ -196,8 +182,10 @@ class Database:
     def _configure_journal_mode(self) -> None:
         journal_mode = os.getenv("SQLITE_JOURNAL_MODE", "").strip().upper()
         if not journal_mode:
-            # Azure Files is SMB-backed; WAL can fail with locking errors there.
-            journal_mode = "DELETE" if self._path.replace("\\", "/").startswith("/data/") else "WAL"
+            # Azure Files (SMB) has unreliable byte-range locking.
+            # MEMORY keeps the journal in RAM so no journal file is written to the
+            # share, reducing SMB lock round-trips.  WAL is unsafe on SMB.
+            journal_mode = "MEMORY" if self._path.replace("\\", "/").startswith("/data/") else "WAL"
         try:
             self._with_lock_retry(
                 lambda: self._conn.execute(f"PRAGMA journal_mode={journal_mode}"),

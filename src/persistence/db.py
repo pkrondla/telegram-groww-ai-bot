@@ -186,20 +186,40 @@ class Database:
             # MEMORY keeps the journal in RAM so no journal file is written to the
             # share, reducing SMB lock round-trips.  WAL is unsafe on SMB.
             journal_mode = "MEMORY" if self._path.replace("\\", "/").startswith("/data/") else "WAL"
-        try:
-            self._with_lock_retry(
-                lambda: self._conn.execute(f"PRAGMA journal_mode={journal_mode}"),
-                f"set SQLite journal_mode={journal_mode}",
-            )
-        except sqlite3.OperationalError as e:
-            if journal_mode != "DELETE":
-                logger.warning("SQLite journal_mode=%s failed (%s); falling back to DELETE.", journal_mode, e)
-                self._with_lock_retry(
-                    lambda: self._conn.execute("PRAGMA journal_mode=DELETE"),
-                    "set SQLite fallback journal_mode=DELETE",
-                )
+
+        # Switching FROM WAL mode (e.g. a DB created locally) requires a WAL
+        # checkpoint which needs an exclusive lock.  Use a short independent
+        # timeout (30 s) so we fall through to DELETE quickly rather than
+        # blocking for the full SQLITE_LOCK_RETRY_SEC window.
+        _JOURNAL_MODE_TIMEOUT_SEC = 30
+        deadline = time.monotonic() + _JOURNAL_MODE_TIMEOUT_SEC
+        attempt = 0
+        while True:
+            try:
+                self._conn.execute(f"PRAGMA journal_mode={journal_mode}")
                 return
-            raise
+            except sqlite3.OperationalError as e:
+                if not self._is_locked_error(e) or time.monotonic() >= deadline:
+                    break
+                attempt += 1
+                try:
+                    self._conn.rollback()
+                except Exception:
+                    pass
+                if attempt == 1 or attempt % 5 == 0:
+                    logger.warning(
+                        "set SQLite journal_mode=%s waiting for lock to clear: %s", journal_mode, e
+                    )
+                time.sleep(2)
+
+        if journal_mode != "DELETE":
+            logger.warning(
+                "SQLite journal_mode=%s could not be set; falling back to DELETE.", journal_mode
+            )
+            try:
+                self._conn.execute("PRAGMA journal_mode=DELETE")
+            except sqlite3.OperationalError:
+                logger.warning("SQLite journal_mode=DELETE fallback also failed; continuing.")
 
     # ------------------------------------------------------------------
     # Schema

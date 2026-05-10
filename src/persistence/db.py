@@ -142,11 +142,13 @@ class Database:
     def _cleanup_stale_journal_files(self) -> None:
         """Remove SQLite journal/WAL files left by a previous container instance.
 
-        On Azure Files SMB, the old SMB lease may outlive the container and keep
-        these files locked.  Deleting them before opening the connection forces
-        SQLite to start clean rather than attempting to recover a stale journal
-        through the SMB lock that is still held by the previous instance.
+        Only runs for Azure Files paths (/data/…).  On SMB the old container's
+        lease may outlive the process and keep these files locked, preventing the
+        new connection from opening.  On local filesystems WAL recovery is safe
+        and correct — deleting the -wal file there would lose committed data.
         """
+        if not self._path.replace("\\", "/").startswith("/data/"):
+            return
         for suffix in ("-journal", "-wal", "-shm"):
             stale = self._path + suffix
             try:

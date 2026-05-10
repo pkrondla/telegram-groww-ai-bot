@@ -1,0 +1,285 @@
+name: CD - Deploy to Windows EC2 (Native Python + NSSM)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  OPENAI_MODEL: ${{ vars.OPENAI_MODEL || 'gpt-4o-mini' }}
+  DRY_RUN: ${{ vars.DRY_RUN || 'false' }}
+  INDEX_ORDER_LOTS_COUNT: ${{ vars.INDEX_ORDER_LOTS_COUNT || '1' }}
+  STOCK_ORDER_LOTS_COUNT: ${{ vars.STOCK_ORDER_LOTS_COUNT || '1' }}
+  ORDER_QUANTITY: ${{ vars.ORDER_QUANTITY || '1' }}
+  TARGET_BUFFER_PCT: ${{ vars.TARGET_BUFFER_PCT || '0.005' }}
+  MULTI_TARGET_ENABLED: ${{ vars.MULTI_TARGET_ENABLED || 'true' }}
+  TARGET_SPLIT_2: ${{ vars.TARGET_SPLIT_2 || '10:90' }}
+  TARGET_SPLIT_3: ${{ vars.TARGET_SPLIT_3 || '20:50:30' }}
+  TARGET_PRICE_TICK_SIZE: ${{ vars.TARGET_PRICE_TICK_SIZE || '0.05' }}
+  INDEX_POSITION_SIZING_MODE: ${{ vars.INDEX_POSITION_SIZING_MODE || 'fixed' }}
+  STOCK_POSITION_SIZING_MODE: ${{ vars.STOCK_POSITION_SIZING_MODE || 'risk' }}
+  RISK_PCT_PER_TRADE: ${{ vars.RISK_PCT_PER_TRADE || '0.02' }}
+  MAX_TOTAL_OPEN_RISK_PCT: ${{ vars.MAX_TOTAL_OPEN_RISK_PCT || '0.2' }}
+  INDEX_MIN_LOTS: ${{ vars.INDEX_MIN_LOTS || '1' }}
+  INDEX_MAX_LOTS: ${{ vars.INDEX_MAX_LOTS || '15' }}
+  STOCK_MIN_LOTS: ${{ vars.STOCK_MIN_LOTS || '1' }}
+  STOCK_MAX_LOTS: ${{ vars.STOCK_MAX_LOTS || '10' }}
+  RISK_MODE_ON_ZERO_LOTS: ${{ vars.RISK_MODE_ON_ZERO_LOTS || 'fixed' }}
+  LOG_LEVEL: ${{ vars.LOG_LEVEL || 'INFO' }}
+  ENTRY_QUEUE_ENABLED: ${{ vars.ENTRY_QUEUE_ENABLED || 'true' }}
+  ENTRY_QUEUE_POLL_SEC: ${{ vars.ENTRY_QUEUE_POLL_SEC || '30' }}
+  ENTRY_QUEUE_MAX_WAIT_MIN: ${{ vars.ENTRY_QUEUE_MAX_WAIT_MIN || '30' }}
+  SIZE_ADVISORY_TTL_SEC: ${{ vars.SIZE_ADVISORY_TTL_SEC || '900' }}
+  ENTRY_SINGLE_LIMIT_ORDER: ${{ vars.ENTRY_SINGLE_LIMIT_ORDER || 'true' }}
+  CHASE_MIN_RR: ${{ vars.CHASE_MIN_RR || '1.0' }}
+  CHASE_RR_TARGET_INDEX: ${{ vars.CHASE_RR_TARGET_INDEX || '2' }}
+  ACTIVE_RECONCILE_ENABLED: ${{ vars.ACTIVE_RECONCILE_ENABLED || 'true' }}
+  ACTIVE_RECONCILE_POLL_SEC: ${{ vars.ACTIVE_RECONCILE_POLL_SEC || '1800' }}
+  AUTO_REARM_PROTECTION: ${{ vars.AUTO_REARM_PROTECTION || 'true' }}
+  AUTO_REARM_POLL_SEC: ${{ vars.AUTO_REARM_POLL_SEC || '900' }}
+  OCO_PLAN_ENFORCEMENT_MODE: ${{ vars.OCO_PLAN_ENFORCEMENT_MODE || 'ENFORCE' }}
+  VOL_SL_SCHEDULE_ENABLED: ${{ vars.VOL_SL_SCHEDULE_ENABLED || 'true' }}
+  VOL_SL_WIDEN_TIME_IST: ${{ vars.VOL_SL_WIDEN_TIME_IST || '15:20' }}
+  VOL_SL_RESTORE_TIME_IST: ${{ vars.VOL_SL_RESTORE_TIME_IST || '09:20' }}
+  VOL_SL_WIDEN_PCT: ${{ vars.VOL_SL_WIDEN_PCT || '0.20' }}
+  VOL_SL_SCHEDULE_POLL_SEC: ${{ vars.VOL_SL_SCHEDULE_POLL_SEC || '30' }}
+  VOL_SL_SKIP_WEEKENDS: ${{ vars.VOL_SL_SKIP_WEEKENDS || 'false' }}
+  EOD_SUMMARY_ENABLED: ${{ vars.EOD_SUMMARY_ENABLED || 'true' }}
+  EOD_SUMMARY_POLL_SEC: ${{ vars.EOD_SUMMARY_POLL_SEC || '30' }}
+  EOD_SUMMARY_SKIP_WEEKENDS: ${{ vars.EOD_SUMMARY_SKIP_WEEKENDS || 'true' }}
+  MGMT_QUEUE_ENABLED: ${{ vars.MGMT_QUEUE_ENABLED || 'true' }}
+  MGMT_QUEUE_POLL_SEC: ${{ vars.MGMT_QUEUE_POLL_SEC || '10' }}
+  MGMT_QUEUE_MAX_RETRIES: ${{ vars.MGMT_QUEUE_MAX_RETRIES || '5' }}
+  MGMT_QUEUE_TTL_MIN: ${{ vars.MGMT_QUEUE_TTL_MIN || '360' }}
+  MARKET_OPEN_TIME_IST: ${{ vars.MARKET_OPEN_TIME_IST || '09:15' }}
+  MARKET_CLOSE_TIME_IST: ${{ vars.MARKET_CLOSE_TIME_IST || '15:30' }}
+  BROKER_WINDOW_PREOPEN_MIN: ${{ vars.BROKER_WINDOW_PREOPEN_MIN || '15' }}
+  BROKER_WINDOW_POSTCLOSE_MIN: ${{ vars.BROKER_WINDOW_POSTCLOSE_MIN || '5' }}
+  GROWW_AUTH_POLL_SEC: ${{ vars.GROWW_AUTH_POLL_SEC || '60' }}
+  EXTEND_RANGE_ALLOWS_ENTRY: ${{ vars.EXTEND_RANGE_ALLOWS_ENTRY || 'false' }}
+  SQLITE_JOURNAL_MODE: ${{ vars.SQLITE_JOURNAL_MODE || 'MEMORY' }}
+  SQLITE_BUSY_TIMEOUT_MS: ${{ vars.SQLITE_BUSY_TIMEOUT_MS || '30000' }}
+  SQLITE_LOCK_RETRY_SEC: ${{ vars.SQLITE_LOCK_RETRY_SEC || '600' }}
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      # Required GitHub Secrets:
+      # - EC2_HOST: public IP or DNS for the Windows EC2 instance
+      # - EC2_USERNAME: login user (for example, Administrator)
+      # - EC2_SSH_KEY: private PEM key for SSH
+      # - GH_PAT: GitHub PAT with read access to this repo
+      #
+      # One-time EC2 setup prerequisites:
+      # - OpenSSH server enabled and running
+      # - Python 3.12 on PATH
+      # - Git on PATH
+      # - nssm.exe on PATH (for example, C:\Windows\System32\nssm.exe)
+      # - Port 22 allowed in EC2 Security Group
+      # - Public key installed at C:\Users\<user>\.ssh\authorized_keys
+      - name: Deploy over SSH
+        uses: appleboy/ssh-action@v1.0.3
+        env:
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GH_PAT: ${{ secrets.GH_PAT }}
+          TELEGRAM_API_ID: ${{ secrets.TELEGRAM_API_ID }}
+          TELEGRAM_API_HASH: ${{ secrets.TELEGRAM_API_HASH }}
+          TELEGRAM_TARGET_CHAT_ID: ${{ secrets.TELEGRAM_TARGET_CHAT_ID }}
+          TELEGRAM_ADMIN_ID: ${{ secrets.TELEGRAM_ADMIN_ID }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENAI_MODEL: ${{ env.OPENAI_MODEL }}
+          GROWW_ACCOUNTS_JSON: ${{ secrets.GROWW_ACCOUNTS_JSON }}
+          DRY_RUN: ${{ env.DRY_RUN }}
+          INDEX_ORDER_LOTS_COUNT: ${{ env.INDEX_ORDER_LOTS_COUNT }}
+          STOCK_ORDER_LOTS_COUNT: ${{ env.STOCK_ORDER_LOTS_COUNT }}
+          ORDER_QUANTITY: ${{ env.ORDER_QUANTITY }}
+          TARGET_BUFFER_PCT: ${{ env.TARGET_BUFFER_PCT }}
+          MULTI_TARGET_ENABLED: ${{ env.MULTI_TARGET_ENABLED }}
+          TARGET_SPLIT_2: ${{ env.TARGET_SPLIT_2 }}
+          TARGET_SPLIT_3: ${{ env.TARGET_SPLIT_3 }}
+          TARGET_PRICE_TICK_SIZE: ${{ env.TARGET_PRICE_TICK_SIZE }}
+          INDEX_POSITION_SIZING_MODE: ${{ env.INDEX_POSITION_SIZING_MODE }}
+          STOCK_POSITION_SIZING_MODE: ${{ env.STOCK_POSITION_SIZING_MODE }}
+          RISK_PCT_PER_TRADE: ${{ env.RISK_PCT_PER_TRADE }}
+          MAX_TOTAL_OPEN_RISK_PCT: ${{ env.MAX_TOTAL_OPEN_RISK_PCT }}
+          INDEX_MIN_LOTS: ${{ env.INDEX_MIN_LOTS }}
+          INDEX_MAX_LOTS: ${{ env.INDEX_MAX_LOTS }}
+          STOCK_MIN_LOTS: ${{ env.STOCK_MIN_LOTS }}
+          STOCK_MAX_LOTS: ${{ env.STOCK_MAX_LOTS }}
+          RISK_MODE_ON_ZERO_LOTS: ${{ env.RISK_MODE_ON_ZERO_LOTS }}
+          LOG_LEVEL: ${{ env.LOG_LEVEL }}
+          ENTRY_QUEUE_ENABLED: ${{ env.ENTRY_QUEUE_ENABLED }}
+          ENTRY_QUEUE_POLL_SEC: ${{ env.ENTRY_QUEUE_POLL_SEC }}
+          ENTRY_QUEUE_MAX_WAIT_MIN: ${{ env.ENTRY_QUEUE_MAX_WAIT_MIN }}
+          SIZE_ADVISORY_TTL_SEC: ${{ env.SIZE_ADVISORY_TTL_SEC }}
+          ENTRY_SINGLE_LIMIT_ORDER: ${{ env.ENTRY_SINGLE_LIMIT_ORDER }}
+          CHASE_MIN_RR: ${{ env.CHASE_MIN_RR }}
+          CHASE_RR_TARGET_INDEX: ${{ env.CHASE_RR_TARGET_INDEX }}
+          ACTIVE_RECONCILE_ENABLED: ${{ env.ACTIVE_RECONCILE_ENABLED }}
+          ACTIVE_RECONCILE_POLL_SEC: ${{ env.ACTIVE_RECONCILE_POLL_SEC }}
+          AUTO_REARM_PROTECTION: ${{ env.AUTO_REARM_PROTECTION }}
+          AUTO_REARM_POLL_SEC: ${{ env.AUTO_REARM_POLL_SEC }}
+          OCO_PLAN_ENFORCEMENT_MODE: ${{ env.OCO_PLAN_ENFORCEMENT_MODE }}
+          VOL_SL_SCHEDULE_ENABLED: ${{ env.VOL_SL_SCHEDULE_ENABLED }}
+          VOL_SL_WIDEN_TIME_IST: ${{ env.VOL_SL_WIDEN_TIME_IST }}
+          VOL_SL_RESTORE_TIME_IST: ${{ env.VOL_SL_RESTORE_TIME_IST }}
+          VOL_SL_WIDEN_PCT: ${{ env.VOL_SL_WIDEN_PCT }}
+          VOL_SL_SCHEDULE_POLL_SEC: ${{ env.VOL_SL_SCHEDULE_POLL_SEC }}
+          VOL_SL_SKIP_WEEKENDS: ${{ env.VOL_SL_SKIP_WEEKENDS }}
+          EOD_SUMMARY_ENABLED: ${{ env.EOD_SUMMARY_ENABLED }}
+          EOD_SUMMARY_POLL_SEC: ${{ env.EOD_SUMMARY_POLL_SEC }}
+          EOD_SUMMARY_SKIP_WEEKENDS: ${{ env.EOD_SUMMARY_SKIP_WEEKENDS }}
+          MGMT_QUEUE_ENABLED: ${{ env.MGMT_QUEUE_ENABLED }}
+          MGMT_QUEUE_POLL_SEC: ${{ env.MGMT_QUEUE_POLL_SEC }}
+          MGMT_QUEUE_MAX_RETRIES: ${{ env.MGMT_QUEUE_MAX_RETRIES }}
+          MGMT_QUEUE_TTL_MIN: ${{ env.MGMT_QUEUE_TTL_MIN }}
+          MARKET_OPEN_TIME_IST: ${{ env.MARKET_OPEN_TIME_IST }}
+          MARKET_CLOSE_TIME_IST: ${{ env.MARKET_CLOSE_TIME_IST }}
+          BROKER_WINDOW_PREOPEN_MIN: ${{ env.BROKER_WINDOW_PREOPEN_MIN }}
+          BROKER_WINDOW_POSTCLOSE_MIN: ${{ env.BROKER_WINDOW_POSTCLOSE_MIN }}
+          GROWW_AUTH_POLL_SEC: ${{ env.GROWW_AUTH_POLL_SEC }}
+          EXTEND_RANGE_ALLOWS_ENTRY: ${{ env.EXTEND_RANGE_ALLOWS_ENTRY }}
+          SQLITE_JOURNAL_MODE: ${{ env.SQLITE_JOURNAL_MODE }}
+          SQLITE_BUSY_TIMEOUT_MS: ${{ env.SQLITE_BUSY_TIMEOUT_MS }}
+          SQLITE_LOCK_RETRY_SEC: ${{ env.SQLITE_LOCK_RETRY_SEC }}
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USERNAME }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          script_stop: true
+          command_timeout: 30m
+          envs: GITHUB_REPOSITORY,GH_PAT,TELEGRAM_API_ID,TELEGRAM_API_HASH,TELEGRAM_TARGET_CHAT_ID,TELEGRAM_ADMIN_ID,TELEGRAM_BOT_TOKEN,OPENAI_API_KEY,OPENAI_MODEL,GROWW_ACCOUNTS_JSON,DRY_RUN,INDEX_ORDER_LOTS_COUNT,STOCK_ORDER_LOTS_COUNT,ORDER_QUANTITY,TARGET_BUFFER_PCT,MULTI_TARGET_ENABLED,TARGET_SPLIT_2,TARGET_SPLIT_3,TARGET_PRICE_TICK_SIZE,INDEX_POSITION_SIZING_MODE,STOCK_POSITION_SIZING_MODE,RISK_PCT_PER_TRADE,MAX_TOTAL_OPEN_RISK_PCT,INDEX_MIN_LOTS,INDEX_MAX_LOTS,STOCK_MIN_LOTS,STOCK_MAX_LOTS,RISK_MODE_ON_ZERO_LOTS,LOG_LEVEL,ENTRY_QUEUE_ENABLED,ENTRY_QUEUE_POLL_SEC,ENTRY_QUEUE_MAX_WAIT_MIN,SIZE_ADVISORY_TTL_SEC,ENTRY_SINGLE_LIMIT_ORDER,CHASE_MIN_RR,CHASE_RR_TARGET_INDEX,ACTIVE_RECONCILE_ENABLED,ACTIVE_RECONCILE_POLL_SEC,AUTO_REARM_PROTECTION,AUTO_REARM_POLL_SEC,OCO_PLAN_ENFORCEMENT_MODE,VOL_SL_SCHEDULE_ENABLED,VOL_SL_WIDEN_TIME_IST,VOL_SL_RESTORE_TIME_IST,VOL_SL_WIDEN_PCT,VOL_SL_SCHEDULE_POLL_SEC,VOL_SL_SKIP_WEEKENDS,EOD_SUMMARY_ENABLED,EOD_SUMMARY_POLL_SEC,EOD_SUMMARY_SKIP_WEEKENDS,MGMT_QUEUE_ENABLED,MGMT_QUEUE_POLL_SEC,MGMT_QUEUE_MAX_RETRIES,MGMT_QUEUE_TTL_MIN,MARKET_OPEN_TIME_IST,MARKET_CLOSE_TIME_IST,BROKER_WINDOW_PREOPEN_MIN,BROKER_WINDOW_POSTCLOSE_MIN,GROWW_AUTH_POLL_SEC,EXTEND_RANGE_ALLOWS_ENTRY,SQLITE_JOURNAL_MODE,SQLITE_BUSY_TIMEOUT_MS,SQLITE_LOCK_RETRY_SEC
+          script: |
+            $ErrorActionPreference = "Stop"
+
+            $repo = "C:\groww-bot"
+            $logsDir = Join-Path $repo "logs"
+            $dataDir = Join-Path $repo "data"
+            $serviceName = "GrowwBot"
+
+            if (-not (Get-Command nssm -ErrorAction SilentlyContinue)) {
+              throw "nssm was not found on PATH. Install nssm.exe on the EC2 host."
+            }
+
+            if (Test-Path (Join-Path $repo ".git")) {
+              git -C $repo pull origin main
+            } else {
+              $cloneUrl = "https://x-access-token:$env:GH_PAT@github.com/$env:GITHUB_REPOSITORY.git"
+              git clone $cloneUrl $repo
+            }
+
+            New-Item -ItemType Directory -Path $logsDir -Force | Out-Null
+            New-Item -ItemType Directory -Path $dataDir -Force | Out-Null
+
+            python -m pip install --upgrade pip
+            python -m pip install -r (Join-Path $repo "requirements.txt")
+
+            $envLines = @(
+              "TELEGRAM_API_ID=$env:TELEGRAM_API_ID",
+              "TELEGRAM_API_HASH=$env:TELEGRAM_API_HASH",
+              "TELEGRAM_TARGET_CHAT_ID=$env:TELEGRAM_TARGET_CHAT_ID",
+              "TELEGRAM_ADMIN_ID=$env:TELEGRAM_ADMIN_ID",
+              "TELEGRAM_BOT_TOKEN=$env:TELEGRAM_BOT_TOKEN",
+              "TELEGRAM_SESSION_NAME=session_name",
+              "SESSION_PATH=data/session_name",
+              "DB_PATH=data/trading_bot.db",
+              "OPENAI_API_KEY=$env:OPENAI_API_KEY",
+              "OPENAI_MODEL=$env:OPENAI_MODEL",
+              "GROWW_ACCOUNTS_JSON=$env:GROWW_ACCOUNTS_JSON",
+              "DRY_RUN=$env:DRY_RUN",
+              "INDEX_ORDER_LOTS_COUNT=$env:INDEX_ORDER_LOTS_COUNT",
+              "STOCK_ORDER_LOTS_COUNT=$env:STOCK_ORDER_LOTS_COUNT",
+              "ORDER_QUANTITY=$env:ORDER_QUANTITY",
+              "TARGET_BUFFER_PCT=$env:TARGET_BUFFER_PCT",
+              "MULTI_TARGET_ENABLED=$env:MULTI_TARGET_ENABLED",
+              "TARGET_SPLIT_2=$env:TARGET_SPLIT_2",
+              "TARGET_SPLIT_3=$env:TARGET_SPLIT_3",
+              "TARGET_PRICE_TICK_SIZE=$env:TARGET_PRICE_TICK_SIZE",
+              "INDEX_POSITION_SIZING_MODE=$env:INDEX_POSITION_SIZING_MODE",
+              "STOCK_POSITION_SIZING_MODE=$env:STOCK_POSITION_SIZING_MODE",
+              "RISK_PCT_PER_TRADE=$env:RISK_PCT_PER_TRADE",
+              "MAX_TOTAL_OPEN_RISK_PCT=$env:MAX_TOTAL_OPEN_RISK_PCT",
+              "INDEX_MIN_LOTS=$env:INDEX_MIN_LOTS",
+              "INDEX_MAX_LOTS=$env:INDEX_MAX_LOTS",
+              "STOCK_MIN_LOTS=$env:STOCK_MIN_LOTS",
+              "STOCK_MAX_LOTS=$env:STOCK_MAX_LOTS",
+              "RISK_MODE_ON_ZERO_LOTS=$env:RISK_MODE_ON_ZERO_LOTS",
+              "LOG_LEVEL=$env:LOG_LEVEL",
+              "ENTRY_QUEUE_ENABLED=$env:ENTRY_QUEUE_ENABLED",
+              "ENTRY_QUEUE_POLL_SEC=$env:ENTRY_QUEUE_POLL_SEC",
+              "ENTRY_QUEUE_MAX_WAIT_MIN=$env:ENTRY_QUEUE_MAX_WAIT_MIN",
+              "SIZE_ADVISORY_TTL_SEC=$env:SIZE_ADVISORY_TTL_SEC",
+              "ENTRY_SINGLE_LIMIT_ORDER=$env:ENTRY_SINGLE_LIMIT_ORDER",
+              "CHASE_MIN_RR=$env:CHASE_MIN_RR",
+              "CHASE_RR_TARGET_INDEX=$env:CHASE_RR_TARGET_INDEX",
+              "ACTIVE_RECONCILE_ENABLED=$env:ACTIVE_RECONCILE_ENABLED",
+              "ACTIVE_RECONCILE_POLL_SEC=$env:ACTIVE_RECONCILE_POLL_SEC",
+              "AUTO_REARM_PROTECTION=$env:AUTO_REARM_PROTECTION",
+              "AUTO_REARM_POLL_SEC=$env:AUTO_REARM_POLL_SEC",
+              "OCO_PLAN_ENFORCEMENT_MODE=$env:OCO_PLAN_ENFORCEMENT_MODE",
+              "VOL_SL_SCHEDULE_ENABLED=$env:VOL_SL_SCHEDULE_ENABLED",
+              "VOL_SL_WIDEN_TIME_IST=$env:VOL_SL_WIDEN_TIME_IST",
+              "VOL_SL_RESTORE_TIME_IST=$env:VOL_SL_RESTORE_TIME_IST",
+              "VOL_SL_WIDEN_PCT=$env:VOL_SL_WIDEN_PCT",
+              "VOL_SL_SCHEDULE_POLL_SEC=$env:VOL_SL_SCHEDULE_POLL_SEC",
+              "VOL_SL_SKIP_WEEKENDS=$env:VOL_SL_SKIP_WEEKENDS",
+              "EOD_SUMMARY_ENABLED=$env:EOD_SUMMARY_ENABLED",
+              "EOD_SUMMARY_POLL_SEC=$env:EOD_SUMMARY_POLL_SEC",
+              "EOD_SUMMARY_SKIP_WEEKENDS=$env:EOD_SUMMARY_SKIP_WEEKENDS",
+              "MGMT_QUEUE_ENABLED=$env:MGMT_QUEUE_ENABLED",
+              "MGMT_QUEUE_POLL_SEC=$env:MGMT_QUEUE_POLL_SEC",
+              "MGMT_QUEUE_MAX_RETRIES=$env:MGMT_QUEUE_MAX_RETRIES",
+              "MGMT_QUEUE_TTL_MIN=$env:MGMT_QUEUE_TTL_MIN",
+              "MARKET_OPEN_TIME_IST=$env:MARKET_OPEN_TIME_IST",
+              "MARKET_CLOSE_TIME_IST=$env:MARKET_CLOSE_TIME_IST",
+              "BROKER_WINDOW_PREOPEN_MIN=$env:BROKER_WINDOW_PREOPEN_MIN",
+              "BROKER_WINDOW_POSTCLOSE_MIN=$env:BROKER_WINDOW_POSTCLOSE_MIN",
+              "GROWW_AUTH_POLL_SEC=$env:GROWW_AUTH_POLL_SEC",
+              "EXTEND_RANGE_ALLOWS_ENTRY=$env:EXTEND_RANGE_ALLOWS_ENTRY",
+              "SQLITE_JOURNAL_MODE=$env:SQLITE_JOURNAL_MODE",
+              "SQLITE_BUSY_TIMEOUT_MS=$env:SQLITE_BUSY_TIMEOUT_MS",
+              "SQLITE_LOCK_RETRY_SEC=$env:SQLITE_LOCK_RETRY_SEC"
+            )
+            Set-Content -Path (Join-Path $repo ".env") -Value $envLines -Encoding utf8
+
+            $launcher = @'
+            $ErrorActionPreference = "Stop"
+            $repo = "C:\groww-bot"
+            Get-Content (Join-Path $repo ".env") | ForEach-Object {
+              if ($_ -match '^\s*#' -or [string]::IsNullOrWhiteSpace($_)) { return }
+              $parts = $_.Split("=", 2)
+              if ($parts.Count -eq 2) {
+                [System.Environment]::SetEnvironmentVariable($parts[0], $parts[1], "Process")
+              }
+            }
+            Set-Location $repo
+            python -m app.main
+            '@
+            Set-Content -Path (Join-Path $repo "start-bot.ps1") -Value $launcher -Encoding utf8
+
+            if (Get-Service -Name $serviceName -ErrorAction SilentlyContinue) {
+              nssm stop $serviceName confirm | Out-Null
+              Start-Sleep -Seconds 2
+              nssm remove $serviceName confirm | Out-Null
+            }
+
+            $launcherPath = Join-Path $repo "start-bot.ps1"
+            nssm install $serviceName "powershell.exe" | Out-Null
+            nssm set $serviceName AppParameters "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$launcherPath`"" | Out-Null
+            nssm set $serviceName AppDirectory $repo | Out-Null
+            nssm set $serviceName AppStdout (Join-Path $logsDir "bot.log") | Out-Null
+            nssm set $serviceName AppStderr (Join-Path $logsDir "bot-error.log") | Out-Null
+            nssm set $serviceName AppRotateFiles 1 | Out-Null
+            nssm set $serviceName AppRotateOnline 1 | Out-Null
+            nssm set $serviceName Start SERVICE_AUTO_START | Out-Null
+
+            nssm start $serviceName | Out-Null
+            Start-Sleep -Seconds 3
+            $status = (nssm status $serviceName).Trim()
+            if ($status -ne "SERVICE_RUNNING") {
+              throw "Service $serviceName failed to start. Current status: $status"
+            }
+            Write-Host "$serviceName is running."

@@ -3,11 +3,12 @@ FROM python:3.12-slim
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
-    DB_PATH=/tmp/trading_bot.db \
-    SESSION_PATH=/data/session_name \
-    SQLITE_JOURNAL_MODE=DELETE \
+    DB_PATH=/data/trading_bot.db \
+    SESSION_PATH=/tmp/session_name \
+    SESSION_PERSISTENT_PATH=/data/session_name \
+    SQLITE_JOURNAL_MODE=MEMORY \
     SQLITE_BUSY_TIMEOUT_MS=30000 \
-    SQLITE_LOCK_RETRY_SEC=180
+    SQLITE_LOCK_RETRY_SEC=600
 
 WORKDIR /app
 

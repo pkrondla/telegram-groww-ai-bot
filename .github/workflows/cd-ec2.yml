@@ -360,8 +360,7 @@ jobs:
               "write launcher",
           )
 
-          run_ps(
-              f"""
+          service_script = """
               $ErrorActionPreference = "Stop"
               function Invoke-Native([scriptblock]$Command, [string]$Name) {
                 & $Command
@@ -386,7 +385,7 @@ jobs:
               Invoke-Native { nssm set $serviceName AppRotateFiles 1 } "nssm set AppRotateFiles" | Out-Null
               Invoke-Native { nssm set $serviceName AppRotateOnline 1 } "nssm set AppRotateOnline" | Out-Null
               Invoke-Native { nssm set $serviceName Start SERVICE_AUTO_START } "nssm set Start" | Out-Null
-              Invoke-Native {{ nssm set $serviceName ObjectName "{service_user}" "{service_pass}" }} "nssm set ObjectName" | Out-Null
+              Invoke-Native { nssm set $serviceName ObjectName "__SERVICE_USER__" "__SERVICE_PASS__" } "nssm set ObjectName" | Out-Null
               Invoke-Native { nssm set $serviceName AppExit Default Restart } "nssm set AppExit" | Out-Null
               Invoke-Native { nssm set $serviceName AppThrottle 15000 } "nssm set AppThrottle" | Out-Null
               Invoke-Native { nssm start $serviceName } "nssm start" | Out-Null
@@ -394,7 +393,7 @@ jobs:
               $status = (nssm status $serviceName).Trim()
               if ($status -ne "SERVICE_RUNNING") { throw "Service failed to start: $status" }
               Write-Host "$serviceName is running."
-              """,
-              "configure/start service",
-          )
+              """
+          service_script = service_script.replace("__SERVICE_USER__", service_user).replace("__SERVICE_PASS__", service_pass)
+          run_ps(service_script, "configure/start service")
           PY

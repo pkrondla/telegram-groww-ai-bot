@@ -24,9 +24,14 @@ _OVERRIDE_COMMANDS = {
     "SIZING":   "sizing_status",
     "SIZING MODE": "sizing_status",
     "REARM":   "rearm",
-    "DAY SUMMARY": "day_summary",
-    "EOD SUMMARY": "day_summary",
-    "MARKET CLOSING SUMMARY": "day_summary",
+    "DAY SUMMARY": "profit_day",
+    "EOD SUMMARY": "profit_day",
+    "MARKET CLOSING SUMMARY": "profit_day",
+    "PROFIT": "profit_day",
+    "PROFIT DAY": "profit_day",
+    "PROFIT TODAY": "profit_day",
+    "PROFIT WEEK": "profit_week",
+    "PROFIT MONTH": "profit_month",
     "HELP":     "help",
     "DRYRUN ON":  "dryrun_on",
     "DRYRUN OFF": "dryrun_off",
@@ -442,6 +447,10 @@ class BotListener:
         m_prog = re.fullmatch(r"(?:SL\s+)?PROGRESS\s+([A-Z0-9]+)", t)
         if m_prog and m_prog.group(1) != "ALL":
             return f"progress_symbol:{m_prog.group(1)}"
+        # PROFIT SIGNAL <SYMBOL> — per-signal view for one trading symbol
+        m_profit_sig = re.fullmatch(r"PROFIT\s+SIGNAL\s+([A-Z0-9]+)", t)
+        if m_profit_sig:
+            return f"profit_signal:{m_profit_sig.group(1)}"
         if t in ("VOLSL WIDEN", "VOL_SL WIDEN", "VOL SL WIDEN"):
             return "volsl_widen"
         if t in ("VOLSL RESTORE", "VOL_SL RESTORE", "VOL SL RESTORE"):
@@ -693,13 +702,33 @@ class BotListener:
                 parts.append(f"[{account_id}] {msg}")
             msg = "\n".join(parts)
             await self.notifier.send(msg)
-        elif command == "day_summary":
-            # On-demand summary uses the same formatter as scheduled market close alert.
+        elif command in ("profit_day", "profit_week", "profit_month"):
+            period = {
+                "profit_day": "day",
+                "profit_week": "week",
+                "profit_month": "month",
+            }[command]
             parts = []
             for account_id, rt in self.multi_account.runtimes().items():
-                msg = await asyncio.to_thread(rt.trader._build_eod_summary_text)
+                msg = await asyncio.to_thread(
+                    rt.trader._build_profit_summary_text, period
+                )
                 parts.append(f"[{account_id}]\n{msg}")
-            await self.notifier.send_alert("Market Closing Summary", "\n\n".join(parts))
+            title = {
+                "profit_day": "Trading P&L — Day",
+                "profit_week": "Trading P&L — Week",
+                "profit_month": "Trading P&L — Month",
+            }[command]
+            await self.notifier.send_alert(title, "\n\n".join(parts))
+        elif command.startswith("profit_signal:"):
+            sym = command.split(":", 1)[1].strip().upper()
+            parts = []
+            for account_id, rt in self.multi_account.runtimes().items():
+                msg = await asyncio.to_thread(
+                    rt.trader._build_profit_summary_text, "signal", symbol_filter=sym
+                )
+                parts.append(f"[{account_id}]\n{msg}")
+            await self.notifier.send_alert(f"Signal P&L — {sym}", "\n\n".join(parts))
         elif command == "help":
             await self.notifier.send(
                 "Bot Command Help\n\n"
@@ -714,7 +743,10 @@ class BotListener:
                 "- VOLSL RESTORE — run scheduled restore now (requires prior widen / vol_sl_needs_restore)\n"
                 "- PROGRESS — multi-target SL progression sync for all active trades\n"
                 "- PROGRESS <TRADING_SYMBOL> — progression sync for one active trade\n"
-                "- DAY SUMMARY — send current Market Closing Summary on demand\n"
+                "- DAY SUMMARY / PROFIT DAY — today's realized P&L (per leg)\n"
+                "- PROFIT WEEK — last 7 days realized P&L grouped by symbol\n"
+                "- PROFIT MONTH — current month realized P&L grouped by symbol\n"
+                "- PROFIT SIGNAL <TRADING_SYMBOL> — all-time per-signal P&L breakdown for one symbol\n"
                 "- CLEAR PENDING — clear pending entry queue\n"
                 "- SIZING — show current position sizing modes\n"
                 "- SIZING INDEX FIXED|RISK — set index sizing mode\n"

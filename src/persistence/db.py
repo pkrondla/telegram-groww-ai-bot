@@ -5,7 +5,11 @@ Replaces the flat JSON files used previously:
   active_trades.json          -> active_trades table
   pending_trades.json         -> pending_entries table
   pending_management.json     -> pending_management table
-  completed_trades/*.json     -> completed_trades table
+
+Schema v3 introduces ``leg_exits`` (one row per individual OCO leg exit, keyed
+by ``parent_trade_id``) and ``eod_state`` (per-account/date EOD-sent dedup),
+replacing the older ``completed_trades`` table.  ``leg_exits`` is the single
+source of truth for all profit reporting (day/week/month and per-signal).
 
 All existing business logic in trader.py is untouched — only the I/O methods
 (_load_active_trades, _save_active_trade, etc.) delegate here.
@@ -108,6 +112,49 @@ _MIGRATIONS = [
     );
     CREATE INDEX IF NOT EXISTS idx_execution_ledger_created ON execution_ledger(created_at);
     INSERT OR IGNORE INTO schema_version VALUES (2);
+    """,
+    # v3 — replace completed_trades with leg_exits (per-leg PnL tracking) and
+    # eod_state (per-account EOD dedup).  No data migration: the DB is clean
+    # at deployment time.
+    """
+    DROP TABLE IF EXISTS completed_trades;
+
+    CREATE TABLE IF NOT EXISTS leg_exits (
+        id               INTEGER PRIMARY KEY AUTOINCREMENT,
+        account_id       TEXT NOT NULL,
+        parent_trade_id  TEXT NOT NULL,
+        symbol           TEXT NOT NULL,
+        trade_date       TEXT NOT NULL,
+        target_index     INTEGER NOT NULL DEFAULT 0,
+        side             TEXT,
+        entry_price      REAL NOT NULL DEFAULT 0,
+        exit_price       REAL NOT NULL DEFAULT 0,
+        qty              INTEGER NOT NULL DEFAULT 0,
+        lot_size         INTEGER NOT NULL DEFAULT 1,
+        pnl_inr          REAL NOT NULL DEFAULT 0,
+        pnl_points       REAL NOT NULL DEFAULT 0,
+        close_reason     TEXT,
+        exit_pending     INTEGER NOT NULL DEFAULT 0,
+        pnl_pending      INTEGER NOT NULL DEFAULT 0,
+        exit_fill_source TEXT,
+        opened_at_ist    TEXT,
+        closed_at_ist    TEXT,
+        data             TEXT NOT NULL DEFAULT '{}',
+        created_at       REAL NOT NULL,
+        UNIQUE (parent_trade_id, account_id, target_index)
+    );
+    CREATE INDEX IF NOT EXISTS idx_le_date_account   ON leg_exits(trade_date, account_id);
+    CREATE INDEX IF NOT EXISTS idx_le_parent         ON leg_exits(parent_trade_id, account_id);
+    CREATE INDEX IF NOT EXISTS idx_le_symbol_account ON leg_exits(symbol, account_id);
+    CREATE INDEX IF NOT EXISTS idx_le_pending        ON leg_exits(pnl_pending, account_id);
+
+    CREATE TABLE IF NOT EXISTS eod_state (
+        account_id  TEXT NOT NULL,
+        trade_date  TEXT NOT NULL,
+        sent_at     TEXT NOT NULL,
+        PRIMARY KEY (account_id, trade_date)
+    );
+    INSERT OR IGNORE INTO schema_version VALUES (3);
     """,
 ]
 
@@ -293,21 +340,6 @@ class Database:
                 except Exception as e:
                     logger.error("DB migration failed for %s: %s", fname, e, exc_info=True)
 
-        ct_dir = "completed_trades"
-        if os.path.isdir(ct_dir):
-            for fn in sorted(os.listdir(ct_dir)):
-                if not fn.endswith(".json"):
-                    continue
-                path = os.path.join(ct_dir, fn)
-                try:
-                    with open(path, encoding="utf-8") as f:
-                        book = json.load(f)
-                    self._migrate_completed_book(book)
-                    os.rename(path, path + ".migrated")
-                    migrated += 1
-                except Exception as e:
-                    logger.error("DB migration failed for %s: %s", path, e, exc_info=True)
-
         if migrated:
             logger.info("DB migration complete — %d file(s) imported.", migrated)
 
@@ -338,36 +370,6 @@ class Database:
                 self._conn.execute(
                     "INSERT INTO pending_management(data, created_at) VALUES (?,?)",
                     (json.dumps(item), now),
-                )
-            self._conn.commit()
-
-    def _migrate_completed_book(self, book: dict) -> None:
-        date = str(book.get("date") or "")
-        eod_sent = 1 if book.get("eod", {}).get("summary_sent_at") else 0
-        now = time.time()
-        with self._lock:
-            for row in (book.get("trades") or []):
-                self._conn.execute(
-                    """INSERT INTO completed_trades
-                       (trade_date,symbol,side,lots,pnl_inr,close_reason,
-                        entry_avg_price,exit_avg_price,opened_at_ist,closed_at_ist,
-                        eod_sent,data,created_at)
-                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                    (
-                        date,
-                        str(row.get("symbol") or ""),
-                        str(row.get("side") or ""),
-                        float(row.get("lots") or 0),
-                        float(row.get("pnl_inr") or 0),
-                        str(row.get("close_reason") or ""),
-                        float(row.get("entry_avg_price") or 0),
-                        float(row.get("exit_avg_price") or 0),
-                        str(row.get("opened_at_ist") or ""),
-                        str(row.get("closed_at_ist") or ""),
-                        eod_sent,
-                        json.dumps(row),
-                        now,
-                    ),
                 )
             self._conn.commit()
 
@@ -455,77 +457,181 @@ class Database:
             self._conn.commit()
 
     # ------------------------------------------------------------------
-    # Completed trades
+    # Leg exits — one row per individual OCO leg exit event.
+    # This is the single source of truth for all profit reporting.
     # ------------------------------------------------------------------
 
-    def get_completed_trades_for_date(self, date_iso: str, account_id: str) -> dict:
-        """Return a book dict matching the old JSON structure."""
-        rows = self._conn.execute(
-            "SELECT data, eod_sent FROM completed_trades WHERE trade_date=? AND account_id=? ORDER BY id",
-            (date_iso, str(account_id)),
-        ).fetchall()
-        trades = [json.loads(r[0]) for r in rows]
-        eod_sent_at = "" if not rows or not rows[-1][1] else date_iso
+    @staticmethod
+    def _leg_exit_row_to_dict(row: tuple) -> dict:
+        """Materialize a leg_exits row tuple into a flat dict.  Column order
+        below MUST match the SELECT list used by readers."""
+        (
+            le_id, account_id, parent_trade_id, symbol, trade_date, target_index,
+            side, entry_price, exit_price, qty, lot_size, pnl_inr, pnl_points,
+            close_reason, exit_pending, pnl_pending, exit_fill_source,
+            opened_at_ist, closed_at_ist, data_json, created_at,
+        ) = row
+        try:
+            data = json.loads(data_json) if data_json else {}
+        except Exception:
+            data = {}
         return {
-            "date": date_iso,
-            "timezone": "Asia/Kolkata",
-            "trades": trades,
-            "eod": {"summary_sent_at": eod_sent_at},
+            "id": int(le_id),
+            "account_id": str(account_id or ""),
+            "parent_trade_id": str(parent_trade_id or ""),
+            "symbol": str(symbol or ""),
+            "trade_date": str(trade_date or ""),
+            "target_index": int(target_index or 0),
+            "side": str(side or ""),
+            "entry_price": float(entry_price or 0.0),
+            "exit_price": float(exit_price or 0.0),
+            "qty": int(qty or 0),
+            "lot_size": int(lot_size or 1),
+            "pnl_inr": float(pnl_inr or 0.0),
+            "pnl_points": float(pnl_points or 0.0),
+            "close_reason": str(close_reason or ""),
+            "exit_pending": bool(exit_pending),
+            "pnl_pending": bool(pnl_pending),
+            "exit_fill_source": str(exit_fill_source or ""),
+            "opened_at_ist": str(opened_at_ist or ""),
+            "closed_at_ist": str(closed_at_ist or ""),
+            "data": data,
+            "created_at": float(created_at or 0.0),
         }
 
-    def insert_completed_trade(
-        self, date_iso: str, row: dict, eod_sent: bool = False, account_id: str = ""
-    ) -> None:
+    _LEG_EXIT_SELECT_COLUMNS = (
+        "id, account_id, parent_trade_id, symbol, trade_date, target_index, "
+        "side, entry_price, exit_price, qty, lot_size, pnl_inr, pnl_points, "
+        "close_reason, exit_pending, pnl_pending, exit_fill_source, "
+        "opened_at_ist, closed_at_ist, data, created_at"
+    )
+
+    def insert_leg_exit(self, account_id: str, date_iso: str, row: dict) -> None:
+        """Idempotent insert.  Duplicate writes (same parent_trade_id +
+        account_id + target_index) are silently dropped — the first write
+        wins.  This protects against bot restarts re-triggering stage
+        advances before the new oco_legs status has been persisted.
+        """
         with self._lock:
             self._conn.execute(
-                """INSERT INTO completed_trades
-                   (trade_date,account_id,symbol,side,lots,pnl_inr,close_reason,
-                    entry_avg_price,exit_avg_price,opened_at_ist,closed_at_ist,
-                    eod_sent,data,created_at)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                """INSERT OR IGNORE INTO leg_exits
+                   (account_id, parent_trade_id, symbol, trade_date, target_index,
+                    side, entry_price, exit_price, qty, lot_size,
+                    pnl_inr, pnl_points, close_reason,
+                    exit_pending, pnl_pending, exit_fill_source,
+                    opened_at_ist, closed_at_ist, data, created_at)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
-                    date_iso,
                     str(account_id),
+                    str(row.get("parent_trade_id") or "UNKNOWN"),
                     str(row.get("symbol") or ""),
+                    str(date_iso),
+                    int(row.get("target_index") or 0),
                     str(row.get("side") or ""),
-                    float(row.get("lots") or 0),
-                    float(row.get("pnl_inr") or 0),
+                    float(row.get("entry_price") or 0.0),
+                    float(row.get("exit_price") or 0.0),
+                    int(row.get("qty") or 0),
+                    int(row.get("lot_size") or 1),
+                    float(row.get("pnl_inr") or 0.0),
+                    float(row.get("pnl_points") or 0.0),
                     str(row.get("close_reason") or ""),
-                    float(row.get("entry_avg_price") or 0),
-                    float(row.get("exit_avg_price") or 0),
+                    1 if row.get("exit_pending") else 0,
+                    1 if row.get("pnl_pending") else 0,
+                    str(row.get("exit_fill_source") or ""),
                     str(row.get("opened_at_ist") or ""),
                     str(row.get("closed_at_ist") or ""),
-                    1 if eod_sent else 0,
-                    json.dumps(row),
+                    json.dumps(row.get("data") or {}),
                     time.time(),
                 ),
             )
             self._conn.commit()
 
-    def update_completed_trade_row(self, trade_id: str, row: dict, account_id: str) -> None:
-        """Update an existing completed trade row by trade_id field inside data."""
+    def update_leg_exit_fill(self, leg_exit_id: int, row: dict, account_id: str) -> None:
+        """Patch a pending leg_exit row with a real broker fill price."""
         with self._lock:
             self._conn.execute(
-                """UPDATE completed_trades SET data=?, pnl_inr=?, exit_avg_price=?, eod_sent=?
-                   WHERE account_id=? AND json_extract(data,'$.trade_id')=?""",
+                """UPDATE leg_exits SET
+                       exit_price=?, qty=?, pnl_inr=?, pnl_points=?,
+                       exit_pending=?, pnl_pending=?, exit_fill_source=?,
+                       close_reason=COALESCE(NULLIF(?, ''), close_reason),
+                       closed_at_ist=COALESCE(NULLIF(?, ''), closed_at_ist),
+                       data=?
+                   WHERE id=? AND account_id=?""",
                 (
-                    json.dumps(row),
-                    float(row.get("pnl_inr") or 0),
-                    float(row.get("exit_avg_price") or 0),
-                    1 if row.get("eod") else 0,
+                    float(row.get("exit_price") or 0.0),
+                    int(row.get("qty") or 0),
+                    float(row.get("pnl_inr") or 0.0),
+                    float(row.get("pnl_points") or 0.0),
+                    1 if row.get("exit_pending") else 0,
+                    1 if row.get("pnl_pending") else 0,
+                    str(row.get("exit_fill_source") or ""),
+                    str(row.get("close_reason") or ""),
+                    str(row.get("closed_at_ist") or ""),
+                    json.dumps(row.get("data") or {}),
+                    int(leg_exit_id),
                     str(account_id),
-                    str(trade_id),
                 ),
             )
             self._conn.commit()
 
-    def mark_eod_sent(self, date_iso: str, account_id: str) -> None:
+    def get_leg_exits_for_date(self, account_id: str, date_iso: str) -> list[dict]:
+        rows = self._conn.execute(
+            f"SELECT {self._LEG_EXIT_SELECT_COLUMNS} FROM leg_exits "
+            "WHERE account_id=? AND trade_date=? ORDER BY id",
+            (str(account_id), str(date_iso)),
+        ).fetchall()
+        return [self._leg_exit_row_to_dict(r) for r in rows]
+
+    def get_leg_exits_for_range(
+        self, account_id: str, start_date: str, end_date: str
+    ) -> list[dict]:
+        """Inclusive range query over trade_date (ISO YYYY-MM-DD strings)."""
+        rows = self._conn.execute(
+            f"SELECT {self._LEG_EXIT_SELECT_COLUMNS} FROM leg_exits "
+            "WHERE account_id=? AND trade_date>=? AND trade_date<=? "
+            "ORDER BY trade_date, id",
+            (str(account_id), str(start_date), str(end_date)),
+        ).fetchall()
+        return [self._leg_exit_row_to_dict(r) for r in rows]
+
+    def get_leg_exits_for_symbol(self, account_id: str, symbol: str) -> list[dict]:
+        rows = self._conn.execute(
+            f"SELECT {self._LEG_EXIT_SELECT_COLUMNS} FROM leg_exits "
+            "WHERE account_id=? AND symbol=? ORDER BY trade_date, id",
+            (str(account_id), str(symbol)),
+        ).fetchall()
+        return [self._leg_exit_row_to_dict(r) for r in rows]
+
+    def get_pending_leg_exits(self, account_id: str) -> list[dict]:
+        """All pending leg_exit rows across **all dates**.  Pending exits can
+        persist over weekends, so this intentionally does not filter by
+        trade_date."""
+        rows = self._conn.execute(
+            f"SELECT {self._LEG_EXIT_SELECT_COLUMNS} FROM leg_exits "
+            "WHERE account_id=? AND pnl_pending=1 ORDER BY id",
+            (str(account_id),),
+        ).fetchall()
+        return [self._leg_exit_row_to_dict(r) for r in rows]
+
+    # ------------------------------------------------------------------
+    # EOD state — replaces the old `eod_sent` column on completed_trades.
+    # One row per (account, date) marks that the auto-EOD summary was sent.
+    # ------------------------------------------------------------------
+
+    def mark_eod_sent(self, account_id: str, date_iso: str, sent_at: str) -> None:
         with self._lock:
             self._conn.execute(
-                "UPDATE completed_trades SET eod_sent=1 WHERE trade_date=? AND account_id=?",
-                (date_iso, str(account_id)),
+                "INSERT OR REPLACE INTO eod_state(account_id, trade_date, sent_at) VALUES (?,?,?)",
+                (str(account_id), str(date_iso), str(sent_at)),
             )
             self._conn.commit()
+
+    def get_eod_sent(self, account_id: str, date_iso: str) -> bool:
+        row = self._conn.execute(
+            "SELECT 1 FROM eod_state WHERE account_id=? AND trade_date=? LIMIT 1",
+            (str(account_id), str(date_iso)),
+        ).fetchone()
+        return bool(row)
 
     # ------------------------------------------------------------------
     # Idempotency ledger

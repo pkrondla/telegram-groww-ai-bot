@@ -63,7 +63,6 @@ class Trader:
         self.active_trades_file = "active_trades.json"
         self.pending_trades_file = "pending_trades.json"
         self.pending_management_file = "pending_management.json"
-        self.completed_trades_dir = "completed_trades"
         self._instrument_cache = None  # lazy-loaded dict[(exchange,trading_symbol)] -> row dict
         self._instrument_cache_lock = threading.Lock()
         self._file_lock = threading.Lock()
@@ -321,32 +320,6 @@ class Trader:
         if h < 0 or h > 23 or mm < 0 or mm > 59:
             return None
         return h, mm
-
-    def _completed_trades_file(self, date_iso: str | None = None) -> str:
-        d = str(date_iso or self._today_ist_iso())
-        os.makedirs(self.completed_trades_dir, exist_ok=True)
-        return os.path.join(self.completed_trades_dir, f"completed_trades_{d}.json")
-
-    def _load_completed_trades_book(self, date_iso: str | None = None) -> dict:
-        d = str(date_iso or self._today_ist_iso())
-        return db.get_completed_trades_for_date(d, account_id=self.account_id)
-
-    def _save_completed_trades_book(self, book: dict, date_iso: str | None = None) -> None:
-        d = str(date_iso or book.get("date") or self._today_ist_iso())
-        # Persist any rows not already in the DB by trade_id.
-        existing_rows = db.get_completed_trades_for_date(d, account_id=self.account_id)
-        existing_ids = {r.get("trade_id") for r in existing_rows.get("trades", [])}
-        for row in book.get("trades", []):
-            if row.get("trade_id") not in existing_ids:
-                db.insert_completed_trade(d, row, account_id=self.account_id)
-            else:
-                # Update in case exit price / PnL was backfilled.
-                trade_id = row.get("trade_id")
-                if trade_id:
-                    db.update_completed_trade_row(trade_id, row, account_id=self.account_id)
-        eod_sent = bool((book.get("eod") or {}).get("summary_sent_at"))
-        if eod_sent:
-            db.mark_eod_sent(d, account_id=self.account_id)
 
     @staticmethod
     def _num_or(value, default: float = 0.0) -> float:
@@ -630,6 +603,88 @@ class Trader:
                     best = cand
         return best
 
+    def _record_leg_exit(
+        self,
+        *,
+        symbol: str,
+        active_rec: dict,
+        target_index: int,
+        exit_price: float,
+        qty: int,
+        close_reason: str,
+        exit_pending: bool = False,
+        exit_fill_source: str = "",
+        data: dict | None = None,
+    ) -> None:
+        """
+        Persist a single OCO leg exit to the ``leg_exits`` table.  This is the
+        unified hook for both intermediate target hits (called from the stage
+        progression hook) and final/SL exits (called from
+        ``_record_completed_trade``).
+
+        Wrapped in try/except: trading flow MUST never be interrupted by a
+        persistence hiccup.  The DB-side ``UNIQUE(parent_trade_id, account_id,
+        target_index)`` plus ``INSERT OR IGNORE`` make repeated writes safe.
+        """
+        try:
+            rec = self._normalize_active_trade_record(active_rec or {})
+            parent_trade_id = str(rec.get("parent_trade_id") or "").strip()
+            if not parent_trade_id:
+                # Defensive: legacy active records from before parent_trade_id
+                # was introduced will lack the field.  Stamp a deterministic
+                # fallback so the row still groups under a stable key.
+                parent_trade_id = f"legacy-{symbol}-{int(time.time())}"
+                logger.warning(
+                    f"[LEG_EXIT] {symbol}: missing parent_trade_id on active record; "
+                    f"using fallback {parent_trade_id}."
+                )
+
+            side = str(rec.get("entry_side") or "BUY").upper()
+            entry_price = self._num_or(rec.get("entry_avg_price"), 0.0)
+            lot_size = int(self._num_or(rec.get("lot_size"), 0))
+            if lot_size <= 0:
+                lot_size = max(1, int(qty or 0))
+
+            qty_i = max(0, int(abs(qty or 0)))
+            exit_p = float(exit_price or 0.0)
+            pending = bool(exit_pending)
+            if pending or exit_p <= 0 or qty_i <= 0:
+                points_per_lot = 0.0
+                pnl_inr = 0.0
+            else:
+                points_per_lot, pnl_inr = self._trade_pnl(side, entry_price, exit_p, qty_i)
+
+            row = {
+                "parent_trade_id": parent_trade_id,
+                "symbol": str(symbol),
+                "target_index": int(target_index or 0),
+                "side": side,
+                "entry_price": float(entry_price),
+                "exit_price": exit_p,
+                "qty": qty_i,
+                "lot_size": int(lot_size),
+                "pnl_inr": float(pnl_inr),
+                "pnl_points": float(points_per_lot),
+                "close_reason": str(close_reason or ""),
+                "exit_pending": pending,
+                "pnl_pending": pending,
+                "exit_fill_source": str(exit_fill_source or ("pending" if pending else "")),
+                "opened_at_ist": str(rec.get("opened_at_ist") or ""),
+                "closed_at_ist": self._now_ist_iso(),
+                "data": data or {},
+            }
+            db.insert_leg_exit(self.account_id, self._today_ist_iso(), row)
+            logger.info(
+                f"[LEG_EXIT] {symbol} T{int(target_index or 0)}: qty={qty_i} "
+                f"exit={exit_p:.2f} pnl_inr={pnl_inr:.2f} reason={close_reason} "
+                f"pending={pending} parent={parent_trade_id}"
+            )
+        except Exception as e:
+            logger.warning(
+                f"[LEG_EXIT] Failed to record leg exit for {symbol} "
+                f"T{int(target_index or 0)} ({close_reason}): {e}"
+            )
+
     def _record_completed_trade(
         self,
         *,
@@ -642,19 +697,32 @@ class Trader:
         exit_pending: bool = False,
         exit_fill_source: str = "",
     ):
+        """
+        Record the FINAL exit for a position via the unified ``leg_exits``
+        table.  Intermediate target hits are recorded by
+        ``_sync_multi_target_progress_for_symbol``.
+
+        PnL bug fix: this method now uses ``exit_qty`` (the actual quantity
+        that just left the book) instead of ``entry_qty``.  Earlier T1/T2
+        legs that exited at different prices are already accounted for as
+        their own rows in ``leg_exits`` via the stage-progression hook.
+        """
         rec = self._normalize_active_trade_record(active_rec or {})
         side = str(rec.get("entry_side") or "BUY").upper()
         entry_price = self._num_or(rec.get("entry_avg_price"), 0.0)
         sl_true = self._num_or(rec.get("sl_true"), self._num_or(rec.get("stop_loss"), 0.0))
-        qty = int(self._num_or(rec.get("entry_qty"), 0))
-        if qty <= 0:
-            qty = int(abs(exit_qty or 0))
+        entry_qty = int(self._num_or(rec.get("entry_qty"), 0))
+        exit_qty_i = int(abs(exit_qty or 0))
+        if exit_qty_i <= 0:
+            # Defensive: callers can pass 0 in some "already-flat" paths.
+            exit_qty_i = entry_qty
         lot_size = int(self._num_or(rec.get("lot_size"), 0))
         if lot_size <= 0:
-            lot_size = max(1, qty)
-        lots = max(1.0, float(qty) / float(lot_size))
+            lot_size = max(1, exit_qty_i or entry_qty or 1)
         group_id = str(rec.get("spread_group_id") or "")
         is_spread_leg = bool(group_id)
+
+        # Normalize signal targets for the snapshot.
         signal_targets = rec.get("signal_targets") if isinstance(rec.get("signal_targets"), list) else []
         if not signal_targets:
             t_single = self._num_or(rec.get("target"), 0.0)
@@ -670,6 +738,14 @@ class Trader:
                 norm_targets.append(tv)
         signal_targets = norm_targets
 
+        # Snapshot OCO legs as of close, and determine target_index for this
+        # exit:
+        #   - If exactly one leg is still un-FILLED and its qty roughly
+        #     matches exit_qty (and the reason looks target-related), use
+        #     that leg's target_index — this catches a final T-hit that
+        #     reconcile observed before stage-progression did.
+        #   - Otherwise (SL hit, EXIT_ALL, manual flatten, multi-leg flush),
+        #     use target_index=0.
         legs_raw = self._sorted_oco_legs(rec)
         oco_legs_snapshot: list[dict] = []
         for leg in legs_raw:
@@ -686,21 +762,24 @@ class Trader:
                 }
             )
 
+        # Per-target RR snapshot (kept for analytics in the data JSON).
         per_target_rr: list[dict] = []
-        risk_pts = max(float(entry_price) - float(sl_true), 0.0) if side == "BUY" else max(float(sl_true) - float(entry_price), 0.0)
+        risk_pts = (
+            max(float(entry_price) - float(sl_true), 0.0)
+            if side == "BUY"
+            else max(float(sl_true) - float(entry_price), 0.0)
+        )
         for i, tgt in enumerate(signal_targets):
             tgt_idx = i + 1
             leg_qty = 0
             for leg in oco_legs_snapshot:
                 if int(self._num_or(leg.get("target_index"), 0)) == tgt_idx:
                     leg_qty += int(self._num_or(leg.get("qty"), 0))
-            if leg_qty <= 0:
-                leg_qty = 0
-            reward_pts = 0.0
-            if side == "BUY":
-                reward_pts = max(float(tgt) - float(entry_price), 0.0)
-            else:
-                reward_pts = max(float(entry_price) - float(tgt), 0.0)
+            reward_pts = (
+                max(float(tgt) - float(entry_price), 0.0)
+                if side == "BUY"
+                else max(float(entry_price) - float(tgt), 0.0)
+            )
             rr = (reward_pts / risk_pts) if risk_pts > 0 else 0.0
             per_target_rr.append(
                 {
@@ -715,36 +794,34 @@ class Trader:
                 }
             )
 
-        points_per_lot, pnl_inr = self._trade_pnl(side, entry_price, float(exit_price or 0), qty)
-        pending = bool(exit_pending)
-        if pending:
-            points_per_lot = 0.0
-            pnl_inr = 0.0
-        entry = {
+        target_index = 0
+        reason_upper = str(close_reason or "").upper()
+        target_like = ("TARGET" in reason_upper) or ("OCO_FILL" in reason_upper)
+        unfilled = [
+            l for l in oco_legs_snapshot
+            if str(l.get("status") or "").upper() not in ("FILLED", "CANCELLED", "STALE")
+        ]
+        if target_like and len(unfilled) == 1:
+            cand_qty = int(unfilled[0].get("qty") or 0)
+            if cand_qty > 0 and abs(cand_qty - exit_qty_i) <= max(1, lot_size):
+                target_index = int(unfilled[0].get("target_index") or 0)
+
+        # Rich audit JSON — preserves everything the old completed_trades row
+        # carried, plus the fields _backfill_pending_leg_exits needs to
+        # reconstruct an active-like record for broker-fill inference.
+        data = {
             "trade_id": str(uuid.uuid4())[:12],
             "group_id": group_id,
             "is_spread_leg": is_spread_leg,
-            "symbol": str(symbol),
             "side": side,
-            "quantity": int(qty),
+            "quantity": int(entry_qty or exit_qty_i),
+            "exit_qty": int(exit_qty_i),
             "lot_size": int(lot_size),
-            "lots": float(lots),
+            "lots": float(max(1.0, float(exit_qty_i or entry_qty or 1) / float(lot_size))),
             "entry_avg_price": float(entry_price),
-            "exit_avg_price": float(exit_price or 0),
-            "pnl_points_per_lot": float(points_per_lot),
-            "pnl_inr": float(pnl_inr),
-            "opened_at_ist": str(rec.get("opened_at_ist") or ""),
-            "closed_at_ist": self._now_ist_iso(),
-            "close_reason": str(close_reason),
+            "smart_order_id": str(rec.get("smart_order_id") or ""),
             "entry_order_id": str(rec.get("entry_order_id") or ""),
             "exit_order_id": str(close_order_id or ""),
-            "exit_pending": pending,
-            "pnl_pending": pending,
-            "exit_fill_source": str(exit_fill_source or ("pending" if pending else "")),
-            "reconcile_attempts": 0,
-            "last_reconcile_try_ist": "",
-            "smart_order_id": str(rec.get("smart_order_id") or ""),
-            "exit_qty": int(abs(exit_qty or 0)),
             "signal_targets": [float(t) for t in signal_targets],
             "oco_legs": oco_legs_snapshot,
             "sl_progress_stage": str(rec.get("sl_progress_stage") or "NONE"),
@@ -758,173 +835,354 @@ class Trader:
                 "sl_widen_pct": float(self._num_or(rec.get("sl_widen_pct"), 0.0)),
                 "vol_sl_needs_restore": bool(self._bool_or(rec, "vol_sl_needs_restore", False)),
             },
+            "reconcile_attempts": 0,
+            "last_reconcile_try_ist": "",
         }
 
-        book = self._load_completed_trades_book()
-        trades = book.get("trades") or []
-        trades.append(entry)
-        book["trades"] = trades
-        self._save_completed_trades_book(book)
+        self._record_leg_exit(
+            symbol=symbol,
+            active_rec=rec,
+            target_index=target_index,
+            exit_price=float(exit_price or 0),
+            qty=exit_qty_i,
+            close_reason=str(close_reason),
+            exit_pending=bool(exit_pending),
+            exit_fill_source=str(exit_fill_source or ""),
+            data=data,
+        )
 
     @staticmethod
-    def _completed_row_active_record(row: dict) -> dict:
-        """Rebuild a minimal active-like record so reconcile fill inference can be reused."""
+    def _leg_exit_active_record(row: dict) -> dict:
+        """Rebuild a minimal active-like record from a stored leg_exits row
+        so reconcile fill inference can be reused on pending exits."""
+        data = row.get("data") if isinstance(row.get("data"), dict) else {}
         return {
-            "entry_side": str(row.get("side") or "BUY").upper(),
-            "entry_avg_price": float(row.get("entry_avg_price") or 0.0),
-            "entry_qty": int(row.get("quantity") or row.get("exit_qty") or 0),
-            "lot_size": int(row.get("lot_size") or 0),
-            "smart_order_id": str(row.get("smart_order_id") or ""),
-            "oco_legs": list(row.get("oco_legs") or []),
-            "signal_targets": list(row.get("signal_targets") or []),
-            "target": float(row.get("target_at_close") or 0.0),
+            "entry_side": str(row.get("side") or data.get("side") or "BUY").upper(),
+            "entry_avg_price": float(
+                row.get("entry_price") or data.get("entry_avg_price") or 0.0
+            ),
+            "entry_qty": int(data.get("quantity") or row.get("qty") or 0),
+            "lot_size": int(row.get("lot_size") or data.get("lot_size") or 0),
+            "smart_order_id": str(data.get("smart_order_id") or ""),
+            "oco_legs": list(data.get("oco_legs") or []),
+            "signal_targets": list(data.get("signal_targets") or []),
+            "target": float(data.get("target_at_close") or 0.0),
+            "parent_trade_id": str(row.get("parent_trade_id") or ""),
+            "opened_at_ist": str(row.get("opened_at_ist") or ""),
         }
 
-    def _backfill_pending_completed_trades(self, *, date_iso: str | None = None) -> int:
+    def _backfill_pending_leg_exits(self) -> int:
         """
-        Auto-backfill pending completed trades with real broker exit fills.
-        Called from reconcile loop so no admin command is required.
+        Auto-backfill pending ``leg_exits`` rows with real broker exit fills.
+        Called from the reconcile loop so no admin command is required.
+
+        Unlike the previous date-scoped backfill, this scans **all dates**:
+        a pending exit raised on Friday can be resolved on Monday once the
+        broker fill is observed.
         """
         if self.client is None:
             return 0
-        d = str(date_iso or self._today_ist_iso())
-        book = self._load_completed_trades_book(d)
-        rows = list(book.get("trades") or [])
-        if not rows:
+        try:
+            pending_rows = db.get_pending_leg_exits(self.account_id)
+        except Exception as e:
+            logger.warning(f"[RECONCILE] Could not load pending leg exits: {e}")
+            return 0
+        if not pending_rows:
             return 0
 
         updated_count = 0
-        changed = False
-        for row in rows:
+        for row in pending_rows:
             if not isinstance(row, dict):
-                continue
-            pending = bool(row.get("exit_pending") or row.get("pnl_pending"))
-            if not pending:
-                # Backward compatibility for older journal rows that used entry-price fallback.
-                inferred_flat = str(row.get("close_reason") or "").upper().startswith("RECONCILE_")
-                zero_or_same_exit = (
-                    float(self._num_or(row.get("exit_avg_price"), 0.0)) <= 0
-                    or abs(
-                        float(self._num_or(row.get("exit_avg_price"), 0.0))
-                        - float(self._num_or(row.get("entry_avg_price"), 0.0))
-                    )
-                    < 1e-9
-                )
-                no_exit_id = not str(row.get("exit_order_id") or "").strip()
-                pending = bool(inferred_flat and zero_or_same_exit and no_exit_id)
-            if not pending:
                 continue
             symbol = str(row.get("symbol") or "")
             if not symbol:
                 continue
+            leg_id = int(row.get("id") or 0)
+            if leg_id <= 0:
+                continue
 
-            rec = self._completed_row_active_record(row)
-            inferred = self._reconcile_exit_fill_from_positions(symbol=symbol, active_rec=rec) or {}
+            rec = self._leg_exit_active_record(row)
+            inferred = (
+                self._reconcile_exit_fill_from_positions(symbol=symbol, active_rec=rec) or {}
+            )
             exit_price = float(self._num_or(inferred.get("exit_price"), 0.0))
             exit_qty = int(abs(self._num_or(inferred.get("exit_qty"), 0)))
 
-            row["reconcile_attempts"] = int(self._num_or(row.get("reconcile_attempts"), 0)) + 1
-            row["last_reconcile_try_ist"] = self._now_ist_iso()
-            changed = True
+            data_blob = dict(row.get("data") or {}) if isinstance(row.get("data"), dict) else {}
+            data_blob["reconcile_attempts"] = (
+                int(self._num_or(data_blob.get("reconcile_attempts"), 0)) + 1
+            )
+            data_blob["last_reconcile_try_ist"] = self._now_ist_iso()
 
             if exit_price <= 0 or exit_qty <= 0:
+                # Still no fill — bump attempt counter and try again next tick.
+                try:
+                    db.update_leg_exit_fill(
+                        leg_id,
+                        {
+                            "exit_price": 0.0,
+                            "qty": int(row.get("qty") or 0),
+                            "pnl_inr": 0.0,
+                            "pnl_points": 0.0,
+                            "exit_pending": True,
+                            "pnl_pending": True,
+                            "exit_fill_source": str(row.get("exit_fill_source") or "pending"),
+                            "close_reason": "",
+                            "closed_at_ist": "",
+                            "data": data_blob,
+                        },
+                        account_id=self.account_id,
+                    )
+                except Exception as e:
+                    logger.warning(
+                        f"[RECONCILE] Failed to bump reconcile_attempts for {symbol} "
+                        f"leg_id={leg_id}: {e}"
+                    )
                 logger.info(
                     f"[RECONCILE] Pending exit fill still unavailable for {symbol} "
-                    f"(attempt={int(row.get('reconcile_attempts') or 0)})."
+                    f"(leg_id={leg_id}, attempt={int(data_blob['reconcile_attempts'])})."
                 )
                 continue
 
-            side = str(row.get("side") or "BUY").upper()
-            entry_price = float(self._num_or(row.get("entry_avg_price"), 0.0))
-            qty = int(self._num_or(row.get("quantity"), 0)) or exit_qty
-            points_per_lot, pnl_inr = self._trade_pnl(side, entry_price, exit_price, qty)
+            side = str(row.get("side") or rec.get("entry_side") or "BUY").upper()
+            entry_price = float(self._num_or(row.get("entry_price"), 0.0))
+            points_per_lot, pnl_inr = self._trade_pnl(side, entry_price, exit_price, exit_qty)
 
-            row["exit_avg_price"] = float(exit_price)
-            row["exit_qty"] = int(exit_qty)
-            row["exit_order_id"] = str(inferred.get("order_id") or row.get("exit_order_id") or "")
-            row["pnl_points_per_lot"] = float(points_per_lot)
-            row["pnl_inr"] = float(pnl_inr)
-            row["exit_pending"] = False
-            row["pnl_pending"] = False
-            row["exit_fill_source"] = str(inferred.get("source") or row.get("exit_fill_source") or "backfilled")
-            updated_count += 1
-            logger.info(
-                f"[RECONCILE] Backfilled exit for {symbol}: price={exit_price}, qty={exit_qty}, "
-                f"source={row.get('exit_fill_source')}."
+            data_blob["exit_order_id"] = str(
+                inferred.get("order_id") or data_blob.get("exit_order_id") or ""
             )
 
-        if changed:
-            book["trades"] = rows
-            self._save_completed_trades_book(book, date_iso=d)
+            try:
+                db.update_leg_exit_fill(
+                    leg_id,
+                    {
+                        "exit_price": float(exit_price),
+                        "qty": int(exit_qty),
+                        "pnl_inr": float(pnl_inr),
+                        "pnl_points": float(points_per_lot),
+                        "exit_pending": False,
+                        "pnl_pending": False,
+                        "exit_fill_source": str(
+                            inferred.get("source") or row.get("exit_fill_source") or "backfilled"
+                        ),
+                        "close_reason": str(row.get("close_reason") or ""),
+                        "closed_at_ist": self._now_ist_iso(),
+                        "data": data_blob,
+                    },
+                    account_id=self.account_id,
+                )
+                updated_count += 1
+                logger.info(
+                    f"[RECONCILE] Backfilled exit for {symbol} leg_id={leg_id}: "
+                    f"price={exit_price}, qty={exit_qty}, "
+                    f"source={inferred.get('source') or 'unknown'}, pnl_inr={pnl_inr:.2f}."
+                )
+            except Exception as e:
+                logger.warning(
+                    f"[RECONCILE] Failed to backfill leg_id={leg_id} for {symbol}: {e}"
+                )
+
         return updated_count
 
-    def _build_eod_summary_text(self, *, date_iso: str | None = None) -> str:
-        d = str(date_iso or self._today_ist_iso())
-        book = self._load_completed_trades_book(d)
-        rows = list(book.get("trades") or [])
+    # ------------------------------------------------------------------
+    # Profit reporting (unified day/week/month + per-signal view)
+    # ------------------------------------------------------------------
 
-        settled_rows = [r for r in rows if not bool(r.get("pnl_pending"))]
-        pending_rows = [r for r in rows if bool(r.get("pnl_pending"))]
-        singles = [r for r in settled_rows if not r.get("is_spread_leg")]
-        spread_legs = [r for r in settled_rows if r.get("is_spread_leg")]
-        spread_groups: dict[str, dict] = {}
-        for r in spread_legs:
-            gid = str(r.get("group_id") or "")
-            if not gid:
-                continue
-            g = spread_groups.setdefault(gid, {"pnl_inr": 0.0, "pnl_points_per_lot": 0.0, "symbols": []})
-            g["pnl_inr"] += float(r.get("pnl_inr") or 0.0)
-            g["pnl_points_per_lot"] += float(r.get("pnl_points_per_lot") or 0.0)
-            g["symbols"].append(str(r.get("symbol") or ""))
+    @staticmethod
+    def _fmt_inr(v: float) -> str:
+        """Format INR with explicit sign so +/- is unambiguous in alerts."""
+        sign = "+" if float(v or 0.0) >= 0 else "-"
+        return f"INR {sign}{abs(float(v or 0.0)):.2f}"
 
-        spread_summaries = []
-        for gid, g in spread_groups.items():
-            spread_summaries.append(
-                {
-                    "id": gid,
-                    "label": " + ".join(sorted(set([s for s in g["symbols"] if s]))),
-                    "pnl_inr": float(g["pnl_inr"]),
-                    "pnl_points_per_lot": float(g["pnl_points_per_lot"]),
-                }
-            )
+    @staticmethod
+    def _target_label(target_index: int, close_reason: str = "") -> str:
+        t = int(target_index or 0)
+        if t > 0:
+            return f"T{t}"
+        reason = str(close_reason or "").upper()
+        if "SL" in reason or reason.startswith("STOP"):
+            return "SL"
+        if "EXIT_ALL" in reason or "MANUAL" in reason:
+            return "Manual"
+        if "RECONCILE" in reason:
+            return "Reconcile"
+        return "Exit"
 
-        all_trade_summaries = [
-            {
-                "label": str(r.get("symbol") or ""),
-                "pnl_inr": float(r.get("pnl_inr") or 0.0),
-                "pnl_points_per_lot": float(r.get("pnl_points_per_lot") or 0.0),
-            }
-            for r in singles
-        ] + spread_summaries
+    def _profit_period_bounds(self, period: str) -> tuple[str, str, str]:
+        """Return (start_iso, end_iso, label) for a named period in IST."""
+        today = self._now_ist().date()
+        p = str(period or "day").lower().strip()
+        if p == "week":
+            start = today - datetime.timedelta(days=6)
+            return start.isoformat(), today.isoformat(), f"({start.isoformat()} → {today.isoformat()})"
+        if p == "month":
+            start = today.replace(day=1)
+            return start.isoformat(), today.isoformat(), f"({start.isoformat()} → {today.isoformat()})"
+        # day (default)
+        return today.isoformat(), today.isoformat(), f"({today.isoformat()} IST)"
 
-        total_inr = sum(float(r.get("pnl_inr") or 0.0) for r in all_trade_summaries)
-        total_pts = sum(float(r.get("pnl_points_per_lot") or 0.0) for r in all_trade_summaries)
+    def _format_leg_line(self, row: dict, *, include_date: bool = False) -> str:
+        date_part = f" ({row.get('trade_date')})" if include_date else ""
+        label = self._target_label(int(row.get("target_index") or 0), str(row.get("close_reason") or ""))
+        return (
+            f"  {label}{date_part}: {self._fmt_inr(row.get('pnl_inr') or 0.0)} "
+            f"({int(row.get('qty') or 0)} qty @ "
+            f"{float(row.get('entry_price') or 0):.2f} → "
+            f"{float(row.get('exit_price') or 0):.2f})"
+        )
 
-        lines = []
-        for r in all_trade_summaries:
-            lines.append(
-                f"• {r['label']}: INR {float(r['pnl_inr']):.2f} | {float(r['pnl_points_per_lot']):.2f} pts/lot"
-            )
-        per_trade_section = "\n".join(lines) if lines else "• No realized completed trades."
+    def _build_profit_summary_text(
+        self,
+        period: str = "day",
+        *,
+        symbol_filter: str | None = None,
+    ) -> str:
+        """
+        Unified profit summary covering:
+          - period == "day" | "week" | "month": grouped by symbol, with
+            per-leg breakdown.  "day" appends pending-exit and session-metrics
+            sections so it remains a drop-in replacement for the old EOD
+            summary.
+          - symbol_filter set: per-signal (parent_trade_id) view across all
+            dates for that symbol.
+        """
+        if symbol_filter:
+            return self._build_signal_summary_text(symbol_filter)
+
+        start, end, label = self._profit_period_bounds(period)
+        try:
+            rows = db.get_leg_exits_for_range(self.account_id, start, end)
+        except Exception as e:
+            logger.warning(f"[PROFIT] Failed to load leg_exits for {start}..{end}: {e}")
+            rows = []
+
+        settled = [r for r in rows if not bool(r.get("pnl_pending"))]
+        pending = [r for r in rows if bool(r.get("pnl_pending"))]
+
+        per_symbol: dict[str, list[dict]] = {}
+        for r in settled:
+            sym = str(r.get("symbol") or "")
+            per_symbol.setdefault(sym, []).append(r)
+
+        body_lines: list[str] = []
+        total_inr = 0.0
+        signals_seen: set[str] = set()
+        if per_symbol:
+            for sym in sorted(per_symbol.keys()):
+                rs = sorted(per_symbol[sym], key=lambda x: (x.get("trade_date") or "", x.get("id") or 0))
+                sym_total = sum(float(r.get("pnl_inr") or 0.0) for r in rs)
+                total_inr += sym_total
+                for r in rs:
+                    pid = str(r.get("parent_trade_id") or "")
+                    if pid:
+                        signals_seen.add(pid)
+                body_lines.append(f"{sym}: {self._fmt_inr(sym_total)}")
+                include_date = period != "day"
+                for r in rs:
+                    body_lines.append(self._format_leg_line(r, include_date=include_date))
+                body_lines.append("")
+            if body_lines and body_lines[-1] == "":
+                body_lines.pop()
+        else:
+            body_lines.append("• No realized leg exits in this period.")
+
         pending_section = ""
-        if pending_rows:
-            pending_lines = [f"• {str(r.get('symbol') or '?')}: exit fill pending" for r in pending_rows]
-            pending_section = "\n\nPending exit fill\n" + "\n".join(pending_lines)
+        if pending:
+            pend_lines = []
+            for r in pending:
+                date_part = "" if period == "day" else f" ({r.get('trade_date')})"
+                pend_lines.append(
+                    f"• {str(r.get('symbol') or '?')}{date_part}: exit fill pending"
+                )
+            pending_section = "\n\nPending exit fill\n" + "\n".join(pend_lines)
 
-        metrics_snap = metrics.snapshot()
-        metrics_lines = []
-        for key in ("signals_received", "trades_entered", "llm_calls", "llm_cache_hits",
-                    "llm_retries", "llm_failed", "broker_calls", "broker_retries", "broker_failed"):
-            v = metrics_snap.get(key, 0)
-            if v:
-                metrics_lines.append(f"  {key}: {v}")
-        metrics_section = ("\n\nBot metrics (session)\n" + "\n".join(metrics_lines)) if metrics_lines else ""
+        metrics_section = ""
+        if period == "day":
+            try:
+                metrics_snap = metrics.snapshot()
+            except Exception:
+                metrics_snap = {}
+            metrics_lines = []
+            for key in (
+                "signals_received", "trades_entered", "llm_calls", "llm_cache_hits",
+                "llm_retries", "llm_failed", "broker_calls", "broker_retries", "broker_failed",
+            ):
+                v = metrics_snap.get(key, 0) if isinstance(metrics_snap, dict) else 0
+                if v:
+                    metrics_lines.append(f"  {key}: {v}")
+            if metrics_lines:
+                metrics_section = "\n\nBot metrics (session)\n" + "\n".join(metrics_lines)
+
+        body_text = "\n".join(body_lines) if body_lines else "• No realized leg exits in this period."
+        title_period = period.capitalize() if period in ("day", "week", "month") else period
+        return (
+            f"📊 Trading P&L — {title_period} {label}\n\n"
+            f"Per-leg P&L\n{body_text}{pending_section}\n\n"
+            f"Total: {self._fmt_inr(total_inr)} | "
+            f"{len(signals_seen)} signal{'s' if len(signals_seen) != 1 else ''}, "
+            f"{len(settled)} leg exit{'s' if len(settled) != 1 else ''}"
+            f"{metrics_section}"
+        )
+
+    def _build_signal_summary_text(self, symbol: str) -> str:
+        """All-time per-signal view for one symbol, grouped by parent_trade_id."""
+        sym = str(symbol or "").strip().upper()
+        if not sym:
+            return "⚠️ PROFIT SIGNAL requires a symbol."
+        try:
+            rows = db.get_leg_exits_for_symbol(self.account_id, sym)
+        except Exception as e:
+            logger.warning(f"[PROFIT] Failed to load leg_exits for symbol {sym}: {e}")
+            rows = []
+        if not rows:
+            return f"📊 Signal P&L — {sym}\n\n• No leg exits recorded for this symbol."
+
+        groups: dict[str, list[dict]] = {}
+        for r in rows:
+            pid = str(r.get("parent_trade_id") or "UNKNOWN")
+            groups.setdefault(pid, []).append(r)
+
+        lines: list[str] = []
+        grand_total = 0.0
+        # Sort groups by first opened_at_ist / trade_date for chronological clarity.
+        def _group_key(pid: str) -> str:
+            legs = groups[pid]
+            return min(
+                (str(l.get("opened_at_ist") or l.get("trade_date") or "") for l in legs),
+                default="",
+            )
+        for pid in sorted(groups.keys(), key=_group_key):
+            legs = sorted(groups[pid], key=lambda x: (x.get("trade_date") or "", x.get("id") or 0))
+            opened = next(
+                (str(l.get("opened_at_ist") or l.get("trade_date") or "") for l in legs if l.get("opened_at_ist") or l.get("trade_date")),
+                "",
+            )
+            sig_total = 0.0
+            sig_pending = False
+            sig_lines: list[str] = []
+            for leg in legs:
+                if bool(leg.get("pnl_pending")):
+                    sig_pending = True
+                    sig_lines.append(
+                        f"  {self._target_label(int(leg.get('target_index') or 0), str(leg.get('close_reason') or ''))} "
+                        f"({leg.get('trade_date')}): pending"
+                    )
+                    continue
+                sig_total += float(leg.get("pnl_inr") or 0.0)
+                sig_lines.append(self._format_leg_line(leg, include_date=True))
+            grand_total += sig_total
+            lines.append(f"[{pid}] Opened: {opened or 'unknown'}")
+            lines.extend(sig_lines)
+            tail = self._fmt_inr(sig_total) + (" (pending legs not included)" if sig_pending else "")
+            lines.append(f"  Signal total: {tail}")
+            lines.append("")
+        if lines and lines[-1] == "":
+            lines.pop()
 
         return (
-            f"📊 EOD Trading Summary ({d} IST)\n\n"
-            f"Per-trade P&L\n{per_trade_section}{pending_section}\n\n"
-            f"Final day P/L: INR {total_inr:.2f} | {total_pts:.2f} pts/lot"
-            f"{metrics_section}"
+            f"📊 Signal P&L — {sym}\n\n"
+            + "\n".join(lines)
+            + f"\n\nGrand total: {self._fmt_inr(grand_total)}"
         )
 
     def run_eod_summary_tick(self) -> str | None:
@@ -941,15 +1199,18 @@ class Trader:
         if now < target_dt:
             return None
         d = now.date().isoformat()
-        book = self._load_completed_trades_book(d)
-        eod = book.get("eod") or {}
-        sent_at = str(eod.get("summary_sent_at") or "")
-        if sent_at.startswith(d):
+        try:
+            already_sent = db.get_eod_sent(self.account_id, d)
+        except Exception as e:
+            logger.warning(f"[EOD] Could not read eod_state for {d}: {e}")
+            already_sent = False
+        if already_sent:
             return None
-        summary = self._build_eod_summary_text(date_iso=d)
-        book.setdefault("eod", {})
-        book["eod"]["summary_sent_at"] = self._now_ist_iso()
-        self._save_completed_trades_book(book, date_iso=d)
+        summary = self._build_profit_summary_text("day")
+        try:
+            db.mark_eod_sent(self.account_id, d, self._now_ist_iso())
+        except Exception as e:
+            logger.warning(f"[EOD] Could not mark eod_state sent for {d}: {e}")
         return summary
 
     @staticmethod
@@ -2093,13 +2354,14 @@ class Trader:
         if not local:
             return stats
 
-        # Keep completed-trade journal accurate by auto-backfilling any pending exits.
+        # Keep the leg_exits journal accurate by auto-backfilling any pending
+        # exits (across all dates — pending exits can persist over weekends).
         try:
-            backfilled = int(self._backfill_pending_completed_trades())
+            backfilled = int(self._backfill_pending_leg_exits())
             if backfilled > 0:
-                logger.info(f"[RECONCILE] Backfilled {backfilled} pending completed trade(s) with broker exit fills.")
+                logger.info(f"[RECONCILE] Backfilled {backfilled} pending leg exit(s) with broker fills.")
         except Exception as e:
-            logger.warning(f"[RECONCILE] Pending completed-trade backfill failed: {e}")
+            logger.warning(f"[RECONCILE] Pending leg-exit backfill failed: {e}")
 
         positions_map = self._active_positions_map()
         stats["active"] = len(positions_map)
@@ -2801,6 +3063,12 @@ class Trader:
             current["entry_avg_price"] = float(entry_avg_price)
         if opened_at_ist is not None:
             current["opened_at_ist"] = str(opened_at_ist)
+            # Stamp a stable parent_trade_id on the active record exactly once,
+            # at trade-open time.  Every leg_exit row written for this signal
+            # carries the same id so we can group multi-day OCO leg exits by
+            # signal in profit reports.
+            if not current.get("parent_trade_id"):
+                current["parent_trade_id"] = str(uuid.uuid4())[:8]
         if entry_order_id is not None:
             current["entry_order_id"] = str(entry_order_id)
         if spread_group_id is not None:
@@ -3143,6 +3411,64 @@ class Trader:
             f"sl_true {prev_true:.2f} -> {next_true:.2f} "
             f"(open_qty={open_qty}, legs={len(legs)})"
         )
+
+        # Record per-leg exits for newly-FILLED legs.  This must run on
+        # stage advance so multi-day OCO target hits each get their own
+        # leg_exits row keyed to the day they actually filled.  The DB-side
+        # UNIQUE(parent_trade_id, account_id, target_index) + INSERT OR
+        # IGNORE makes this safe across retries / bot restarts.
+        if stage_advanced:
+            try:
+                prev_filled_idx = {
+                    int(l.get("target_index") or 0)
+                    for l in legs
+                    if str(l.get("status") or "").upper() == "FILLED"
+                }
+                next_legs = self._sorted_oco_legs(next_rec)
+                signal_targets_snap = (
+                    next_rec.get("signal_targets")
+                    if isinstance(next_rec.get("signal_targets"), list)
+                    else []
+                )
+                for leg in next_legs:
+                    if str(leg.get("status") or "").upper() != "FILLED":
+                        continue
+                    t_idx = int(leg.get("target_index") or 0)
+                    if t_idx <= 0 or t_idx in prev_filled_idx:
+                        continue
+                    leg_qty = int(self._num_or(leg.get("qty"), 0))
+                    # Prefer the actual broker limit price the leg was placed
+                    # at; fall back to the signal target if broker price is
+                    # missing.
+                    exit_p = float(
+                        self._num_or(leg.get("target_broker"), 0.0)
+                        or self._num_or(leg.get("target_signal"), 0.0)
+                    )
+                    self._record_leg_exit(
+                        symbol=symbol,
+                        active_rec=next_rec,
+                        target_index=t_idx,
+                        exit_price=exit_p,
+                        qty=leg_qty,
+                        close_reason="TARGET_HIT",
+                        exit_fill_source="oco_leg_fill",
+                        data={
+                            "smart_order_id": str(leg.get("smart_order_id") or ""),
+                            "target_order_id": str(leg.get("target_order_id") or ""),
+                            "stop_order_id": str(leg.get("stop_order_id") or ""),
+                            "target_signal": float(leg.get("target_signal") or 0.0),
+                            "target_broker": float(leg.get("target_broker") or 0.0),
+                            "signal_targets": list(signal_targets_snap),
+                            "sl_true_at_close": float(prev_true),
+                            "prev_stage": prev_stage,
+                            "new_stage": new_stage,
+                        },
+                    )
+            except Exception as e:
+                # Never let persistence interrupt the SL-progression flow.
+                logger.warning(
+                    f"[LEG_EXIT] stage-advance hook failed for {symbol}: {e}"
+                )
 
         broker_sl = float(next_true)
         if bool(next_rec.get("vol_sl_needs_restore")):

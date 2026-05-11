@@ -287,11 +287,25 @@ jobs:
               $repo = "C:\\groww-bot"
               $logsDir = Join-Path $repo "logs"
               $dataDir = Join-Path $repo "data"
+              $backupDataDir = "C:\\groww-bot-data-backup"
               if (-not (Get-Command nssm -ErrorAction SilentlyContinue)) {{ throw "nssm was not found on PATH." }}
               if (Test-Path (Join-Path $repo ".git")) {{
                 Invoke-Native {{ git -C $repo pull origin main }} "git pull"
               }} else {{
+                if (Test-Path $repo) {{
+                  if (Test-Path $dataDir) {{
+                    if (Test-Path $backupDataDir) {{
+                      Remove-Item -Recurse -Force $backupDataDir
+                    }}
+                    Move-Item -Path $dataDir -Destination $backupDataDir
+                  }}
+                  Remove-Item -Recurse -Force $repo
+                }}
                 Invoke-Native {{ git clone "{clone_url}" $repo }} "git clone"
+                if (Test-Path $backupDataDir) {{
+                  New-Item -ItemType Directory -Path $repo -Force | Out-Null
+                  Move-Item -Path $backupDataDir -Destination $dataDir
+                }}
               }}
               New-Item -ItemType Directory -Path $logsDir -Force | Out-Null
               New-Item -ItemType Directory -Path $dataDir -Force | Out-Null

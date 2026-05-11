@@ -70,7 +70,7 @@ jobs:
       # - WINRM_HOST: public IP or DNS for the Windows EC2 instance
       # - WINRM_USERNAME: Windows login user (for example, Administrator)
       # - WINRM_PASSWORD: Windows login password
-      # - GHCR_TOKEN: token with read access to this repo (used for git clone/pull)
+      # - GH_PAT: token with read access to this repo (used for git clone/pull)
       #
       # One-time EC2 setup prerequisites:
       # - WinRM over HTTPS enabled and reachable on port 5986
@@ -97,7 +97,7 @@ jobs:
           WINRM_USERNAME: ${{ secrets.WINRM_USERNAME }}
           WINRM_PASSWORD: ${{ secrets.WINRM_PASSWORD }}
           GITHUB_REPOSITORY: ${{ github.repository }}
-          GH_PAT: ${{ secrets.GHCR_TOKEN }}
+          GH_PAT: ${{ secrets.GH_PAT }}
           TELEGRAM_API_ID: ${{ secrets.TELEGRAM_API_ID }}
           TELEGRAM_API_HASH: ${{ secrets.TELEGRAM_API_HASH }}
           TELEGRAM_TARGET_CHAT_ID: ${{ secrets.TELEGRAM_TARGET_CHAT_ID }}
@@ -278,19 +278,25 @@ jobs:
           run_ps(
               f"""
               $ErrorActionPreference = "Stop"
+              function Invoke-Native([scriptblock]$Command, [string]$Name) {{
+                & $Command
+                if ($LASTEXITCODE -ne 0) {{
+                  throw "$Name failed with exit code $LASTEXITCODE"
+                }}
+              }}
               $repo = "C:\\groww-bot"
               $logsDir = Join-Path $repo "logs"
               $dataDir = Join-Path $repo "data"
               if (-not (Get-Command nssm -ErrorAction SilentlyContinue)) {{ throw "nssm was not found on PATH." }}
               if (Test-Path (Join-Path $repo ".git")) {{
-                git -C $repo pull origin main
+                Invoke-Native {{ git -C $repo pull origin main }} "git pull"
               }} else {{
-                git clone "{clone_url}" $repo
+                Invoke-Native {{ git clone "{clone_url}" $repo }} "git clone"
               }}
               New-Item -ItemType Directory -Path $logsDir -Force | Out-Null
               New-Item -ItemType Directory -Path $dataDir -Force | Out-Null
-              python -m pip install --upgrade pip
-              python -m pip install -r (Join-Path $repo "requirements.txt")
+              Invoke-Native {{ python -m pip install --upgrade pip }} "pip upgrade"
+              Invoke-Native {{ python -m pip install -r (Join-Path $repo "requirements.txt") }} "pip install requirements"
               """,
               "prep/clone/install",
           )
@@ -310,24 +316,30 @@ jobs:
           run_ps(
               """
               $ErrorActionPreference = "Stop"
+              function Invoke-Native([scriptblock]$Command, [string]$Name) {
+                & $Command
+                if ($LASTEXITCODE -ne 0) {
+                  throw "$Name failed with exit code $LASTEXITCODE"
+                }
+              }
               $repo = "C:\\groww-bot"
               $logsDir = Join-Path $repo "logs"
               $serviceName = "GrowwBot"
               if (Get-Service -Name $serviceName -ErrorAction SilentlyContinue) {
-                nssm stop $serviceName confirm | Out-Null
+                Invoke-Native { nssm stop $serviceName confirm } "nssm stop" | Out-Null
                 Start-Sleep -Seconds 2
-                nssm remove $serviceName confirm | Out-Null
+                Invoke-Native { nssm remove $serviceName confirm } "nssm remove" | Out-Null
               }
               $launcherPath = Join-Path $repo "start-bot.ps1"
-              nssm install $serviceName "powershell.exe" | Out-Null
-              nssm set $serviceName AppParameters "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$launcherPath`"" | Out-Null
-              nssm set $serviceName AppDirectory $repo | Out-Null
-              nssm set $serviceName AppStdout (Join-Path $logsDir "bot.log") | Out-Null
-              nssm set $serviceName AppStderr (Join-Path $logsDir "bot-error.log") | Out-Null
-              nssm set $serviceName AppRotateFiles 1 | Out-Null
-              nssm set $serviceName AppRotateOnline 1 | Out-Null
-              nssm set $serviceName Start SERVICE_AUTO_START | Out-Null
-              nssm start $serviceName | Out-Null
+              Invoke-Native { nssm install $serviceName "powershell.exe" } "nssm install" | Out-Null
+              Invoke-Native { nssm set $serviceName AppParameters "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$launcherPath`"" } "nssm set AppParameters" | Out-Null
+              Invoke-Native { nssm set $serviceName AppDirectory $repo } "nssm set AppDirectory" | Out-Null
+              Invoke-Native { nssm set $serviceName AppStdout (Join-Path $logsDir "bot.log") } "nssm set AppStdout" | Out-Null
+              Invoke-Native { nssm set $serviceName AppStderr (Join-Path $logsDir "bot-error.log") } "nssm set AppStderr" | Out-Null
+              Invoke-Native { nssm set $serviceName AppRotateFiles 1 } "nssm set AppRotateFiles" | Out-Null
+              Invoke-Native { nssm set $serviceName AppRotateOnline 1 } "nssm set AppRotateOnline" | Out-Null
+              Invoke-Native { nssm set $serviceName Start SERVICE_AUTO_START } "nssm set Start" | Out-Null
+              Invoke-Native { nssm start $serviceName } "nssm start" | Out-Null
               Start-Sleep -Seconds 3
               $status = (nssm status $serviceName).Trim()
               if ($status -ne "SERVICE_RUNNING") { throw "Service failed to start: $status" }

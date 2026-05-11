@@ -188,16 +188,16 @@ jobs:
           $dataDir = Join-Path $repo "data"
           $serviceName = "GrowwBot"
 
-          if (-not (Get-Command nssm -ErrorAction SilentlyContinue)) {
+          if (-not (Get-Command nssm -ErrorAction SilentlyContinue)) {{
             throw "nssm was not found on PATH. Install nssm.exe on the EC2 host."
-          }
+          }}
 
-          if (Test-Path (Join-Path $repo ".git")) {
+          if (Test-Path (Join-Path $repo ".git")) {{
             git -C $repo pull origin main
-          } else {
+          }} else {{
             $cloneUrl = "https://x-access-token:{GH_PAT}@github.com/{GITHUB_REPOSITORY}.git"
             git clone $cloneUrl $repo
-          }
+          }}
 
           New-Item -ItemType Directory -Path $logsDir -Force | Out-Null
           New-Item -ItemType Directory -Path $dataDir -Force | Out-Null
@@ -276,23 +276,23 @@ jobs:
           $launcher = @'
           $ErrorActionPreference = "Stop"
           $repo = "C:\groww-bot"
-          Get-Content (Join-Path $repo ".env") | ForEach-Object {
-            if ($_ -match '^\s*#' -or [string]::IsNullOrWhiteSpace($_)) { return }
+          Get-Content (Join-Path $repo ".env") | ForEach-Object {{
+            if ($_ -match '^\s*#' -or [string]::IsNullOrWhiteSpace($_)) {{ return }}
             $parts = $_.Split("=", 2)
-            if ($parts.Count -eq 2) {
+            if ($parts.Count -eq 2) {{
               [System.Environment]::SetEnvironmentVariable($parts[0], $parts[1], "Process")
-            }
-          }
+            }}
+          }}
           Set-Location $repo
           python -m app.main
           '@
           Set-Content -Path (Join-Path $repo "start-bot.ps1") -Value $launcher -Encoding utf8
 
-          if (Get-Service -Name $serviceName -ErrorAction SilentlyContinue) {
+          if (Get-Service -Name $serviceName -ErrorAction SilentlyContinue) {{
             nssm stop $serviceName confirm | Out-Null
             Start-Sleep -Seconds 2
             nssm remove $serviceName confirm | Out-Null
-          }
+          }}
 
           $launcherPath = Join-Path $repo "start-bot.ps1"
           nssm install $serviceName "powershell.exe" | Out-Null
@@ -307,9 +307,9 @@ jobs:
           nssm start $serviceName | Out-Null
           Start-Sleep -Seconds 3
           $status = (nssm status $serviceName).Trim()
-          if ($status -ne "SERVICE_RUNNING") {
+          if ($status -ne "SERVICE_RUNNING") {{
             throw "Service $serviceName failed to start. Current status: $status"
-          }
+          }}
           Write-Host "$serviceName is running."
           """
 

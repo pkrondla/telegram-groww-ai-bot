@@ -285,10 +285,6 @@ jobs:
           ).decode("ascii")
 
           clone_url = f"https://x-access-token:{clean('GH_PAT')}@github.com/{clean('GITHUB_REPOSITORY')}.git"
-          service_user = clean("WINRM_USERNAME")
-          service_pass = clean("WINRM_PASSWORD")
-          service_user_b64 = base64.b64encode(service_user.encode("utf-8")).decode("ascii")
-          service_pass_b64 = base64.b64encode(service_pass.encode("utf-8")).decode("ascii")
 
           run_ps(
               f"""
@@ -370,9 +366,6 @@ jobs:
                   throw "$Name failed with exit code $LASTEXITCODE"
                 }
               }
-              $svcUser = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String("__SERVICE_USER_B64__"))
-              $svcPass = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String("__SERVICE_PASS_B64__"))
-              if ($svcUser -notmatch "[\\@]") { $svcUser = ".\" + $svcUser }
               $repo = "C:\\groww-bot"
               $logsDir = Join-Path $repo "logs"
               $serviceName = "GrowwBot"
@@ -390,7 +383,6 @@ jobs:
               Invoke-Native { nssm set $serviceName AppRotateFiles 1 } "nssm set AppRotateFiles" | Out-Null
               Invoke-Native { nssm set $serviceName AppRotateOnline 1 } "nssm set AppRotateOnline" | Out-Null
               Invoke-Native { nssm set $serviceName Start SERVICE_AUTO_START } "nssm set Start" | Out-Null
-              Invoke-Native { nssm set $serviceName ObjectName $svcUser $svcPass } "nssm set ObjectName" | Out-Null
               Invoke-Native { nssm set $serviceName AppExit Default Restart } "nssm set AppExit" | Out-Null
               Invoke-Native { nssm set $serviceName AppThrottle 15000 } "nssm set AppThrottle" | Out-Null
               Invoke-Native { nssm start $serviceName } "nssm start" | Out-Null
@@ -399,6 +391,5 @@ jobs:
               if ($status -ne "SERVICE_RUNNING") { throw "Service failed to start: $status" }
               Write-Host "$serviceName is running."
               """
-          service_script = service_script.replace("__SERVICE_USER_B64__", service_user_b64).replace("__SERVICE_PASS_B64__", service_pass_b64)
           run_ps(service_script, "configure/start service")
           PY

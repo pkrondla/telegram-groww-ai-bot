@@ -163,6 +163,7 @@ jobs:
           python - <<'PY'
           import os
           import sys
+          import base64
           import winrm
 
           host = os.environ["WINRM_HOST"]
@@ -177,212 +178,161 @@ jobs:
               server_cert_validation="ignore",
           )
 
-          def env(name: str) -> str:
-              v = os.environ.get(name, "")
-              return str(v).replace("\r", "").replace("\n", "\\n")
+          def clean(name: str) -> str:
+              return str(os.environ.get(name, "")).replace("\r", "").replace("\n", "\\n")
 
-          ps = r"""
-          $ErrorActionPreference = "Stop"
-          $repo = "C:\groww-bot"
-          $logsDir = Join-Path $repo "logs"
-          $dataDir = Join-Path $repo "data"
-          $serviceName = "GrowwBot"
+          def run_ps(script: str, name: str) -> None:
+              r = session.run_ps(script)
+              out = r.std_out.decode("utf-8", errors="replace")
+              err = r.std_err.decode("utf-8", errors="replace")
+              if out:
+                  sys.stdout.write(out)
+              if err:
+                  sys.stderr.write(err)
+              if r.status_code != 0:
+                  raise SystemExit(f"{name} failed with status_code={r.status_code}")
 
-          if (-not (Get-Command nssm -ErrorAction SilentlyContinue)) {{
-            throw "nssm was not found on PATH. Install nssm.exe on the EC2 host."
-          }}
+          env_lines = [
+              f"TELEGRAM_API_ID={clean('TELEGRAM_API_ID')}",
+              f"TELEGRAM_API_HASH={clean('TELEGRAM_API_HASH')}",
+              f"TELEGRAM_TARGET_CHAT_ID={clean('TELEGRAM_TARGET_CHAT_ID')}",
+              f"TELEGRAM_ADMIN_ID={clean('TELEGRAM_ADMIN_ID')}",
+              f"TELEGRAM_BOT_TOKEN={clean('TELEGRAM_BOT_TOKEN')}",
+              "TELEGRAM_SESSION_NAME=session_name",
+              "SESSION_PATH=data/session_name",
+              "DB_PATH=data/trading_bot.db",
+              f"OPENAI_API_KEY={clean('OPENAI_API_KEY')}",
+              f"OPENAI_MODEL={clean('OPENAI_MODEL')}",
+              f"GROWW_ACCOUNTS_JSON={clean('GROWW_ACCOUNTS_JSON')}",
+              f"DRY_RUN={clean('DRY_RUN')}",
+              f"INDEX_ORDER_LOTS_COUNT={clean('INDEX_ORDER_LOTS_COUNT')}",
+              f"STOCK_ORDER_LOTS_COUNT={clean('STOCK_ORDER_LOTS_COUNT')}",
+              f"ORDER_QUANTITY={clean('ORDER_QUANTITY')}",
+              f"TARGET_BUFFER_PCT={clean('TARGET_BUFFER_PCT')}",
+              f"MULTI_TARGET_ENABLED={clean('MULTI_TARGET_ENABLED')}",
+              f"TARGET_SPLIT_2={clean('TARGET_SPLIT_2')}",
+              f"TARGET_SPLIT_3={clean('TARGET_SPLIT_3')}",
+              f"TARGET_PRICE_TICK_SIZE={clean('TARGET_PRICE_TICK_SIZE')}",
+              f"INDEX_POSITION_SIZING_MODE={clean('INDEX_POSITION_SIZING_MODE')}",
+              f"STOCK_POSITION_SIZING_MODE={clean('STOCK_POSITION_SIZING_MODE')}",
+              f"RISK_PCT_PER_TRADE={clean('RISK_PCT_PER_TRADE')}",
+              f"MAX_TOTAL_OPEN_RISK_PCT={clean('MAX_TOTAL_OPEN_RISK_PCT')}",
+              f"INDEX_MIN_LOTS={clean('INDEX_MIN_LOTS')}",
+              f"INDEX_MAX_LOTS={clean('INDEX_MAX_LOTS')}",
+              f"STOCK_MIN_LOTS={clean('STOCK_MIN_LOTS')}",
+              f"STOCK_MAX_LOTS={clean('STOCK_MAX_LOTS')}",
+              f"RISK_MODE_ON_ZERO_LOTS={clean('RISK_MODE_ON_ZERO_LOTS')}",
+              f"LOG_LEVEL={clean('LOG_LEVEL')}",
+              f"ENTRY_QUEUE_ENABLED={clean('ENTRY_QUEUE_ENABLED')}",
+              f"ENTRY_QUEUE_POLL_SEC={clean('ENTRY_QUEUE_POLL_SEC')}",
+              f"ENTRY_QUEUE_MAX_WAIT_MIN={clean('ENTRY_QUEUE_MAX_WAIT_MIN')}",
+              f"SIZE_ADVISORY_TTL_SEC={clean('SIZE_ADVISORY_TTL_SEC')}",
+              f"ENTRY_SINGLE_LIMIT_ORDER={clean('ENTRY_SINGLE_LIMIT_ORDER')}",
+              f"CHASE_MIN_RR={clean('CHASE_MIN_RR')}",
+              f"CHASE_RR_TARGET_INDEX={clean('CHASE_RR_TARGET_INDEX')}",
+              f"ACTIVE_RECONCILE_ENABLED={clean('ACTIVE_RECONCILE_ENABLED')}",
+              f"ACTIVE_RECONCILE_POLL_SEC={clean('ACTIVE_RECONCILE_POLL_SEC')}",
+              f"AUTO_REARM_PROTECTION={clean('AUTO_REARM_PROTECTION')}",
+              f"AUTO_REARM_POLL_SEC={clean('AUTO_REARM_POLL_SEC')}",
+              f"OCO_PLAN_ENFORCEMENT_MODE={clean('OCO_PLAN_ENFORCEMENT_MODE')}",
+              f"VOL_SL_SCHEDULE_ENABLED={clean('VOL_SL_SCHEDULE_ENABLED')}",
+              f"VOL_SL_WIDEN_TIME_IST={clean('VOL_SL_WIDEN_TIME_IST')}",
+              f"VOL_SL_RESTORE_TIME_IST={clean('VOL_SL_RESTORE_TIME_IST')}",
+              f"VOL_SL_WIDEN_PCT={clean('VOL_SL_WIDEN_PCT')}",
+              f"VOL_SL_SCHEDULE_POLL_SEC={clean('VOL_SL_SCHEDULE_POLL_SEC')}",
+              f"VOL_SL_SKIP_WEEKENDS={clean('VOL_SL_SKIP_WEEKENDS')}",
+              f"EOD_SUMMARY_ENABLED={clean('EOD_SUMMARY_ENABLED')}",
+              f"EOD_SUMMARY_POLL_SEC={clean('EOD_SUMMARY_POLL_SEC')}",
+              f"EOD_SUMMARY_SKIP_WEEKENDS={clean('EOD_SUMMARY_SKIP_WEEKENDS')}",
+              f"MGMT_QUEUE_ENABLED={clean('MGMT_QUEUE_ENABLED')}",
+              f"MGMT_QUEUE_POLL_SEC={clean('MGMT_QUEUE_POLL_SEC')}",
+              f"MGMT_QUEUE_MAX_RETRIES={clean('MGMT_QUEUE_MAX_RETRIES')}",
+              f"MGMT_QUEUE_TTL_MIN={clean('MGMT_QUEUE_TTL_MIN')}",
+              f"MARKET_OPEN_TIME_IST={clean('MARKET_OPEN_TIME_IST')}",
+              f"MARKET_CLOSE_TIME_IST={clean('MARKET_CLOSE_TIME_IST')}",
+              f"BROKER_WINDOW_PREOPEN_MIN={clean('BROKER_WINDOW_PREOPEN_MIN')}",
+              f"BROKER_WINDOW_POSTCLOSE_MIN={clean('BROKER_WINDOW_POSTCLOSE_MIN')}",
+              f"GROWW_AUTH_POLL_SEC={clean('GROWW_AUTH_POLL_SEC')}",
+              f"EXTEND_RANGE_ALLOWS_ENTRY={clean('EXTEND_RANGE_ALLOWS_ENTRY')}",
+              f"SQLITE_JOURNAL_MODE={clean('SQLITE_JOURNAL_MODE')}",
+              f"SQLITE_BUSY_TIMEOUT_MS={clean('SQLITE_BUSY_TIMEOUT_MS')}",
+              f"SQLITE_LOCK_RETRY_SEC={clean('SQLITE_LOCK_RETRY_SEC')}",
+          ]
+          env_b64 = base64.b64encode(("\n".join(env_lines) + "\n").encode("utf-8")).decode("ascii")
+          launcher_b64 = base64.b64encode(
+              (
+                  '$ErrorActionPreference = "Stop"\n'
+                  '$repo = "C:\\groww-bot"\n'
+                  'Get-Content (Join-Path $repo ".env") | ForEach-Object {\n'
+                  '  if ($_ -match "^\\s*#" -or [string]::IsNullOrWhiteSpace($_)) { return }\n'
+                  '  $parts = $_.Split("=", 2)\n'
+                  '  if ($parts.Count -eq 2) { [System.Environment]::SetEnvironmentVariable($parts[0], $parts[1], "Process") }\n'
+                  '}\n'
+                  'Set-Location $repo\n'
+                  'python -m app.main\n'
+              ).encode("utf-8")
+          ).decode("ascii")
 
-          if (Test-Path (Join-Path $repo ".git")) {{
-            git -C $repo pull origin main
-          }} else {{
-            $cloneUrl = "https://x-access-token:{GH_PAT}@github.com/{GITHUB_REPOSITORY}.git"
-            git clone $cloneUrl $repo
-          }}
+          clone_url = f"https://x-access-token:{clean('GH_PAT')}@github.com/{clean('GITHUB_REPOSITORY')}.git"
 
-          New-Item -ItemType Directory -Path $logsDir -Force | Out-Null
-          New-Item -ItemType Directory -Path $dataDir -Force | Out-Null
-
-          python -m pip install --upgrade pip
-          python -m pip install -r (Join-Path $repo "requirements.txt")
-
-          $envLines = @(
-            "TELEGRAM_API_ID={TELEGRAM_API_ID}",
-            "TELEGRAM_API_HASH={TELEGRAM_API_HASH}",
-            "TELEGRAM_TARGET_CHAT_ID={TELEGRAM_TARGET_CHAT_ID}",
-            "TELEGRAM_ADMIN_ID={TELEGRAM_ADMIN_ID}",
-            "TELEGRAM_BOT_TOKEN={TELEGRAM_BOT_TOKEN}",
-            "TELEGRAM_SESSION_NAME=session_name",
-            "SESSION_PATH=data/session_name",
-            "DB_PATH=data/trading_bot.db",
-            "OPENAI_API_KEY={OPENAI_API_KEY}",
-            "OPENAI_MODEL={OPENAI_MODEL}",
-            "GROWW_ACCOUNTS_JSON={GROWW_ACCOUNTS_JSON}",
-            "DRY_RUN={DRY_RUN}",
-            "INDEX_ORDER_LOTS_COUNT={INDEX_ORDER_LOTS_COUNT}",
-            "STOCK_ORDER_LOTS_COUNT={STOCK_ORDER_LOTS_COUNT}",
-            "ORDER_QUANTITY={ORDER_QUANTITY}",
-            "TARGET_BUFFER_PCT={TARGET_BUFFER_PCT}",
-            "MULTI_TARGET_ENABLED={MULTI_TARGET_ENABLED}",
-            "TARGET_SPLIT_2={TARGET_SPLIT_2}",
-            "TARGET_SPLIT_3={TARGET_SPLIT_3}",
-            "TARGET_PRICE_TICK_SIZE={TARGET_PRICE_TICK_SIZE}",
-            "INDEX_POSITION_SIZING_MODE={INDEX_POSITION_SIZING_MODE}",
-            "STOCK_POSITION_SIZING_MODE={STOCK_POSITION_SIZING_MODE}",
-            "RISK_PCT_PER_TRADE={RISK_PCT_PER_TRADE}",
-            "MAX_TOTAL_OPEN_RISK_PCT={MAX_TOTAL_OPEN_RISK_PCT}",
-            "INDEX_MIN_LOTS={INDEX_MIN_LOTS}",
-            "INDEX_MAX_LOTS={INDEX_MAX_LOTS}",
-            "STOCK_MIN_LOTS={STOCK_MIN_LOTS}",
-            "STOCK_MAX_LOTS={STOCK_MAX_LOTS}",
-            "RISK_MODE_ON_ZERO_LOTS={RISK_MODE_ON_ZERO_LOTS}",
-            "LOG_LEVEL={LOG_LEVEL}",
-            "ENTRY_QUEUE_ENABLED={ENTRY_QUEUE_ENABLED}",
-            "ENTRY_QUEUE_POLL_SEC={ENTRY_QUEUE_POLL_SEC}",
-            "ENTRY_QUEUE_MAX_WAIT_MIN={ENTRY_QUEUE_MAX_WAIT_MIN}",
-            "SIZE_ADVISORY_TTL_SEC={SIZE_ADVISORY_TTL_SEC}",
-            "ENTRY_SINGLE_LIMIT_ORDER={ENTRY_SINGLE_LIMIT_ORDER}",
-            "CHASE_MIN_RR={CHASE_MIN_RR}",
-            "CHASE_RR_TARGET_INDEX={CHASE_RR_TARGET_INDEX}",
-            "ACTIVE_RECONCILE_ENABLED={ACTIVE_RECONCILE_ENABLED}",
-            "ACTIVE_RECONCILE_POLL_SEC={ACTIVE_RECONCILE_POLL_SEC}",
-            "AUTO_REARM_PROTECTION={AUTO_REARM_PROTECTION}",
-            "AUTO_REARM_POLL_SEC={AUTO_REARM_POLL_SEC}",
-            "OCO_PLAN_ENFORCEMENT_MODE={OCO_PLAN_ENFORCEMENT_MODE}",
-            "VOL_SL_SCHEDULE_ENABLED={VOL_SL_SCHEDULE_ENABLED}",
-            "VOL_SL_WIDEN_TIME_IST={VOL_SL_WIDEN_TIME_IST}",
-            "VOL_SL_RESTORE_TIME_IST={VOL_SL_RESTORE_TIME_IST}",
-            "VOL_SL_WIDEN_PCT={VOL_SL_WIDEN_PCT}",
-            "VOL_SL_SCHEDULE_POLL_SEC={VOL_SL_SCHEDULE_POLL_SEC}",
-            "VOL_SL_SKIP_WEEKENDS={VOL_SL_SKIP_WEEKENDS}",
-            "EOD_SUMMARY_ENABLED={EOD_SUMMARY_ENABLED}",
-            "EOD_SUMMARY_POLL_SEC={EOD_SUMMARY_POLL_SEC}",
-            "EOD_SUMMARY_SKIP_WEEKENDS={EOD_SUMMARY_SKIP_WEEKENDS}",
-            "MGMT_QUEUE_ENABLED={MGMT_QUEUE_ENABLED}",
-            "MGMT_QUEUE_POLL_SEC={MGMT_QUEUE_POLL_SEC}",
-            "MGMT_QUEUE_MAX_RETRIES={MGMT_QUEUE_MAX_RETRIES}",
-            "MGMT_QUEUE_TTL_MIN={MGMT_QUEUE_TTL_MIN}",
-            "MARKET_OPEN_TIME_IST={MARKET_OPEN_TIME_IST}",
-            "MARKET_CLOSE_TIME_IST={MARKET_CLOSE_TIME_IST}",
-            "BROKER_WINDOW_PREOPEN_MIN={BROKER_WINDOW_PREOPEN_MIN}",
-            "BROKER_WINDOW_POSTCLOSE_MIN={BROKER_WINDOW_POSTCLOSE_MIN}",
-            "GROWW_AUTH_POLL_SEC={GROWW_AUTH_POLL_SEC}",
-            "EXTEND_RANGE_ALLOWS_ENTRY={EXTEND_RANGE_ALLOWS_ENTRY}",
-            "SQLITE_JOURNAL_MODE={SQLITE_JOURNAL_MODE}",
-            "SQLITE_BUSY_TIMEOUT_MS={SQLITE_BUSY_TIMEOUT_MS}",
-            "SQLITE_LOCK_RETRY_SEC={SQLITE_LOCK_RETRY_SEC}"
+          run_ps(
+              f"""
+              $ErrorActionPreference = "Stop"
+              $repo = "C:\\groww-bot"
+              $logsDir = Join-Path $repo "logs"
+              $dataDir = Join-Path $repo "data"
+              if (-not (Get-Command nssm -ErrorAction SilentlyContinue)) {{ throw "nssm was not found on PATH." }}
+              if (Test-Path (Join-Path $repo ".git")) {{
+                git -C $repo pull origin main
+              }} else {{
+                git clone "{clone_url}" $repo
+              }}
+              New-Item -ItemType Directory -Path $logsDir -Force | Out-Null
+              New-Item -ItemType Directory -Path $dataDir -Force | Out-Null
+              python -m pip install --upgrade pip
+              python -m pip install -r (Join-Path $repo "requirements.txt")
+              """,
+              "prep/clone/install",
           )
-          Set-Content -Path (Join-Path $repo ".env") -Value $envLines -Encoding utf8
 
-          $launcher = @'
-          $ErrorActionPreference = "Stop"
-          $repo = "C:\groww-bot"
-          Get-Content (Join-Path $repo ".env") | ForEach-Object {{
-            if ($_ -match '^\s*#' -or [string]::IsNullOrWhiteSpace($_)) {{ return }}
-            $parts = $_.Split("=", 2)
-            if ($parts.Count -eq 2) {{
-              [System.Environment]::SetEnvironmentVariable($parts[0], $parts[1], "Process")
-            }}
-          }}
-          Set-Location $repo
-          python -m app.main
-          '@
-          Set-Content -Path (Join-Path $repo "start-bot.ps1") -Value $launcher -Encoding utf8
+          run_ps(
+              f"""
+              $ErrorActionPreference = "Stop"
+              $repo = "C:\\groww-bot"
+              $envContent = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String("{env_b64}"))
+              Set-Content -Path (Join-Path $repo ".env") -Value $envContent -Encoding utf8
+              $launcher = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String("{launcher_b64}"))
+              Set-Content -Path (Join-Path $repo "start-bot.ps1") -Value $launcher -Encoding utf8
+              """,
+              "write env/launcher",
+          )
 
-          if (Get-Service -Name $serviceName -ErrorAction SilentlyContinue) {{
-            nssm stop $serviceName confirm | Out-Null
-            Start-Sleep -Seconds 2
-            nssm remove $serviceName confirm | Out-Null
-          }}
-
-          $launcherPath = Join-Path $repo "start-bot.ps1"
-          nssm install $serviceName "powershell.exe" | Out-Null
-          nssm set $serviceName AppParameters "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$launcherPath`"" | Out-Null
-          nssm set $serviceName AppDirectory $repo | Out-Null
-          nssm set $serviceName AppStdout (Join-Path $logsDir "bot.log") | Out-Null
-          nssm set $serviceName AppStderr (Join-Path $logsDir "bot-error.log") | Out-Null
-          nssm set $serviceName AppRotateFiles 1 | Out-Null
-          nssm set $serviceName AppRotateOnline 1 | Out-Null
-          nssm set $serviceName Start SERVICE_AUTO_START | Out-Null
-
-          nssm start $serviceName | Out-Null
-          Start-Sleep -Seconds 3
-          $status = (nssm status $serviceName).Trim()
-          if ($status -ne "SERVICE_RUNNING") {{
-            throw "Service $serviceName failed to start. Current status: $status"
-          }}
-          Write-Host "$serviceName is running."
-          """
-
-          replacements = {
-              "GH_PAT": env("GH_PAT"),
-              "GITHUB_REPOSITORY": env("GITHUB_REPOSITORY"),
-              "TELEGRAM_API_ID": env("TELEGRAM_API_ID"),
-              "TELEGRAM_API_HASH": env("TELEGRAM_API_HASH"),
-              "TELEGRAM_TARGET_CHAT_ID": env("TELEGRAM_TARGET_CHAT_ID"),
-              "TELEGRAM_ADMIN_ID": env("TELEGRAM_ADMIN_ID"),
-              "TELEGRAM_BOT_TOKEN": env("TELEGRAM_BOT_TOKEN"),
-              "OPENAI_API_KEY": env("OPENAI_API_KEY"),
-              "OPENAI_MODEL": env("OPENAI_MODEL"),
-              "GROWW_ACCOUNTS_JSON": env("GROWW_ACCOUNTS_JSON"),
-              "DRY_RUN": env("DRY_RUN"),
-              "INDEX_ORDER_LOTS_COUNT": env("INDEX_ORDER_LOTS_COUNT"),
-              "STOCK_ORDER_LOTS_COUNT": env("STOCK_ORDER_LOTS_COUNT"),
-              "ORDER_QUANTITY": env("ORDER_QUANTITY"),
-              "TARGET_BUFFER_PCT": env("TARGET_BUFFER_PCT"),
-              "MULTI_TARGET_ENABLED": env("MULTI_TARGET_ENABLED"),
-              "TARGET_SPLIT_2": env("TARGET_SPLIT_2"),
-              "TARGET_SPLIT_3": env("TARGET_SPLIT_3"),
-              "TARGET_PRICE_TICK_SIZE": env("TARGET_PRICE_TICK_SIZE"),
-              "INDEX_POSITION_SIZING_MODE": env("INDEX_POSITION_SIZING_MODE"),
-              "STOCK_POSITION_SIZING_MODE": env("STOCK_POSITION_SIZING_MODE"),
-              "RISK_PCT_PER_TRADE": env("RISK_PCT_PER_TRADE"),
-              "MAX_TOTAL_OPEN_RISK_PCT": env("MAX_TOTAL_OPEN_RISK_PCT"),
-              "INDEX_MIN_LOTS": env("INDEX_MIN_LOTS"),
-              "INDEX_MAX_LOTS": env("INDEX_MAX_LOTS"),
-              "STOCK_MIN_LOTS": env("STOCK_MIN_LOTS"),
-              "STOCK_MAX_LOTS": env("STOCK_MAX_LOTS"),
-              "RISK_MODE_ON_ZERO_LOTS": env("RISK_MODE_ON_ZERO_LOTS"),
-              "LOG_LEVEL": env("LOG_LEVEL"),
-              "ENTRY_QUEUE_ENABLED": env("ENTRY_QUEUE_ENABLED"),
-              "ENTRY_QUEUE_POLL_SEC": env("ENTRY_QUEUE_POLL_SEC"),
-              "ENTRY_QUEUE_MAX_WAIT_MIN": env("ENTRY_QUEUE_MAX_WAIT_MIN"),
-              "SIZE_ADVISORY_TTL_SEC": env("SIZE_ADVISORY_TTL_SEC"),
-              "ENTRY_SINGLE_LIMIT_ORDER": env("ENTRY_SINGLE_LIMIT_ORDER"),
-              "CHASE_MIN_RR": env("CHASE_MIN_RR"),
-              "CHASE_RR_TARGET_INDEX": env("CHASE_RR_TARGET_INDEX"),
-              "ACTIVE_RECONCILE_ENABLED": env("ACTIVE_RECONCILE_ENABLED"),
-              "ACTIVE_RECONCILE_POLL_SEC": env("ACTIVE_RECONCILE_POLL_SEC"),
-              "AUTO_REARM_PROTECTION": env("AUTO_REARM_PROTECTION"),
-              "AUTO_REARM_POLL_SEC": env("AUTO_REARM_POLL_SEC"),
-              "OCO_PLAN_ENFORCEMENT_MODE": env("OCO_PLAN_ENFORCEMENT_MODE"),
-              "VOL_SL_SCHEDULE_ENABLED": env("VOL_SL_SCHEDULE_ENABLED"),
-              "VOL_SL_WIDEN_TIME_IST": env("VOL_SL_WIDEN_TIME_IST"),
-              "VOL_SL_RESTORE_TIME_IST": env("VOL_SL_RESTORE_TIME_IST"),
-              "VOL_SL_WIDEN_PCT": env("VOL_SL_WIDEN_PCT"),
-              "VOL_SL_SCHEDULE_POLL_SEC": env("VOL_SL_SCHEDULE_POLL_SEC"),
-              "VOL_SL_SKIP_WEEKENDS": env("VOL_SL_SKIP_WEEKENDS"),
-              "EOD_SUMMARY_ENABLED": env("EOD_SUMMARY_ENABLED"),
-              "EOD_SUMMARY_POLL_SEC": env("EOD_SUMMARY_POLL_SEC"),
-              "EOD_SUMMARY_SKIP_WEEKENDS": env("EOD_SUMMARY_SKIP_WEEKENDS"),
-              "MGMT_QUEUE_ENABLED": env("MGMT_QUEUE_ENABLED"),
-              "MGMT_QUEUE_POLL_SEC": env("MGMT_QUEUE_POLL_SEC"),
-              "MGMT_QUEUE_MAX_RETRIES": env("MGMT_QUEUE_MAX_RETRIES"),
-              "MGMT_QUEUE_TTL_MIN": env("MGMT_QUEUE_TTL_MIN"),
-              "MARKET_OPEN_TIME_IST": env("MARKET_OPEN_TIME_IST"),
-              "MARKET_CLOSE_TIME_IST": env("MARKET_CLOSE_TIME_IST"),
-              "BROKER_WINDOW_PREOPEN_MIN": env("BROKER_WINDOW_PREOPEN_MIN"),
-              "BROKER_WINDOW_POSTCLOSE_MIN": env("BROKER_WINDOW_POSTCLOSE_MIN"),
-              "GROWW_AUTH_POLL_SEC": env("GROWW_AUTH_POLL_SEC"),
-              "EXTEND_RANGE_ALLOWS_ENTRY": env("EXTEND_RANGE_ALLOWS_ENTRY"),
-              "SQLITE_JOURNAL_MODE": env("SQLITE_JOURNAL_MODE"),
-              "SQLITE_BUSY_TIMEOUT_MS": env("SQLITE_BUSY_TIMEOUT_MS"),
-              "SQLITE_LOCK_RETRY_SEC": env("SQLITE_LOCK_RETRY_SEC"),
-          }
-
-          ps_filled = ps.format(**replacements)
-          r = session.run_ps(ps_filled)
-          sys.stdout.write(r.std_out.decode("utf-8", errors="replace"))
-          sys.stderr.write(r.std_err.decode("utf-8", errors="replace"))
-          if r.status_code != 0:
-              raise SystemExit(f"Remote script failed with status_code={r.status_code}")
+          run_ps(
+              """
+              $ErrorActionPreference = "Stop"
+              $repo = "C:\\groww-bot"
+              $logsDir = Join-Path $repo "logs"
+              $serviceName = "GrowwBot"
+              if (Get-Service -Name $serviceName -ErrorAction SilentlyContinue) {
+                nssm stop $serviceName confirm | Out-Null
+                Start-Sleep -Seconds 2
+                nssm remove $serviceName confirm | Out-Null
+              }
+              $launcherPath = Join-Path $repo "start-bot.ps1"
+              nssm install $serviceName "powershell.exe" | Out-Null
+              nssm set $serviceName AppParameters "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$launcherPath`"" | Out-Null
+              nssm set $serviceName AppDirectory $repo | Out-Null
+              nssm set $serviceName AppStdout (Join-Path $logsDir "bot.log") | Out-Null
+              nssm set $serviceName AppStderr (Join-Path $logsDir "bot-error.log") | Out-Null
+              nssm set $serviceName AppRotateFiles 1 | Out-Null
+              nssm set $serviceName AppRotateOnline 1 | Out-Null
+              nssm set $serviceName Start SERVICE_AUTO_START | Out-Null
+              nssm start $serviceName | Out-Null
+              Start-Sleep -Seconds 3
+              $status = (nssm status $serviceName).Trim()
+              if ($status -ne "SERVICE_RUNNING") { throw "Service failed to start: $status" }
+              Write-Host "$serviceName is running."
+              """,
+              "configure/start service",
+          )
           PY

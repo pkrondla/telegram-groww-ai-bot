@@ -44,15 +44,19 @@
       "value": [
         {
           "name": "DB_PATH",
-          "value": "/tmp/trading_bot.db"
+          "value": "/data/trading_bot.db"
         },
         {
           "name": "SESSION_PATH",
+          "value": "/tmp/session_name"
+        },
+        {
+          "name": "SESSION_PERSISTENT_PATH",
           "value": "/data/session_name"
         },
         {
           "name": "SQLITE_JOURNAL_MODE",
-          "value": "DELETE"
+          "value": "MEMORY"
         },
         {
           "name": "SQLITE_BUSY_TIMEOUT_MS",

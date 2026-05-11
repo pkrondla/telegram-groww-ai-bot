@@ -50,6 +50,13 @@ def _startup_command_reference() -> str:
     return "Send HELP to view all available commands."
 
 
+def _telegram_login_prompt() -> str:
+    return input(
+        "Please enter your phone in international format (e.g. +91XXXXXXXXXX), "
+        "or bot token: "
+    )
+
+
 class BotListener:
     """
     Connects to Telegram via Telethon and coordinates the full pipeline:
@@ -776,10 +783,6 @@ class BotListener:
         if not (is_target_chat or is_admin_context):
             return
 
-        # Ignore own bot notifications to prevent feedback loop
-        if child_text.startswith("🤖") or "BOT ACTION" in child_text:
-            return
-
         # Ignore blank/non-text messages early to avoid unnecessary parser/LLM calls.
         if not child_text.strip():
             logger.info("[STAGE 1] Empty message body — skipping parse.")
@@ -940,7 +943,7 @@ class BotListener:
     # ------------------------------------------------------------------
 
     async def start(self):
-        await self.client.start()
+        await self.client.start(phone=Config.PHONE or _telegram_login_prompt)
         self.notifier.set_client(self.client)
 
         # Resolve "me" to a real ID if needed

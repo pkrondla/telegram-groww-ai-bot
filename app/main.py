@@ -2,6 +2,7 @@ import asyncio
 import os
 import shutil
 import signal
+from telethon.errors import AuthKeyDuplicatedError, PhoneNumberInvalidError
 from src.integrations.telegram.listener import BotListener
 from src.core.logger import logger
 from src.core.config import Config
@@ -88,6 +89,7 @@ async def run_bot():
     loop = asyncio.get_running_loop()
     shutdown_lock = asyncio.Lock()
     shutdown_done = False
+    auth_key_duplicated = False
 
     async def _graceful_shutdown(reason: str):
         nonlocal shutdown_done
@@ -150,6 +152,24 @@ async def run_bot():
     except asyncio.CancelledError:
         # Graceful shutdown can cancel in-flight Telethon startup calls.
         logger.info("Bot startup cancelled due to shutdown request.")
+    except AuthKeyDuplicatedError:
+        auth_key_duplicated = True
+        logger.error(
+            "Telegram rejected the Telethon session because the same .session "
+            "auth key was used concurrently from another IP. Session file: %s. "
+            "Stop any other bot instance that uses this exact session file, "
+            "configure each environment with its own SESSION_PATH, then delete "
+            "this invalid session file and log in again.",
+            _session_file(Config.SESSION_PATH),
+            exc_info=True,
+        )
+    except PhoneNumberInvalidError:
+        logger.error(
+            "Telegram rejected the phone number. Use E.164 international format "
+            "for user login, for example +919894627197 for an Indian number, "
+            "or set TELEGRAM_PHONE in .env with that format.",
+            exc_info=True,
+        )
     except Exception as e:
         logger.error(f"Bot Crash Encountered: {str(e)}", exc_info=True)
     finally:
@@ -157,7 +177,13 @@ async def run_bot():
             stop_watcher_task.cancel()
             await asyncio.gather(stop_watcher_task, return_exceptions=True)
         await _graceful_shutdown("run_bot finalizer")
-        _save_session()
+        if auth_key_duplicated:
+            logger.warning(
+                "Skipping session persistence because Telegram invalidated this "
+                "auth key after duplicate concurrent use."
+            )
+        else:
+            _save_session()
         logger.info("Bot Process Terminated.")
 
 

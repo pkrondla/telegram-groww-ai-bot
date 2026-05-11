@@ -7,8 +7,8 @@ Azure Container App replica with Azure Files mounted at `/data` for durable stat
 
 - Azure Container App: runs `python -m app.main` from the Docker image.
 - Azure Files share: mounted at `/data`.
-- SQLite database: `/tmp/trading_bot.db`.
-- Telethon session: `/data/session_name.session`.
+- SQLite database: `/data/trading_bot.db`.
+- Telethon session: active copy at `/tmp/session_name.session`, durable copy at `/data/session_name.session`.
 - GitHub Container Registry: stores the Docker image at no extra cost.
 
 ## Naming Standard
@@ -87,18 +87,33 @@ az containerapp replica list `
 
 ## Telethon Session Bootstrap
 
-Telethon requires an authenticated `.session` file. Generate it locally first by
-running the bot once with your Telegram credentials, then upload the session file
-to the Azure Files share as `session_name.session`.
+Telethon requires an authenticated `.session` file. For the first Azure
+bootstrap, generate a session file while no other bot instance is using that
+same session, then upload it to the Azure Files share as `session_name.session`.
+After upload, do not keep using that local copy.
 
-The app uses `SESSION_PATH=/data/session_name`, so Telethon reads and writes
-`/data/session_name.session`.
+Do not run your local bot with the same session file after uploading it. Telegram
+invalidates a Telethon auth key when the same `.session` file is used from two
+different IP addresses at the same time. Keep local development on a separate
+session, for example:
+
+```text
+TELEGRAM_SESSION_NAME=session_local
+SESSION_PATH=data/session_local
+```
+
+The Azure app uses `SESSION_PATH=/tmp/session_name` with
+`SESSION_PERSISTENT_PATH=/data/session_name`, so Telethon reads and writes the
+local `/tmp/session_name.session` file while the app copies it to/from Azure
+Files on startup and clean shutdown.
 
 ## Environment Migration
 
-Every runtime value from `.env.example` is passed to Azure Container Apps as an
-environment variable. Credential-like values are stored as Container App secrets;
-operational toggles are stored as plain Container App environment variables.
+Most runtime values from `.env.example` are passed to Azure Container Apps as
+environment variables. Credential-like values are stored as Container App
+secrets; operational toggles are stored as plain Container App environment
+variables. Session paths are environment-specific so local and Azure sessions do
+not share the same Telethon auth key.
 
 Secret-backed variables:
 
@@ -115,9 +130,10 @@ Secret-backed variables:
 Plain environment variables:
 
 ```text
-DB_PATH=/tmp/trading_bot.db
-SESSION_PATH=/data/session_name
-SQLITE_JOURNAL_MODE=DELETE
+DB_PATH=/data/trading_bot.db
+SESSION_PATH=/tmp/session_name
+SESSION_PERSISTENT_PATH=/data/session_name
+SQLITE_JOURNAL_MODE=MEMORY
 SQLITE_BUSY_TIMEOUT_MS=30000
 SQLITE_LOCK_RETRY_SEC=180
 TELEGRAM_SESSION_NAME=session_name

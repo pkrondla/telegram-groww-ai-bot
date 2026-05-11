@@ -16,6 +16,7 @@ class Config:
     API_ID = int(os.getenv("TELEGRAM_API_ID") or 0) or None
     API_HASH = os.getenv("TELEGRAM_API_HASH")
     SESSION_NAME = os.getenv("TELEGRAM_SESSION_NAME", "session_name")
+    PHONE = os.getenv("TELEGRAM_PHONE", "").strip()
     DATA_DIR = os.getenv("DATA_DIR", "").strip()
     SESSION_PATH = (
         os.getenv("SESSION_PATH")

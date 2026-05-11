@@ -100,6 +100,7 @@ jobs:
           GH_PAT: ${{ secrets.GH_PAT }}
           TELEGRAM_API_ID: ${{ secrets.TELEGRAM_API_ID }}
           TELEGRAM_API_HASH: ${{ secrets.TELEGRAM_API_HASH }}
+          TELEGRAM_PHONE: ${{ secrets.TELEGRAM_PHONE }}
           TELEGRAM_TARGET_CHAT_ID: ${{ secrets.TELEGRAM_TARGET_CHAT_ID }}
           TELEGRAM_ADMIN_ID: ${{ secrets.TELEGRAM_ADMIN_ID }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
@@ -195,6 +196,7 @@ jobs:
           env_lines = [
               f"TELEGRAM_API_ID={clean('TELEGRAM_API_ID')}",
               f"TELEGRAM_API_HASH={clean('TELEGRAM_API_HASH')}",
+              f"TELEGRAM_PHONE={clean('TELEGRAM_PHONE')}",
               f"TELEGRAM_TARGET_CHAT_ID={clean('TELEGRAM_TARGET_CHAT_ID')}",
               f"TELEGRAM_ADMIN_ID={clean('TELEGRAM_ADMIN_ID')}",
               f"TELEGRAM_BOT_TOKEN={clean('TELEGRAM_BOT_TOKEN')}",

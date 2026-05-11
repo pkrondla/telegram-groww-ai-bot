@@ -268,12 +268,25 @@ jobs:
                   '  $parts = $_.Split("=", 2)\n'
                   '  if ($parts.Count -eq 2) { [System.Environment]::SetEnvironmentVariable($parts[0], $parts[1], "Process") }\n'
                   '}\n'
+                  '$pythonCandidates = @(\n'
+                  '  "C:\\Program Files\\Python312\\python.exe",\n'
+                  '  "C:\\Users\\Administrator\\AppData\\Local\\Programs\\Python\\Python312\\python.exe",\n'
+                  '  "C:\\Python312\\python.exe"\n'
+                  ')\n'
+                  '$pythonExe = $pythonCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1\n'
+                  'if (-not $pythonExe) {\n'
+                  '  $cmd = Get-Command python -ErrorAction SilentlyContinue\n'
+                  '  if ($cmd) { $pythonExe = $cmd.Source }\n'
+                  '}\n'
+                  'if (-not $pythonExe) { throw "Python executable not found. Install Python 3.12 system-wide or update launcher path." }\n'
                   'Set-Location $repo\n'
-                  'python -m app.main\n'
+                  '& $pythonExe -m app.main\n'
               ).encode("utf-8")
           ).decode("ascii")
 
           clone_url = f"https://x-access-token:{clean('GH_PAT')}@github.com/{clean('GITHUB_REPOSITORY')}.git"
+          service_user = clean("WINRM_USERNAME")
+          service_pass = clean("WINRM_PASSWORD")
 
           run_ps(
               f"""
@@ -348,7 +361,7 @@ jobs:
           )
 
           run_ps(
-              """
+              f"""
               $ErrorActionPreference = "Stop"
               function Invoke-Native([scriptblock]$Command, [string]$Name) {
                 & $Command
@@ -373,6 +386,9 @@ jobs:
               Invoke-Native { nssm set $serviceName AppRotateFiles 1 } "nssm set AppRotateFiles" | Out-Null
               Invoke-Native { nssm set $serviceName AppRotateOnline 1 } "nssm set AppRotateOnline" | Out-Null
               Invoke-Native { nssm set $serviceName Start SERVICE_AUTO_START } "nssm set Start" | Out-Null
+              Invoke-Native {{ nssm set $serviceName ObjectName "{service_user}" "{service_pass}" }} "nssm set ObjectName" | Out-Null
+              Invoke-Native { nssm set $serviceName AppExit Default Restart } "nssm set AppExit" | Out-Null
+              Invoke-Native { nssm set $serviceName AppThrottle 15000 } "nssm set AppThrottle" | Out-Null
               Invoke-Native { nssm start $serviceName } "nssm start" | Out-Null
               Start-Sleep -Seconds 3
               $status = (nssm status $serviceName).Trim()

@@ -16,6 +16,8 @@ class Notifier:
     All modules call Notifier instead of making raw HTTP/Telegram calls directly.
     """
 
+    _CHANNEL_ECHO_MAX = 3500
+
     def __init__(self, telegram_client=None):
         self._client = telegram_client  # Telethon client; injected after connection
 
@@ -79,6 +81,16 @@ class Notifier:
     async def send_error(self, context: str, error: str):
         """Send an error notification."""
         msg = f"❌ Error in {context}\n\n{error}"
+        await self.send(msg, parse_mode=None)
+
+    async def send_channel_echo(self, text: str):
+        """Forward a raw source-channel message verbatim to the admin as a plain alert."""
+        body = (text or "").strip()
+        if not body:
+            return
+        if len(body) > self._CHANNEL_ECHO_MAX:
+            body = body[: self._CHANNEL_ECHO_MAX] + "\n… [truncated]"
+        msg = f"📩 CHANNEL\n\n{body}"
         await self.send(msg, parse_mode=None)
 
     # ------------------------------------------------------------------

@@ -820,6 +820,15 @@ class BotListener:
             logger.info("[STAGE 1] Empty message body — skipping parse.")
             return
 
+        # Forward every non-empty source-channel message to the admin bot verbatim.
+        # Gated on is_target_chat so admin-DM commands (HELP, STATUS, ...) are NOT echoed.
+        # Wrapped in try/except so a Bot API hiccup on the echo can never block the trading pipeline.
+        if is_target_chat:
+            try:
+                await self.notifier.send_channel_echo(child_text)
+            except Exception as e:
+                logger.warning(f"[STAGE 1] Channel echo failed (non-fatal): {e}")
+
         # Admin override commands:
         # accept when message is in admin chat OR sent by admin user (e.g. bot DM).
         if is_admin_context:

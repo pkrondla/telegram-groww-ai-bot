@@ -1096,6 +1096,33 @@ class Trader:
                 )
             pending_section = "\n\nPending exit fill\n" + "\n".join(pend_lines)
 
+        # Open / carry-forward positions are only shown for the day view —
+        # the user expects the market-closing summary to enumerate everything
+        # still on the books, not only what realized today.
+        open_section = ""
+        if period == "day":
+            try:
+                open_positions = self._load_active_trades() or {}
+            except Exception as e:
+                logger.warning(f"[PROFIT] Failed to load active trades for day summary: {e}")
+                open_positions = {}
+            if open_positions:
+                open_lines: list[str] = []
+                for sym in sorted(open_positions.keys()):
+                    rec = self._normalize_active_trade_record(open_positions.get(sym))
+                    side = str(rec.get("entry_side") or "BUY").upper()
+                    qty = int(self._num_or(rec.get("entry_qty"), 0))
+                    entry = float(self._num_or(rec.get("entry_avg_price"), 0.0))
+                    sl_true = float(self._num_or(rec.get("sl_true"), self._num_or(rec.get("stop_loss"), 0.0)))
+                    tgt = float(self._num_or(rec.get("target"), 0.0))
+                    stage = str(rec.get("sl_progress_stage") or "NONE").upper()
+                    stage_note = f", stage={stage}" if stage and stage != "NONE" else ""
+                    open_lines.append(
+                        f"• {sym} | {side} | qty={qty} | entry={entry:.2f} | "
+                        f"sl={sl_true:.2f} | tgt={tgt:.2f}{stage_note}"
+                    )
+                open_section = "\n\nOpen positions (carry-forward)\n" + "\n".join(open_lines)
+
         metrics_section = ""
         if period == "day":
             try:
@@ -1117,7 +1144,7 @@ class Trader:
         title_period = period.capitalize() if period in ("day", "week", "month") else period
         return (
             f"📊 Trading P&L — {title_period} {label}\n\n"
-            f"Per-leg P&L\n{body_text}{pending_section}\n\n"
+            f"Per-leg P&L\n{body_text}{pending_section}{open_section}\n\n"
             f"Total: {self._fmt_inr(total_inr)} | "
             f"{len(signals_seen)} signal{'s' if len(signals_seen) != 1 else ''}, "
             f"{len(settled)} leg exit{'s' if len(settled) != 1 else ''}"
@@ -2350,18 +2377,22 @@ class Trader:
         if self.client is None:
             return stats
 
-        local = self._load_active_trades()
-        if not local:
-            return stats
-
         # Keep the leg_exits journal accurate by auto-backfilling any pending
         # exits (across all dates — pending exits can persist over weekends).
+        # IMPORTANT: this MUST run even when the local active book is empty:
+        # the last closed position of the day can leave a pending leg_exit
+        # behind, and there are no other active trades to keep the reconcile
+        # alive until a new entry is queued.
         try:
             backfilled = int(self._backfill_pending_leg_exits())
             if backfilled > 0:
                 logger.info(f"[RECONCILE] Backfilled {backfilled} pending leg exit(s) with broker fills.")
         except Exception as e:
             logger.warning(f"[RECONCILE] Pending leg-exit backfill failed: {e}")
+
+        local = self._load_active_trades()
+        if not local:
+            return stats
 
         positions_map = self._active_positions_map()
         stats["active"] = len(positions_map)

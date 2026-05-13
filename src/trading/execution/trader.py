@@ -537,11 +537,38 @@ class Trader:
         Best-effort exit fill inference for reconcile-close scenarios where no explicit
         EXIT_ALL order id exists.
         Priority:
+          0) get_order_status on stored exit_order_id (direct broker lookup — backfill path)
           1) OCO leg smart-order payloads saved in active_trades (best source)
-          2) Broker FNO positions averages/quantities (fallback)
+          2) Order history bulk scan (broker-dependent)
+          3) Broker FNO positions averages/quantities (fallback)
         """
         if self.client is None:
             return None
+        # Step 0: if a known exit order id is available (populated by _leg_exit_active_record
+        # from leg_exits.data during the backfill path), use get_order_status directly.
+        # This mirrors what EXIT_ALL does via _fetch_order_fill and is the most reliable path
+        # when OCO payloads and position day-quantities are unavailable post-close.
+        exit_order_id = str((active_rec or {}).get("exit_order_id") or "")
+        segment = str((active_rec or {}).get("segment") or "FNO")
+        if exit_order_id:
+            fill = self._fetch_order_fill(
+                segment=segment,
+                groww_order_id=exit_order_id,
+                fallback_price=0.0,
+                fallback_qty=0,
+            )
+            if float(fill.get("avg_price") or 0) > 0 and int(fill.get("filled_qty") or 0) > 0:
+                logger.info(
+                    f"[RECONCILE] Resolved pending exit fill via order_status "
+                    f"for {symbol} order={exit_order_id} "
+                    f"avg={fill['avg_price']} qty={fill['filled_qty']}"
+                )
+                return {
+                    "exit_price": float(fill["avg_price"]),
+                    "exit_qty": int(fill["filled_qty"]),
+                    "order_id": exit_order_id,
+                    "source": "order_status_backfill",
+                }
         rec = self._normalize_active_trade_record(active_rec or {})
         oco_fill = self._infer_exit_fill_from_oco_legs(symbol=symbol, active_rec=rec)
         if oco_fill:
@@ -869,6 +896,8 @@ class Trader:
             "target": float(data.get("target_at_close") or 0.0),
             "parent_trade_id": str(row.get("parent_trade_id") or ""),
             "opened_at_ist": str(row.get("opened_at_ist") or ""),
+            "exit_order_id": str(data.get("exit_order_id") or ""),
+            "segment": str(data.get("segment") or row.get("segment") or "FNO"),
         }
 
     def _backfill_pending_leg_exits(self) -> int:

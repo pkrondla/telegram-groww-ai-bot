@@ -349,3 +349,32 @@ class TestReconcileFillFallback:
         assert out["exit_qty"] == 200
         assert out["pnl_inr"] == pytest.approx(-1200.0)
         assert out["exit_price"] == pytest.approx(4.0)
+
+    def test_uses_total_pnl_field_for_fallback(self, trader):
+        class _Client:
+            def get_positions_for_user(self, segment="FNO"):
+                return {
+                    "positions": [
+                        {
+                            "trading_symbol": "BAR26MAY100PE",
+                            "day_buy_qty": 100,
+                            "total_pnl": 500.0,
+                        }
+                    ]
+                }
+
+        trader.client = _Client()
+        rec = {
+            "entry_side": "SELL",
+            "entry_avg_price": 20.0,
+            "entry_qty": 100,
+        }
+        out = trader._reconcile_exit_fill_from_positions(
+            symbol="BAR26MAY100PE",
+            active_rec=rec,
+        )
+        assert out is not None
+        assert out["source"] == "broker_positions_realized"
+        assert out["exit_qty"] == 100
+        assert out["pnl_inr"] == pytest.approx(500.0)
+        assert out["exit_price"] == pytest.approx(15.0)

@@ -633,16 +633,7 @@ class Trader:
 
         # Last resort: if broker does not expose exit average but does expose
         # realized P&L on the position row, infer exit price from entry+PnL.
-        realized_keys = {
-            "realized_pnl",
-            "realised_pnl",
-            "realized_profit",
-            "realised_profit",
-            "realized_profit_loss",
-            "realised_profit_loss",
-            "pnl_realized",
-            "day_pnl",
-        }
+        realized_keys = set(self._BROKER_REALIZED_PNL_KEYS)
         entry_price = float(self._num_or(rec.get("entry_avg_price"), 0.0))
         if entry_price <= 0:
             return None

@@ -378,3 +378,47 @@ class TestReconcileFillFallback:
         assert out["exit_qty"] == 100
         assert out["pnl_inr"] == pytest.approx(500.0)
         assert out["exit_price"] == pytest.approx(15.0)
+
+    def test_backfill_uses_prefetched_broker_realized_metrics(self, trader, monkeypatch):
+        trader.client = object()
+        pending_row = {
+            "id": 99,
+            "symbol": "BAZ26MAY100CE",
+            "side": "BUY",
+            "entry_price": 10.0,
+            "qty": 100,
+            "data": {},
+            "close_reason": "RECONCILE_FLAT",
+        }
+        updates = []
+
+        monkeypatch.setattr(
+            "src.trading.execution.trader.db.get_pending_leg_exits",
+            lambda account_id: [pending_row],
+        )
+
+        def _capture_update(leg_exit_id, row, account_id):
+            updates.append((leg_exit_id, row, account_id))
+
+        monkeypatch.setattr(
+            "src.trading.execution.trader.db.update_leg_exit_fill",
+            _capture_update,
+        )
+        # Force the primary inference path to fail so the prefetch fallback is exercised.
+        trader._reconcile_exit_fill_from_positions = lambda symbol, active_rec: {}
+        trader._list_fno_positions = lambda: [
+            {
+                "trading_symbol": "BAZ26MAY100CE",
+                "net_quantity": 0,
+                "realized_pnl": 200.0,
+            }
+        ]
+
+        updated = trader._backfill_pending_leg_exits()
+        assert updated == 1
+        assert len(updates) == 1
+        _, row, _ = updates[0]
+        assert row["pnl_pending"] is False
+        assert row["exit_fill_source"] == "broker_positions_realized_metrics"
+        assert row["pnl_inr"] == pytest.approx(200.0)
+        assert row["exit_price"] == pytest.approx(12.0)

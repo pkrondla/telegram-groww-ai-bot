@@ -955,6 +955,19 @@ class Trader:
         if not pending_rows:
             return 0
 
+        # Snapshot broker position metrics once per backfill run. This avoids
+        # repeated API calls and provides a direct realized-PnL fallback when
+        # fill/avg fields are absent in per-symbol inference paths.
+        broker_metrics_by_symbol: dict[str, dict] = {}
+        try:
+            for pos in self._list_fno_positions():
+                m = self._broker_metrics_from_position(pos)
+                sym = str(m.get("symbol") or "").upper().strip()
+                if sym:
+                    broker_metrics_by_symbol[sym] = m
+        except Exception as e:
+            logger.debug(f"[RECONCILE] Could not prefetch broker metrics for backfill: {e}")
+
         updated_count = 0
         for row in pending_rows:
             if not isinstance(row, dict):
@@ -978,6 +991,34 @@ class Trader:
                 int(self._num_or(data_blob.get("reconcile_attempts"), 0)) + 1
             )
             data_blob["last_reconcile_try_ist"] = self._now_ist_iso()
+
+            # Direct fallback: if no exit fill was inferred but broker provides
+            # realized PnL for this symbol, infer exit price from entry+PnL.
+            if exit_price <= 0 or exit_qty <= 0:
+                m = broker_metrics_by_symbol.get(symbol.upper())
+                realized = None if not isinstance(m, dict) else m.get("realized_pnl")
+                side = str(row.get("side") or rec.get("entry_side") or "BUY").upper()
+                entry_price = float(self._num_or(row.get("entry_price"), self._num_or(rec.get("entry_avg_price"), 0.0)))
+                qty_from_row = int(abs(self._num_or(row.get("qty"), 0)))
+                qty_from_rec = int(abs(self._num_or(rec.get("entry_qty"), 0)))
+                inferred_qty = qty_from_row if qty_from_row > 0 else qty_from_rec
+                if realized is not None and inferred_qty > 0 and entry_price > 0:
+                    pnl_realized = float(realized)
+                    inferred_exit = (
+                        float(entry_price) - (pnl_realized / float(inferred_qty))
+                        if side == "SELL"
+                        else float(entry_price) + (pnl_realized / float(inferred_qty))
+                    )
+                    if inferred_exit > 0:
+                        inferred = {
+                            "exit_price": float(inferred_exit),
+                            "exit_qty": int(inferred_qty),
+                            "pnl_inr": float(pnl_realized),
+                            "source": "broker_positions_realized_metrics",
+                            "order_id": "",
+                        }
+                        exit_price = float(inferred["exit_price"])
+                        exit_qty = int(inferred["exit_qty"])
 
             if exit_price <= 0 or exit_qty <= 0:
                 # Still no fill — bump attempt counter and try again next tick.

@@ -149,3 +149,66 @@ class TestProtectionPlanLegs:
         assert len(legs) == 2
         assert [l["logical_leg_id"] for l in legs] == ["L2", "L3"]
         assert sum(int(l["allocated_qty"]) for l in legs) == 600
+
+    def test_remaining_plan_excludes_t1_when_oco_leg_filled_but_plan_still_active(self, trader):
+        """Post-T1: open 750 should map to T2=500 and T3=250, not 375/188 split across 3 legs."""
+        rec = {
+            "entry_qty": 1000,
+            "lot_size": 250,
+            "signal_targets": [41.0, 63.0, 90.0],
+            "entry_avg_price": 36.3,
+            "sl_true": 36.3,
+            "sl_progress_stage": "T1_HIT",
+            "oco_legs": [
+                {
+                    "smart_order_id": "T1_DONE",
+                    "qty": 250,
+                    "target_signal": 41.0,
+                    "target_index": 1,
+                    "status": "FILLED",
+                },
+                {
+                    "smart_order_id": "T2_LIVE",
+                    "qty": 500,
+                    "target_signal": 63.0,
+                    "target_index": 2,
+                    "status": "ACTIVE",
+                },
+                {
+                    "smart_order_id": "T3_LIVE",
+                    "qty": 250,
+                    "target_signal": 90.0,
+                    "target_index": 3,
+                    "status": "ACTIVE",
+                },
+            ],
+            "protection_plan_legs": [
+                {"logical_leg_id": "L1", "target_index": 1, "allocated_qty": 250, "leg_state": "ACTIVE"},
+                {"logical_leg_id": "L2", "target_index": 2, "allocated_qty": 500, "leg_state": "ACTIVE"},
+                {"logical_leg_id": "L3", "target_index": 3, "allocated_qty": 250, "leg_state": "ACTIVE"},
+            ],
+        }
+        synced = trader._sync_protection_plan_from_progress(rec, open_qty=750)
+        assert synced["protection_plan_legs"][0]["leg_state"] == "FILLED"
+        remaining = trader._remaining_plan_legs_for_open_qty(synced, open_qty=750)
+        assert len(remaining) == 2
+        assert [int(l["target_index"]) for l in remaining] == [2, 3]
+        assert [int(l["allocated_qty"]) for l in remaining] == [500, 250]
+        assert trader._expected_oco_leg_count_for_open_qty(synced, open_qty=750) == 2
+
+    def test_wrong_three_leg_reallocation_when_t1_not_marked(self, trader):
+        """Documents the bug: 750 across 3 plan rows with base_sum=1000 yields 375 for T2."""
+        rec = {
+            "protection_plan_legs": [
+                {"logical_leg_id": "L1", "target_index": 1, "allocated_qty": 250, "leg_state": "ACTIVE"},
+                {"logical_leg_id": "L2", "target_index": 2, "allocated_qty": 500, "leg_state": "ACTIVE"},
+                {"logical_leg_id": "L3", "target_index": 3, "allocated_qty": 250, "leg_state": "ACTIVE"},
+            ],
+            "oco_legs": [
+                {"smart_order_id": "T1", "qty": 250, "target_index": 1, "status": "FILLED"},
+                {"smart_order_id": "T2", "qty": 500, "target_index": 2, "status": "ACTIVE"},
+                {"smart_order_id": "T3", "qty": 250, "target_index": 3, "status": "ACTIVE"},
+            ],
+        }
+        remaining = trader._remaining_plan_legs_for_open_qty(rec, open_qty=750)
+        assert [int(l["allocated_qty"]) for l in remaining] == [500, 250]

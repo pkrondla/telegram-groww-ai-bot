@@ -1383,7 +1383,10 @@ class Trader:
         if qty <= 0:
             return False, None
         rec_norm = self._normalize_active_trade_record(rec)
-        rec_norm = self._sync_oco_snapshot_from_broker(symbol, rec_norm, payload_cache=payload_cache)
+        rec_norm = self._sync_protection_plan_from_progress(rec_norm, qty)
+        rec_norm = self._sync_oco_snapshot_from_broker(
+            symbol, rec_norm, payload_cache=payload_cache, open_qty=qty
+        )
         rec_norm = self._sync_protection_plan_from_progress(rec_norm, qty)
         complete_before, reason_before = self._has_complete_oco_protection(
             symbol, rec_norm, qty, payload_cache=payload_cache
@@ -1420,65 +1423,13 @@ class Trader:
                 f"⚠️ OCO re-arm skipped for {symbol}: invalid SL after tick-rounding (sl_true={raw_true_sl}).",
             )
 
-        remaining_plan = self._remaining_plan_legs_for_open_qty(rec_norm, qty)
-        rebuilt_plan: list[dict] = []
-        if remaining_plan:
-            for i, leg in enumerate(remaining_plan):
-                rebuilt_plan.append(
-                    {
-                        "logical_leg_id": str(leg.get("logical_leg_id") or f"L{i+1}"),
-                        "qty": int(self._num_or(leg.get("allocated_qty"), 0)),
-                        "target_index": int(self._num_or(leg.get("target_index"), i + 1)),
-                        "target_signal": float(
-                            self._num_or(
-                                leg.get("target_signal_current"),
-                                leg.get("target_signal_original"),
-                            )
-                        ),
-                    }
-                )
-        else:
-            # Fallback only when no durable plan exists (legacy rows).
-            active_legs = [l for l in self._sorted_oco_legs(rec_norm) if str(l.get("status") or "").upper() == "ACTIVE"]
-            if not active_legs:
-                raw_tgt = float(self._num_or(rec_norm.get("target"), 0.0))
-                if raw_tgt <= 0:
-                    return False, None
-                active_legs = [
-                    {
-                        "target_index": 1,
-                        "target_signal": raw_tgt,
-                        "qty": int(qty),
-                        "status": "ACTIVE",
-                    }
-                ]
-            base_sum = sum(max(0, int(self._num_or(l.get("qty"), 0))) for l in active_legs)
-            if base_sum <= 0:
-                base_sum = len(active_legs)
-                for l in active_legs:
-                    l["qty"] = 1
-            used = 0
-            for i, leg in enumerate(active_legs):
-                base_q = max(1, int(self._num_or(leg.get("qty"), 1)))
-                if i == len(active_legs) - 1:
-                    alloc = max(0, int(qty - used))
-                else:
-                    alloc = int(math.floor((qty * base_q) / float(base_sum)))
-                    if qty >= len(active_legs):
-                        alloc = max(1, alloc)
-                used += alloc
-                if alloc <= 0:
-                    continue
-                rebuilt_plan.append(
-                    {
-                        "logical_leg_id": f"L{int(self._num_or(leg.get('target_index'), i + 1))}",
-                        "qty": int(alloc),
-                        "target_index": int(self._num_or(leg.get("target_index"), i + 1)),
-                        "target_signal": float(self._num_or(leg.get("target_signal"), rec_norm.get("target"))),
-                    }
-                )
+        rebuilt_plan = self._build_rearm_plan_for_open_position(rec_norm, qty)
         if not rebuilt_plan:
-            return False, None
+            return (
+                False,
+                f"⚠️ OCO re-arm skipped for {symbol}: no valid lot-aligned legs for open_qty={qty}.",
+            )
+        lot_size = max(1, int(self._num_or(rec_norm.get("lot_size"), 0)))
 
         existing_ids = self._active_leg_order_ids(rec_norm)
         if existing_ids:
@@ -1525,7 +1476,9 @@ class Trader:
                     logger.warning(f"[REARM] In-place leg repair failed for {symbol} id={sid}: {me}")
 
             if repaired > 0:
-                rec_repaired = self._sync_oco_snapshot_from_broker(symbol, rec_norm, payload_cache=payload_cache)
+                rec_repaired = self._sync_oco_snapshot_from_broker(
+                    symbol, rec_norm, payload_cache=payload_cache, open_qty=qty
+                )
                 complete_after_repair, reason_after_repair = self._has_complete_oco_protection(
                     symbol, rec_repaired, qty, payload_cache=payload_cache
                 )
@@ -1570,6 +1523,15 @@ class Trader:
         created_legs: list[dict] = []
         rearm_warnings: list[str] = []
         for leg in rebuilt_plan:
+            leg_qty = int(self._num_or(leg.get("qty"), 0))
+            if leg_qty <= 0:
+                continue
+            if lot_size > 1 and (leg_qty % lot_size != 0):
+                logger.error(
+                    f"[REARM] Skip OCO leg create for {symbol} T{int(leg.get('target_index') or 0)}: "
+                    f"qty={leg_qty} is not a multiple of lot_size={lot_size}."
+                )
+                continue
             raw_tgt = float(leg.get("target_signal") or 0)
             eff_tgt = self._take_profit_order_price(raw_tgt)
             if eff_tgt <= 0:
@@ -1588,8 +1550,8 @@ class Trader:
                     reference_id=ref,
                     segment=segment,
                     trading_symbol=symbol,
-                    quantity=int(leg["qty"]),
-                    net_position_quantity=int(leg["qty"]),
+                    quantity=leg_qty,
+                    net_position_quantity=leg_qty,
                     transaction_type="SELL",
                     product_type=product_type,
                     exchange=exchange,
@@ -1621,7 +1583,7 @@ class Trader:
 
             rearm_ref = str(uuid.uuid4())[:15]
             logger.info(
-                f"[REARM] Creating OCO for {symbol}: qty={leg['qty']}, sl_true={raw_true_sl}, "
+                f"[REARM] Creating OCO for {symbol}: qty={leg_qty}, sl_true={raw_true_sl}, "
                 f"broker_sl={leg_sl}, target(signal={raw_tgt}, broker={leg_target})"
             )
             try:
@@ -1675,7 +1637,7 @@ class Trader:
                 {
                     "logical_leg_id": str(leg.get("logical_leg_id") or f"L{int(leg.get('target_index') or 1)}"),
                     "smart_order_id": str(new_id or ""),
-                    "qty": int(leg["qty"]),
+                    "qty": int(leg_qty),
                     "target_signal": float(raw_tgt),
                     "target_broker": float(leg_target),
                     "target_index": int(leg.get("target_index") or 1),
@@ -1931,7 +1893,12 @@ class Trader:
         return len([p for p in plan if int(self._num_or(p.get("qty"), 0)) > 0])
 
     def _sync_oco_snapshot_from_broker(
-        self, symbol: str, rec: dict, *, payload_cache: dict[str, dict] | None = None
+        self,
+        symbol: str,
+        rec: dict,
+        *,
+        payload_cache: dict[str, dict] | None = None,
+        open_qty: int | None = None,
     ) -> dict:
         """
         Refresh local oco_legs snapshot from broker smart-order payloads.
@@ -1989,7 +1956,7 @@ class Trader:
         # Preserve qty/index from existing local plan when available.
         total_synced_qty = sum(int(self._num_or(x.get("qty"), 0)) for x in synced_legs)
         if total_synced_qty <= 0:
-            base_qty = int(self._num_or(rec_norm.get("entry_qty"), 0))
+            base_qty = int(abs(open_qty or 0)) or int(self._num_or(rec_norm.get("entry_qty"), 0))
             if base_qty <= 0:
                 base_qty = len(synced_legs)
             if base_qty > 0 and synced_legs:
@@ -2002,7 +1969,31 @@ class Trader:
                         leg["qty"] = per
                         used += per
 
-        changed = self._sorted_oco_legs({"oco_legs": prev_legs}) != self._sorted_oco_legs({"oco_legs": synced_legs})
+        merged_legs = self._merge_oco_legs_preserving_filled(prev_legs, synced_legs)
+        filled_idx = self._filled_target_indices(rec_norm, int(abs(open_qty or 0)))
+        merged_idx = {int(self._num_or(l.get("target_index"), 0)) for l in merged_legs}
+        for pl in self._sorted_protection_plan_legs(rec_norm):
+            idx = int(self._num_or(pl.get("target_index"), 0))
+            if idx <= 0 or idx not in filled_idx or idx in merged_idx:
+                continue
+            merged_legs.append(
+                {
+                    "smart_order_id": str(pl.get("current_smart_order_id") or ""),
+                    "qty": int(self._num_or(pl.get("allocated_qty"), 0)),
+                    "target_signal": float(
+                        self._num_or(pl.get("target_signal_current"), pl.get("target_signal_original"))
+                    ),
+                    "target_broker": float(self._num_or(pl.get("target_broker_current"), 0.0)),
+                    "target_index": idx,
+                    "status": "FILLED",
+                    "target_order_id": "",
+                    "stop_order_id": "",
+                }
+            )
+            merged_idx.add(idx)
+        merged_legs = self._sorted_oco_legs({"oco_legs": merged_legs})
+
+        changed = self._sorted_oco_legs({"oco_legs": prev_legs}) != merged_legs
         if not changed:
             return rec_norm
 
@@ -2010,12 +2001,12 @@ class Trader:
         if symbol not in trades:
             return rec_norm
         live = self._normalize_active_trade_record(trades.get(symbol))
-        live["oco_legs"] = synced_legs
+        live["oco_legs"] = merged_legs
         # Keep persistent logical-leg plan as source-of-truth and refresh broker mapping.
         plan_legs = self._sorted_protection_plan_legs(live)
         if plan_legs:
             plan_by_idx = {int(self._num_or(leg.get("target_index"), 0)): dict(leg) for leg in plan_legs}
-            for leg in synced_legs:
+            for leg in merged_legs:
                 idx = int(self._num_or(leg.get("target_index"), 0))
                 if idx <= 0:
                     continue
@@ -2055,8 +2046,11 @@ class Trader:
             live["protection_plan_legs"] = sorted(plan_by_idx.values(), key=lambda x: int(x.get("target_index") or 0))
             live["protection_materialized_at"] = self._now_ist_iso()
             live["protection_plan_version"] = max(1, int(self._num_or(live.get("protection_plan_version"), 1)))
-        if synced_legs:
-            live["smart_order_id"] = str(synced_legs[0].get("smart_order_id") or live.get("smart_order_id") or "")
+        active_ids = self._active_leg_order_ids(live)
+        if active_ids:
+            live["smart_order_id"] = active_ids[0]
+        elif merged_legs:
+            live["smart_order_id"] = str(merged_legs[0].get("smart_order_id") or live.get("smart_order_id") or "")
         trades[symbol] = live
         self._save_all_trades(trades)
         logger.info(f"[REARM] Synced broker OCO snapshot for {symbol}: legs={len(synced_legs)}.")
@@ -2213,11 +2207,17 @@ class Trader:
         """
         payload_cache: dict[str, dict] = {}
         rec_norm = self._normalize_active_trade_record(rec)
-        rec_norm = self._sync_oco_snapshot_from_broker(symbol, rec_norm, payload_cache=payload_cache)
         pos = pos or {}
         open_qty = abs(self._position_quantity(pos))
         if open_qty > 0:
             rec_norm = self._sync_protection_plan_from_progress(rec_norm, open_qty)
+            self._persist_active_trade_record(symbol, rec_norm)
+        rec_norm = self._sync_oco_snapshot_from_broker(
+            symbol, rec_norm, payload_cache=payload_cache, open_qty=open_qty
+        )
+        if open_qty > 0:
+            rec_norm = self._sync_protection_plan_from_progress(rec_norm, open_qty)
+            self._persist_active_trade_record(symbol, rec_norm)
 
         force_rearm = bool(force_initial)
         force_reasons: list[str] = []
@@ -2336,7 +2336,10 @@ class Trader:
         if open_qty <= 0:
             return True, "no_open_qty"
         rec_norm = self._normalize_active_trade_record(rec or {})
-        rec_norm = self._sync_oco_snapshot_from_broker(symbol, rec_norm, payload_cache=payload_cache)
+        rec_norm = self._sync_protection_plan_from_progress(rec_norm, open_qty)
+        rec_norm = self._sync_oco_snapshot_from_broker(
+            symbol, rec_norm, payload_cache=payload_cache, open_qty=open_qty
+        )
         rec_norm = self._sync_protection_plan_from_progress(rec_norm, open_qty)
         expected = self._expected_oco_leg_count_for_open_qty(rec_norm, open_qty)
         complete, reason = self._has_complete_oco_protection(
@@ -3346,6 +3349,195 @@ class Trader:
         out.sort(key=lambda x: int(x.get("target_index") or 0))
         return out
 
+    def _filled_target_indices(self, rec: dict, open_qty: int) -> set[int]:
+        """
+        Target indices already exited (T1 hit, etc.) even when broker sync dropped FILLED oco rows.
+        """
+        rec_norm = self._normalize_active_trade_record(rec or {})
+        filled: set[int] = set()
+        stage = str(rec_norm.get("sl_progress_stage") or "NONE").upper().strip()
+        if stage == "T1_HIT":
+            filled.add(1)
+        elif stage == "T2_HIT":
+            filled.update({1, 2})
+        elif stage in ("T3_HIT", "COMPLETE"):
+            filled.update({1, 2, 3})
+
+        for leg in self._sorted_oco_legs(rec_norm):
+            if str(leg.get("status") or "").upper() == "FILLED":
+                idx = int(self._num_or(leg.get("target_index"), 0))
+                if idx > 0:
+                    filled.add(idx)
+        for leg in self._sorted_protection_plan_legs(rec_norm):
+            if str(leg.get("leg_state") or "").upper() == "FILLED":
+                idx = int(self._num_or(leg.get("target_index"), 0))
+                if idx > 0:
+                    filled.add(idx)
+
+        open_q = int(abs(open_qty or 0))
+        entry_qty = int(self._num_or(rec_norm.get("entry_qty"), 0))
+        closed_qty = max(0, entry_qty - open_q) if entry_qty > 0 else 0
+        plan = self._sorted_protection_plan_legs(rec_norm)
+        if plan:
+            plan_sum = sum(max(0, int(self._num_or(pl.get("allocated_qty"), 0))) for pl in plan)
+            if closed_qty <= 0 and plan_sum > open_q > 0:
+                closed_qty = plan_sum - open_q
+            if closed_qty > 0:
+                cum = 0
+                for pl in plan:
+                    alloc = max(0, int(self._num_or(pl.get("allocated_qty"), 0)))
+                    if alloc <= 0:
+                        continue
+                    cum += alloc
+                    idx = int(self._num_or(pl.get("target_index"), 0))
+                    if idx > 0 and closed_qty >= cum:
+                        filled.add(idx)
+        elif closed_qty > 0:
+            cum = 0
+            for leg in self._sorted_oco_legs(rec_norm):
+                if str(leg.get("status") or "").upper() in ("CANCELLED", "STALE"):
+                    continue
+                alloc = max(0, int(self._num_or(leg.get("qty"), 0)))
+                if alloc <= 0:
+                    continue
+                cum += alloc
+                idx = int(self._num_or(leg.get("target_index"), 0))
+                if idx > 0 and closed_qty >= cum:
+                    filled.add(idx)
+        return filled
+
+    def _persist_active_trade_record(self, symbol: str, rec: dict) -> None:
+        trades = self._load_active_trades()
+        trades[symbol] = self._normalize_active_trade_record(rec)
+        self._save_all_trades(trades)
+
+    @staticmethod
+    def _snap_qty_to_lot_size(qty: int, lot_size: int) -> int:
+        q = max(0, int(qty or 0))
+        unit = max(1, int(lot_size or 1))
+        if q <= 0:
+            return 0
+        return (q // unit) * unit
+
+    def _finalize_rearm_leg_qtys(
+        self, legs: list[dict], total_qty: int, lot_size: int
+    ) -> list[dict]:
+        """Snap each leg to lot_size and ensure the sum matches open position qty."""
+        unit = max(1, int(lot_size or 1))
+        total_qty = max(0, int(total_qty or 0))
+        if not legs or total_qty <= 0:
+            return []
+        out: list[dict] = []
+        for leg in legs:
+            if not isinstance(leg, dict):
+                continue
+            raw_q = int(self._num_or(leg.get("qty"), leg.get("allocated_qty")))
+            q = self._snap_qty_to_lot_size(raw_q, unit)
+            if q < unit:
+                continue
+            row = dict(leg)
+            row["qty"] = q
+            row["allocated_qty"] = q
+            out.append(row)
+        out = [l for l in out if int(l["qty"]) >= unit and int(l["qty"]) % unit == 0]
+        final_sum = sum(int(l["qty"]) for l in out)
+        if final_sum != total_qty:
+            logger.warning(
+                f"[REARM] Leg qty sum mismatch after lot snap: total={total_qty}, "
+                f"legs={final_sum}, lot_size={unit}, "
+                f"requested={[int(self._num_or(l.get('qty'), l.get('allocated_qty'))) for l in legs]}, "
+                f"kept={[int(l['qty']) for l in out]}"
+            )
+            return []
+        return out
+
+    def _build_rearm_plan_for_open_position(self, rec: dict, open_qty: int) -> list[dict]:
+        """Build broker-valid OCO leg rows (lot-aligned) for remaining open qty."""
+        qty = int(abs(open_qty or 0))
+        if qty <= 0:
+            return []
+        rec_norm = self._sync_protection_plan_from_progress(
+            self._normalize_active_trade_record(rec), qty
+        )
+        lot_size = max(1, int(self._num_or(rec_norm.get("lot_size"), 0)))
+        filled_idx = self._filled_target_indices(rec_norm, qty)
+        rebuilt: list[dict] = []
+        remaining = self._remaining_plan_legs_for_open_qty(rec_norm, qty)
+        if remaining:
+            for i, leg in enumerate(remaining):
+                rebuilt.append(
+                    {
+                        "logical_leg_id": str(leg.get("logical_leg_id") or f"L{i+1}"),
+                        "qty": int(self._num_or(leg.get("allocated_qty"), 0)),
+                        "target_index": int(self._num_or(leg.get("target_index"), i + 1)),
+                        "target_signal": float(
+                            self._num_or(
+                                leg.get("target_signal_current"),
+                                leg.get("target_signal_original"),
+                            )
+                        ),
+                    }
+                )
+        else:
+            plan_legs = self._sorted_protection_plan_legs(rec_norm)
+            for pl in plan_legs:
+                idx = int(self._num_or(pl.get("target_index"), 0))
+                if idx in filled_idx:
+                    continue
+                alloc = int(self._num_or(pl.get("allocated_qty"), 0))
+                if alloc <= 0:
+                    continue
+                rebuilt.append(
+                    {
+                        "logical_leg_id": str(pl.get("logical_leg_id") or f"L{idx}"),
+                        "qty": alloc,
+                        "target_index": idx,
+                        "target_signal": float(
+                            self._num_or(pl.get("target_signal_current"), pl.get("target_signal_original"))
+                        ),
+                    }
+                )
+            if not rebuilt:
+                signal_targets = rec_norm.get("signal_targets")
+                targets: list[float] = []
+                if isinstance(signal_targets, list):
+                    for t in signal_targets:
+                        try:
+                            tv = float(t)
+                        except Exception:
+                            continue
+                        if tv > 0:
+                            targets.append(tv)
+                if targets:
+                    full_plan = self._build_oco_legs_plan(
+                        total_qty=qty, lot_size=lot_size, signal_targets=targets
+                    )
+                    for leg in full_plan:
+                        tidx = int(self._num_or(leg.get("target_index"), 0))
+                        if tidx in filled_idx:
+                            continue
+                        leg_qty = int(self._num_or(leg.get("qty"), 0))
+                        if leg_qty <= 0:
+                            continue
+                        rebuilt.append(
+                            {
+                                "logical_leg_id": f"L{tidx}",
+                                "qty": leg_qty,
+                                "target_index": tidx,
+                                "target_signal": float(self._num_or(leg.get("target_signal"), 0.0)),
+                            }
+                        )
+        finalized = self._finalize_rearm_leg_qtys(rebuilt, qty, lot_size)
+        if finalized:
+            logger.info(
+                f"[REARM] Rearm plan for open_qty={qty}: "
+                + ", ".join(
+                    f"T{int(l.get('target_index') or 0)} qty={int(l.get('qty') or 0)}"
+                    for l in finalized
+                )
+            )
+        return finalized
+
     def _remaining_plan_legs_for_open_qty(self, rec: dict, open_qty: int) -> list[dict]:
         """
         Source-of-truth remaining logical legs.
@@ -3358,16 +3550,19 @@ class Trader:
         plan_legs = self._sorted_protection_plan_legs(rec_norm)
         if not plan_legs:
             return []
+        filled_idx = self._filled_target_indices(rec_norm, qty)
         oco_by_idx: dict[int, dict] = {}
         for leg in self._sorted_oco_legs(rec_norm):
             idx = int(self._num_or(leg.get("target_index"), 0))
             if idx > 0:
                 oco_by_idx[idx] = leg
-        candidates = []
+        candidates: list[dict] = []
         for leg in plan_legs:
+            idx = int(self._num_or(leg.get("target_index"), 0))
+            if idx in filled_idx:
+                continue
             if str(leg.get("leg_state") or "").upper() in ("FILLED", "CANCELLED"):
                 continue
-            idx = int(self._num_or(leg.get("target_index"), 0))
             oco = oco_by_idx.get(idx) or {}
             if str(oco.get("status") or "").upper() == "FILLED":
                 continue
@@ -3380,22 +3575,27 @@ class Trader:
             base_sum = len(candidates)
             for leg in candidates:
                 leg["allocated_qty"] = 1
-        rebuilt: list[dict] = []
-        used = 0
-        for i, leg in enumerate(candidates):
-            base_q = max(1, int(self._num_or(leg.get("allocated_qty"), 1)))
-            if i == len(candidates) - 1:
-                alloc = max(0, int(qty - used))
-            else:
-                alloc = int(math.floor((qty * base_q) / float(base_sum)))
-                if qty >= len(candidates):
-                    alloc = max(1, alloc)
-            used += alloc
-            if alloc <= 0:
-                continue
-            leg["allocated_qty"] = int(alloc)
-            rebuilt.append(leg)
-        return rebuilt
+        # When remaining plan allocations already match open qty, keep original lots (e.g. 500+250).
+        if base_sum == qty:
+            out = [leg for leg in candidates if int(self._num_or(leg.get("allocated_qty"), 0)) > 0]
+        else:
+            out = []
+            used = 0
+            for i, leg in enumerate(candidates):
+                base_q = max(1, int(self._num_or(leg.get("allocated_qty"), 1)))
+                if i == len(candidates) - 1:
+                    alloc = max(0, int(qty - used))
+                else:
+                    alloc = int(math.floor((qty * base_q) / float(base_sum)))
+                    if qty >= len(candidates):
+                        alloc = max(1, alloc)
+                used += alloc
+                if alloc <= 0:
+                    continue
+                leg["allocated_qty"] = int(alloc)
+                out.append(leg)
+        lot_size = max(1, int(self._num_or(rec_norm.get("lot_size"), 0)))
+        return self._finalize_rearm_leg_qtys(out, qty, lot_size)
 
     @classmethod
     def _derive_progression_sl_true(cls, rec: dict, hit_stage: str) -> float:
@@ -3462,6 +3662,7 @@ class Trader:
         out, stage = self._recompute_leg_progress(rec=rec, open_qty=open_qty)
         out["sl_progress_stage"] = stage
         out = self._normalize_active_trade_record(out)
+        filled_idx = self._filled_target_indices(out, open_qty)
         oco_by_idx: dict[int, dict] = {}
         for leg in self._sorted_oco_legs(out):
             idx = int(self._num_or(leg.get("target_index"), 0))
@@ -3473,12 +3674,13 @@ class Trader:
         for pl in plan_legs:
             idx = int(self._num_or(pl.get("target_index"), 0))
             oco = oco_by_idx.get(idx) or {}
-            if str(oco.get("status") or "").upper() == "FILLED":
+            if idx in filled_idx or str(oco.get("status") or "").upper() == "FILLED":
                 pl["leg_state"] = "FILLED"
-                sid = str(oco.get("smart_order_id") or "")
+                sid = str(oco.get("smart_order_id") or pl.get("current_smart_order_id") or "")
                 if sid:
                     pl["current_smart_order_id"] = sid
         out["protection_plan_legs"] = plan_legs
+        out["sl_true"] = self._derive_progression_sl_true(out, str(out.get("sl_progress_stage") or "NONE"))
         return out
 
     @staticmethod
@@ -3527,9 +3729,7 @@ class Trader:
             oid = str(leg.get("smart_order_id") or "")
             if oid and oid not in ids:
                 ids.append(oid)
-        if ids:
-            return ids
-        return self._oco_ids_from_record(rec)
+        return ids
 
     def _sync_multi_target_progress_for_symbol(self, symbol: str, rec: dict, position: dict) -> str | None:
         rec_norm = self._normalize_active_trade_record(rec)

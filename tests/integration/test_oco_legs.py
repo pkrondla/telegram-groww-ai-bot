@@ -318,3 +318,34 @@ class TestBrokerLocalDiff:
         assert "STALE_LOCAL" in text
         assert "FOO26MAY100CE" in text
         assert "Stale local" in text and "1" in text
+
+
+class TestReconcileFillFallback:
+    def test_infers_exit_from_realized_pnl_when_avg_missing(self, trader):
+        class _Client:
+            def get_positions_for_user(self, segment="FNO"):
+                return {
+                    "positions": [
+                        {
+                            "trading_symbol": "FOO26MAY100CE",
+                            "day_sell_qty": 200,
+                            "realized_pnl": -1200.0,
+                        }
+                    ]
+                }
+
+        trader.client = _Client()
+        rec = {
+            "entry_side": "BUY",
+            "entry_avg_price": 10.0,
+            "entry_qty": 200,
+        }
+        out = trader._reconcile_exit_fill_from_positions(
+            symbol="FOO26MAY100CE",
+            active_rec=rec,
+        )
+        assert out is not None
+        assert out["source"] == "broker_positions_realized"
+        assert out["exit_qty"] == 200
+        assert out["pnl_inr"] == pytest.approx(-1200.0)
+        assert out["exit_price"] == pytest.approx(4.0)

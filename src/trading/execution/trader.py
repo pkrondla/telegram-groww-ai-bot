@@ -628,6 +628,51 @@ class Trader:
                 }
                 if best is None or int(cand["exit_qty"]) > int(best.get("exit_qty") or 0):
                     best = cand
+        if best:
+            return best
+
+        # Last resort: if broker does not expose exit average but does expose
+        # realized P&L on the position row, infer exit price from entry+PnL.
+        realized_keys = {
+            "realized_pnl",
+            "realised_pnl",
+            "realized_profit",
+            "realised_profit",
+            "realized_profit_loss",
+            "realised_profit_loss",
+            "pnl_realized",
+            "day_pnl",
+        }
+        entry_price = float(self._num_or(rec.get("entry_avg_price"), 0.0))
+        if entry_price <= 0:
+            return None
+        qty_fallback = int(abs(self._num_or(rec.get("entry_qty"), 0)))
+        for row in rows:
+            ex_qty = int(abs(self._walk_for_numeric_key(row, qty_candidates) or 0))
+            if ex_qty <= 0:
+                ex_qty = qty_fallback
+            if ex_qty <= 0:
+                continue
+            realized = self._walk_for_numeric_key(row, realized_keys)
+            if realized is None:
+                continue
+            pnl = float(realized)
+            if abs(pnl) < 1e-9:
+                # For true 0-PnL we cannot infer a directional exit from pnl alone.
+                continue
+            if side == "SELL":
+                inferred_exit = float(entry_price) - (pnl / float(ex_qty))
+            else:
+                inferred_exit = float(entry_price) + (pnl / float(ex_qty))
+            if inferred_exit <= 0:
+                continue
+            return {
+                "exit_price": float(inferred_exit),
+                "exit_qty": int(ex_qty),
+                "pnl_inr": float(pnl),
+                "source": "broker_positions_realized",
+                "order_id": "",
+            }
         return best
 
     def _record_leg_exit(
@@ -975,7 +1020,12 @@ class Trader:
 
             side = str(row.get("side") or rec.get("entry_side") or "BUY").upper()
             entry_price = float(self._num_or(row.get("entry_price"), 0.0))
-            points_per_lot, pnl_inr = self._trade_pnl(side, entry_price, exit_price, exit_qty)
+            inferred_pnl = inferred.get("pnl_inr")
+            if inferred_pnl is None:
+                points_per_lot, pnl_inr = self._trade_pnl(side, entry_price, exit_price, exit_qty)
+            else:
+                pnl_inr = float(inferred_pnl)
+                points_per_lot = float(pnl_inr) / float(exit_qty or 1)
 
             data_blob["exit_order_id"] = str(
                 inferred.get("order_id") or data_blob.get("exit_order_id") or ""

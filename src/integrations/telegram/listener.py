@@ -718,7 +718,7 @@ class BotListener:
             for account_id, rt in self.multi_account.runtimes().items():
                 try:
                     await asyncio.to_thread(
-                        rt.trader.maintain_active_trades, False
+                        rt.trader.maintain_active_trades, include_rearm=False
                     )
                 except Exception as e:
                     logger.warning(

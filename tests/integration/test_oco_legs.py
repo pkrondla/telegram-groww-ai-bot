@@ -268,3 +268,53 @@ class TestProtectionPlanLegs:
         synced = trader._sync_protection_plan_from_progress(rec, open_qty=750)
         remaining = trader._remaining_plan_legs_for_open_qty(synced, open_qty=750)
         assert [int(l["allocated_qty"]) for l in remaining] == [500, 250]
+
+
+class TestPositionQuantity:
+  def test_prefers_net_quantity_when_day_quantity_stale(self, trader):
+      """Flat broker row may still carry day buy qty in ``quantity``."""
+      pos = {"trading_symbol": "FOO", "quantity": 2000, "net_quantity": 0}
+      assert trader._position_quantity(pos) == 0
+
+  def test_uses_quantity_when_net_missing(self, trader):
+      pos = {"trading_symbol": "FOO", "quantity": 500}
+      assert trader._position_quantity(pos) == 500
+
+
+class TestBookSyncStatus:
+    def test_stale_local(self, trader):
+        assert trader._book_sync_status(
+            local_open=True, broker_open=False, local_qty=100, broker_net_qty=0
+        ) == "STALE_LOCAL"
+
+    def test_broker_only(self, trader):
+        assert trader._book_sync_status(
+            local_open=False, broker_open=True, local_qty=0, broker_net_qty=50
+        ) == "BROKER_ONLY"
+
+    def test_qty_mismatch(self, trader):
+        assert trader._book_sync_status(
+            local_open=True, broker_open=True, local_qty=100, broker_net_qty=50
+        ) == "QTY_MISMATCH"
+
+
+class TestBrokerLocalDiff:
+    def test_diff_flags_stale_local(self, trader, monkeypatch):
+        trader.client = object()
+        monkeypatch.setattr(
+            "src.trading.execution.trader.db.get_leg_exits_for_range",
+            lambda account_id, start, end: [],
+        )
+        trader._load_active_trades = lambda: {
+            "FOO26MAY100CE": {
+                "entry_side": "BUY",
+                "entry_qty": 100,
+                "entry_avg_price": 10.0,
+                "parent_trade_id": "abc12345",
+            }
+        }
+        trader._list_fno_positions = lambda: []
+        text = trader.build_broker_local_diff_text("day")
+        assert "STALE_LOCAL" in text
+        assert "FOO26MAY100CE" in text
+        assert "Stale local" in text and "1" in text

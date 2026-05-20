@@ -32,6 +32,10 @@ _OVERRIDE_COMMANDS = {
     "PROFIT TODAY": "profit_day",
     "PROFIT WEEK": "profit_week",
     "PROFIT MONTH": "profit_month",
+    "PNL DIFF": "pnl_diff",
+    "PROFIT DIFF": "pnl_diff",
+    "BROKER DIFF": "pnl_diff",
+    "BROKER VS LOCAL": "pnl_diff",
     "HELP":     "help",
     "DRYRUN ON":  "dryrun_on",
     "DRYRUN OFF": "dryrun_off",
@@ -248,8 +252,6 @@ class BotListener:
         while not self._stop.is_set():
             try:
                 await asyncio.sleep(interval)
-                if not self.multi_account.any_active():
-                    continue
                 if not self._is_broker_window_open_ist():
                     continue
                 for account_id, rt in self.multi_account.runtimes().items():
@@ -451,6 +453,10 @@ class BotListener:
         m_profit_sig = re.fullmatch(r"PROFIT\s+SIGNAL\s+([A-Z0-9]+)", t)
         if m_profit_sig:
             return f"profit_signal:{m_profit_sig.group(1)}"
+        if t in ("PNL DIFF WEEK", "PROFIT DIFF WEEK", "BROKER DIFF WEEK"):
+            return "pnl_diff_week"
+        if t in ("PNL DIFF MONTH", "PROFIT DIFF MONTH", "BROKER DIFF MONTH"):
+            return "pnl_diff_month"
         if t in ("VOLSL WIDEN", "VOL_SL WIDEN", "VOL SL WIDEN"):
             return "volsl_widen"
         if t in ("VOLSL RESTORE", "VOL_SL RESTORE", "VOL SL RESTORE"):
@@ -710,6 +716,14 @@ class BotListener:
             }[command]
             parts = []
             for account_id, rt in self.multi_account.runtimes().items():
+                try:
+                    await asyncio.to_thread(
+                        rt.trader.maintain_active_trades, False
+                    )
+                except Exception as e:
+                    logger.warning(
+                        f"[PROFIT][{account_id}] Pre-summary reconcile failed: {e}"
+                    )
                 msg = await asyncio.to_thread(
                     rt.trader._build_profit_summary_text, period
                 )
@@ -720,6 +734,19 @@ class BotListener:
                 "profit_month": "Trading P&L — Month",
             }[command]
             await self.notifier.send_alert(title, "\n\n".join(parts))
+        elif command in ("pnl_diff", "pnl_diff_week", "pnl_diff_month"):
+            period = {
+                "pnl_diff": "day",
+                "pnl_diff_week": "week",
+                "pnl_diff_month": "month",
+            }[command]
+            parts = []
+            for account_id, rt in self.multi_account.runtimes().items():
+                msg = await asyncio.to_thread(
+                    rt.trader.build_broker_local_diff_text, period
+                )
+                parts.append(f"[{account_id}]\n{msg}")
+            await self.notifier.send_alert("Broker vs Local P&L Diff", "\n\n".join(parts))
         elif command.startswith("profit_signal:"):
             sym = command.split(":", 1)[1].strip().upper()
             parts = []
@@ -747,6 +774,8 @@ class BotListener:
                 "- PROFIT WEEK — last 7 days realized P&L grouped by symbol\n"
                 "- PROFIT MONTH — current month realized P&L grouped by symbol\n"
                 "- PROFIT SIGNAL <TRADING_SYMBOL> — all-time per-signal P&L breakdown for one symbol\n"
+                "- PNL DIFF / BROKER DIFF — compare local book + leg_exits vs broker positions (today)\n"
+                "- PNL DIFF WEEK / PNL DIFF MONTH — same diff for week or month leg_exits range\n"
                 "- CLEAR PENDING — clear pending entry queue\n"
                 "- SIZING — show current position sizing modes\n"
                 "- SIZING INDEX FIXED|RISK — set index sizing mode\n"

@@ -1241,6 +1241,258 @@ class Trader:
             + f"\n\nGrand total: {self._fmt_inr(grand_total)}"
         )
 
+    _BROKER_REALIZED_PNL_KEYS = frozenset({
+        "realized_pnl",
+        "realised_pnl",
+        "realized_profit",
+        "realised_profit",
+        "realized_profit_loss",
+        "realised_profit_loss",
+        "pnl_realized",
+        "realised_pnl_amount",
+        "realized_pnl_amount",
+        "day_pnl",
+        "total_pnl",
+    })
+    _BROKER_UNREALIZED_PNL_KEYS = frozenset({
+        "unrealized_pnl",
+        "unrealised_pnl",
+        "unrealized_profit",
+        "unrealised_profit",
+        "mtm",
+        "mark_to_market",
+        "pnl_unrealized",
+    })
+
+    def _list_fno_positions(self) -> list[dict]:
+        if self.client is None:
+            return []
+        try:
+            fno_positions = self.client.get_positions_for_user(segment="FNO")
+            positions = fno_positions.get("positions", []) if isinstance(fno_positions, dict) else []
+        except Exception as e:
+            logger.warning(f"[PNL_DIFF] Could not fetch FNO positions: {e}")
+            return []
+        out: list[dict] = []
+        for row in positions:
+            if isinstance(row, dict) and row.get("trading_symbol"):
+                out.append(row)
+        return out
+
+    def _broker_metrics_from_position(self, row: dict) -> dict:
+        sym = str(row.get("trading_symbol") or "").upper().strip()
+        net_qty = int(self._position_quantity(row))
+        raw_qty = 0
+        try:
+            raw_qty = int(float(row.get("quantity") or row.get("qty") or 0))
+        except Exception:
+            raw_qty = 0
+        realized = self._walk_for_numeric_key(row, self._BROKER_REALIZED_PNL_KEYS)
+        unrealized = self._walk_for_numeric_key(row, self._BROKER_UNREALIZED_PNL_KEYS)
+        ltp = self._walk_for_numeric_key(
+            row,
+            {"ltp", "last_price", "last_traded_price", "close_price", "mark_price"},
+        )
+        return {
+            "symbol": sym,
+            "net_qty": net_qty,
+            "raw_quantity": raw_qty,
+            "realized_pnl": float(realized) if realized is not None else None,
+            "unrealized_pnl": float(unrealized) if unrealized is not None else None,
+            "ltp": float(ltp) if ltp is not None else None,
+        }
+
+    @staticmethod
+    def _book_sync_status(
+        *,
+        local_open: bool,
+        broker_open: bool,
+        local_qty: int,
+        broker_net_qty: int,
+    ) -> str:
+        if local_open and broker_open:
+            if abs(int(local_qty or 0)) == abs(int(broker_net_qty or 0)):
+                return "OK"
+            return "QTY_MISMATCH"
+        if local_open and not broker_open:
+            return "STALE_LOCAL"
+        if not local_open and broker_open:
+            return "BROKER_ONLY"
+        return "FLAT"
+
+    def build_broker_local_diff_text(self, period: str = "day") -> str:
+        """
+        Admin diagnostic: compare local active_trades + leg_exits vs broker FNO positions.
+        Does not mutate local state (read-only aside from broker API reads).
+        """
+        start, end, label = self._profit_period_bounds(period)
+        p = str(period or "day").lower().strip()
+        title_period = p.capitalize() if p in ("day", "week", "month") else p
+
+        if self.client is None:
+            return (
+                f"📊 Broker vs Local — {title_period} {label}\n\n"
+                "⚠️ Groww client not initialized — cannot fetch broker positions."
+            )
+
+        try:
+            local_active = self._load_active_trades() or {}
+        except Exception as e:
+            logger.warning(f"[PNL_DIFF] Failed to load active trades: {e}")
+            local_active = {}
+
+        try:
+            leg_rows = db.get_leg_exits_for_range(self.account_id, start, end)
+        except Exception as e:
+            logger.warning(f"[PNL_DIFF] Failed to load leg_exits for {start}..{end}: {e}")
+            leg_rows = []
+
+        local_by_sym: dict[str, dict] = {}
+        for r in leg_rows:
+            sym = str(r.get("symbol") or "").upper().strip()
+            if not sym:
+                continue
+            bucket = local_by_sym.setdefault(
+                sym,
+                {"settled_inr": 0.0, "pending": 0, "legs": 0},
+            )
+            bucket["legs"] += 1
+            if bool(r.get("pnl_pending")):
+                bucket["pending"] += 1
+            else:
+                bucket["settled_inr"] += float(r.get("pnl_inr") or 0.0)
+
+        broker_by_sym: dict[str, dict] = {}
+        broker_fetch_ok = True
+        for row in self._list_fno_positions():
+            metrics = self._broker_metrics_from_position(row)
+            sym = str(metrics.get("symbol") or "")
+            if sym:
+                broker_by_sym[sym] = metrics
+
+        all_symbols = sorted(
+            set(local_active.keys())
+            | set(local_by_sym.keys())
+            | set(broker_by_sym.keys())
+        )
+
+        local_total = sum(float(v.get("settled_inr") or 0.0) for v in local_by_sym.values())
+        broker_realized_vals = [
+            float(m["realized_pnl"])
+            for m in broker_by_sym.values()
+            if m.get("realized_pnl") is not None
+        ]
+        broker_realized_total = sum(broker_realized_vals) if broker_realized_vals else None
+
+        stale_local = 0
+        broker_only = 0
+        qty_mismatch = 0
+        pnl_mismatch = 0
+        missing_local = 0
+        detail_lines: list[str] = []
+
+        for sym in all_symbols:
+            rec = self._normalize_active_trade_record(local_active.get(sym) or {})
+            local_open = sym in local_active
+            local_qty = int(self._num_or(rec.get("entry_qty"), 0)) if local_open else 0
+            loc = local_by_sym.get(sym, {"settled_inr": 0.0, "pending": 0, "legs": 0})
+            bm = broker_by_sym.get(sym, {})
+            broker_net = int(bm.get("net_qty") or 0)
+            broker_open = broker_net != 0
+            sync = self._book_sync_status(
+                local_open=local_open,
+                broker_open=broker_open,
+                local_qty=local_qty,
+                broker_net_qty=broker_net,
+            )
+            if sync == "STALE_LOCAL":
+                stale_local += 1
+            elif sync == "BROKER_ONLY":
+                broker_only += 1
+            elif sync == "QTY_MISMATCH":
+                qty_mismatch += 1
+
+            local_pnl = float(loc.get("settled_inr") or 0.0)
+            broker_pnl = bm.get("realized_pnl")
+            pnl_note = ""
+            if broker_pnl is not None and loc.get("legs", 0) > 0:
+                if abs(float(broker_pnl) - local_pnl) > 1.0:
+                    pnl_mismatch += 1
+                    pnl_note = " ⚠️ PNL_MISMATCH"
+            elif broker_pnl is not None and loc.get("legs", 0) == 0 and not local_open:
+                missing_local += 1
+                pnl_note = " ⚠️ MISSING_LOCAL_JOURNAL"
+
+            if sync in ("OK", "FLAT") and not pnl_note and loc.get("legs", 0) == 0 and not local_open:
+                if broker_open or broker_pnl is None:
+                    continue
+
+            book_part = f"book: local={'OPEN' if local_open else 'flat'} broker={'OPEN' if broker_open else 'flat'}"
+            if sync != "OK" and sync != "FLAT":
+                book_part += f" [{sync}]"
+            if sync == "QTY_MISMATCH":
+                book_part += f" (local_qty={local_qty} broker_net={broker_net})"
+            elif broker_open:
+                raw_q = int(bm.get("raw_quantity") or 0)
+                if raw_q and raw_q != broker_net:
+                    book_part += f" (broker_net={broker_net}, raw_qty={raw_q})"
+
+            local_pnl_s = self._fmt_inr(local_pnl) if loc.get("legs", 0) else "—"
+            if loc.get("pending", 0):
+                local_pnl_s += f" +{loc['pending']} pending"
+            if broker_pnl is not None:
+                broker_pnl_s = self._fmt_inr(float(broker_pnl))
+            else:
+                broker_pnl_s = "n/a"
+                if bm.get("unrealized_pnl") is not None and broker_open:
+                    broker_pnl_s += f" (mtm {self._fmt_inr(float(bm['unrealized_pnl']))})"
+
+            detail_lines.append(
+                f"• {sym}\n  {book_part}\n  P&L ({start}): local={local_pnl_s} broker={broker_pnl_s}{pnl_note}"
+            )
+
+        summary_lines = [
+            f"📊 Broker vs Local — {title_period} {label}",
+            "",
+            "Summary",
+            f"  Local realized ({start}→{end}): {self._fmt_inr(local_total)} "
+            f"({sum(v['legs'] for v in local_by_sym.values())} leg row(s))",
+        ]
+        if broker_realized_total is not None:
+            summary_lines.append(
+                f"  Broker realized (sum of position rows): {self._fmt_inr(broker_realized_total)} "
+                f"({len(broker_realized_vals)} symbol(s) with field)"
+            )
+        else:
+            summary_lines.append(
+                "  Broker realized: n/a (no realized_* field on position rows)"
+            )
+        if broker_realized_total is not None and abs(broker_realized_total - local_total) > 1.0:
+            summary_lines.append(
+                f"  Totals delta: {self._fmt_inr(broker_realized_total - local_total)}"
+            )
+        summary_lines.extend([
+            f"  Stale local (open in bot, flat at broker): {stale_local}",
+            f"  Broker-only open (not in active_trades): {broker_only}",
+            f"  Qty mismatch (both open): {qty_mismatch}",
+            f"  Per-symbol P&L mismatch: {pnl_mismatch}",
+            f"  Broker P&L but no local leg_exits: {missing_local}",
+        ])
+        if stale_local:
+            summary_lines.append(
+                "  Tip: run PROFIT DAY (reconciles first) or wait for ACTIVE_RECONCILE poll."
+            )
+
+        if not detail_lines:
+            detail_lines.append("• No mismatches — local book and broker positions align.")
+
+        max_detail = 25
+        if len(detail_lines) > max_detail:
+            extra = len(detail_lines) - max_detail
+            detail_lines = detail_lines[:max_detail] + [f"• … +{extra} more symbol(s)"]
+
+        return "\n".join(summary_lines + ["", "Per symbol", *detail_lines])
+
     def run_eod_summary_tick(self) -> str | None:
         if not Config.EOD_SUMMARY_ENABLED:
             return None
@@ -1262,6 +1514,10 @@ class Trader:
             already_sent = False
         if already_sent:
             return None
+        try:
+            self.maintain_active_trades(include_rearm=False)
+        except Exception as e:
+            logger.warning(f"[EOD] Pre-summary reconcile failed: {e}")
         summary = self._build_profit_summary_text("day")
         try:
             db.mark_eod_sent(self.account_id, d, self._now_ist_iso())
@@ -1321,7 +1577,16 @@ class Trader:
 
     @staticmethod
     def _position_quantity(position: dict) -> int:
-        for key in ("quantity", "net_quantity", "netQuantity", "net_qty", "qty"):
+        # When the broker sends net_* fields, they are authoritative (0 = flat).
+        # ``quantity`` alone may remain as a stale day buy/sell total after exit.
+        for key in ("net_quantity", "netQuantity", "net_qty"):
+            if key not in position:
+                continue
+            try:
+                return int(float(position.get(key) or 0))
+            except Exception:
+                break
+        for key in ("quantity", "qty"):
             try:
                 q = int(float(position.get(key) or 0))
                 if q != 0:
@@ -2623,10 +2888,8 @@ class Trader:
             return True
 
         try:
-            fno_positions = self.client.get_positions_for_user(segment="FNO")
-            positions = fno_positions.get("positions", []) if isinstance(fno_positions, dict) else []
-            active_symbols = {p.get("trading_symbol") for p in positions if p.get("quantity", 0) != 0}
-            if symbol in active_symbols:
+            _, open_qty = self._get_open_position_for_symbol(symbol)
+            if open_qty != 0:
                 return True
             logger.info(f"Reconcile symbol: {symbol} is not active on broker. Removing local active trade row.")
             inferred = self._reconcile_exit_fill_from_positions(symbol=symbol, active_rec=rec) or {}

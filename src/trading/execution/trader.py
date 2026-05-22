@@ -5350,6 +5350,35 @@ class Trader:
         self._save_pending([])
         return removed
 
+    @staticmethod
+    def _index_monthly_alpha_variant(symbol: str) -> str | None:
+        """
+        Derive NIFTY26MAY23850CE-style symbol from a weekly-style token when month
+        was given without a day (mis-built as NIFTY2652623850CE).
+        """
+        p = Trader._parse_option_symbol_parts(symbol)
+        if not p:
+            return None
+        u = str(p.get("underlying") or "").upper()
+        if u not in Trader.INDEX_UNDERLYINGS:
+            return None
+        yy = str(p.get("yy") or "")
+        mm = int(p.get("month_num") or 0)
+        strike = str(p.get("strike") or "")
+        ot = str(p.get("option_type") or "").upper()
+        if len(yy) != 2 or mm < 1 or mm > 12 or not strike or ot not in ("CE", "PE"):
+            return None
+        month_abbr = {
+            1: "JAN", 2: "FEB", 3: "MAR", 4: "APR", 5: "MAY", 6: "JUN",
+            7: "JUL", 8: "AUG", 9: "SEP", 10: "OCT", 11: "NOV", 12: "DEC",
+        }.get(mm)
+        if not month_abbr:
+            return None
+        monthly = f"{u}{yy}{month_abbr}{strike}{ot}"
+        if monthly.upper() == str(symbol).upper():
+            return None
+        return monthly
+
     def _index_weekly_symbol_encoding_variants(self, symbol: str) -> list[str]:
         """
         Groww/NSE index weeklies use YY + M + DD + strike (month 1-9 unpadded).
@@ -5412,6 +5441,9 @@ class Trader:
                     variants.extend(m_variants)
                     break
         variants.extend(self._index_weekly_symbol_encoding_variants(symbol))
+        monthly_alpha = self._index_monthly_alpha_variant(symbol)
+        if monthly_alpha:
+            variants.append(monthly_alpha)
         return list(dict.fromkeys(variants))
 
     @staticmethod
@@ -5762,6 +5794,15 @@ class Trader:
             return None
 
         variants = self._variant_list(symbol)
+        if str(trade_data.get("expiry_format") or "").lower() == "monthly":
+            u = str(trade_data.get("official_symbol") or "").upper().strip()
+            strike = re.sub(r"[^\d]", "", str(trade_data.get("strike") or ""))
+            ot = str(trade_data.get("option_type") or "").upper().strip()
+            mon = str(trade_data.get("expiry_month") or "").upper().strip()[:3]
+            yy = str(trade_data.get("expiry_year") or "")[-2:]
+            if u and strike and ot in ("CE", "PE") and mon and yy:
+                monthly_sym = f"{u}{yy}{mon}{strike}{ot}"
+                variants = list(dict.fromkeys([monthly_sym] + variants))
         active_candidates = self._active_contract_candidates(trade_data, symbol)
         # Resolve the exact constructed symbol (Groww API) before CSV chain matches.
         # Packaged instruments.csv can lag or omit a weekly while still listing monthlies;

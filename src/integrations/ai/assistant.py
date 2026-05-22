@@ -986,6 +986,42 @@ class Assistant:
         month_abbr = expiry.strftime("%b").upper()
         return str(expiry.day).zfill(2), month_abbr, str(expiry.year)
 
+    @staticmethod
+    def _is_placeholder_expiry_day(raw_day) -> bool:
+        """LLM uses day '01' (or empty) when the signal names a month but not a calendar day."""
+        s = str(raw_day or "").strip().upper()
+        if not s or s in ("NA", "NONE", "NULL", "00"):
+            return True
+        m = re.search(r"\d{1,2}", s)
+        if not m:
+            return True
+        return int(m.group(0)) <= 1
+
+    @classmethod
+    def _index_monthly_expiry_is_stale(cls, raw_month, raw_year) -> bool:
+        """Index month-only contracts stay valid for the whole calendar month."""
+        _MONTH_NUM = {
+            "JAN": 1, "FEB": 2, "MAR": 3, "APR": 4, "MAY": 5, "JUN": 6,
+            "JUL": 7, "AUG": 8, "SEP": 9, "OCT": 10, "NOV": 11, "DEC": 12,
+        }
+        try:
+            month_abbr = cls._safe_month_abbr(raw_month)
+            month_num = _MONTH_NUM.get(month_abbr.upper())
+            if not month_num:
+                return False
+            year_str = str(raw_year or "").strip()
+            year = (
+                int(year_str)
+                if len(year_str) == 4
+                else (2000 + int(year_str))
+                if len(year_str) == 2
+                else cls._today_ist().year
+            )
+            today = cls._today_ist()
+            return (year, month_num) < (today.year, today.month)
+        except Exception:
+            return False
+
     @classmethod
     def _expiry_is_stale(cls, raw_day, raw_month, raw_year) -> bool:
         """
@@ -1044,12 +1080,25 @@ class Assistant:
         raw_day = data.get("expiry_day") or ""
         raw_year = data.get("expiry_year") or ""
         expiry_is_missing = not str(raw_month).strip() or str(raw_month).strip().upper() in ("", "NA", "NONE", "NULL")
+        index_month_only = (
+            is_index
+            and not expiry_is_missing
+            and self._is_placeholder_expiry_day(raw_day)
+        )
 
         if expiry_is_missing:
             if is_index:
                 raw_day, raw_month, raw_year = self._current_week_expiry(underlying)
             else:
                 raw_day, raw_month, raw_year = self._current_month_expiry()
+        elif index_month_only:
+            if self._index_monthly_expiry_is_stale(raw_month, raw_year):
+                new_day, new_month, new_year = self._current_month_expiry()
+                logger.info(
+                    f"[STAGE 2] Index monthly expiry {raw_month}/{raw_year} is in the past — "
+                    f"rolling forward to {new_month}/{new_year}."
+                )
+                raw_day, raw_month, raw_year = new_day, new_month, new_year
         else:
             # Expiry was given — check if it has already passed.
             # If so, roll forward to the nearest valid default (same as missing-expiry path).
@@ -1072,11 +1121,17 @@ class Assistant:
         groww_symbol = f"{underlying}{yy}{expiry_month}{strike}{option_type}"
 
         if is_index:
-            # NSE/Groww index weekly: YY + M (no leading zero) + DD + strike + CE|PE
-            # e.g. 5 May 2026 -> NIFTY2650524200CE — NOT NIFTY26050524200CE (YY+MM+DD).
-            month_num = self._safe_month_num(raw_month)
-            month_token = str(int(month_num))
-            groww_symbol = f"{underlying}{yy}{month_token}{expiry_day}{strike}{option_type}"
+            if index_month_only:
+                # Month name only (e.g. "MAY") → NIFTY26MAY23850CE on Groww/NSE.
+                groww_symbol = f"{underlying}{yy}{expiry_month}{strike}{option_type}"
+                data["expiry_format"] = "monthly"
+            else:
+                # NSE/Groww index weekly: YY + M (no leading zero) + DD + strike + CE|PE
+                # e.g. 5 May 2026 -> NIFTY2650524200CE — NOT NIFTY26050524200CE (YY+MM+DD).
+                month_num = self._safe_month_num(raw_month)
+                month_token = str(int(month_num))
+                groww_symbol = f"{underlying}{yy}{month_token}{expiry_day}{strike}{option_type}"
+                data["expiry_format"] = "weekly"
 
         # Keep normalized expiry fields in sync with the symbol factory output.
         data["expiry_day"] = expiry_day
@@ -1722,10 +1777,13 @@ option_type:
 
 expiry_day:
   - Two-digit string (e.g. "09", "28"). Use "01" if not stated.
+  - Index options: use a real day only when the message states one (e.g. "19 MAY", "05/05").
+    Month name alone (e.g. "MAY", "APR expiry") → expiry_day "01" (monthly contract).
 
 expiry_month:
   - Three-letter abbreviation (e.g. "APR", "MAY").
-  - Index options: use the calendar expiry date stated in the message.
+  - Index options: month name without a day → monthly series (expiry_day "01").
+    Explicit calendar day in message → that day on the weekly series.
     If no expiry stated, use the current week's expiry based on this schedule:
       NIFTY → Tuesday | FINNIFTY → Tuesday | MIDCPNIFTY → Monday
       BANKNIFTY → Thursday | SENSEX → Thursday | BANKEX → Monday

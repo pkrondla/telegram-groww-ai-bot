@@ -457,10 +457,10 @@ class BotListener:
             return "pnl_diff_week"
         if t in ("PNL DIFF MONTH", "PROFIT DIFF MONTH", "BROKER DIFF MONTH"):
             return "pnl_diff_month"
-        if t in ("VOLSL WIDEN", "VOL_SL WIDEN", "VOL SL WIDEN"):
-            return "volsl_widen"
-        if t in ("VOLSL RESTORE", "VOL_SL RESTORE", "VOL SL RESTORE"):
-            return "volsl_restore"
+        if t in ("VOLSL DROP", "VOL_SL DROP", "VOL SL DROP"):
+            return "volsl_drop"
+        if t in ("VOLSL REARM", "VOL_SL REARM", "VOL SL REARM"):
+            return "volsl_rearm"
         for cmd in _OVERRIDE_COMMANDS:
             if t == cmd:
                 return _OVERRIDE_COMMANDS[cmd]
@@ -678,32 +678,32 @@ class BotListener:
                 msg = await asyncio.to_thread(rt.trader.admin_sync_target_progression, sym)
                 out.append(f"[{account_id}] {msg}")
             await self.notifier.send("\n".join(out))
-        elif command == "volsl_widen":
-            logger.info("[STAGE 1] Admin override command: VOLSL WIDEN")
+        elif command == "volsl_drop":
+            logger.info("[STAGE 1] Admin override command: VOLSL DROP")
             parts = []
             for account_id, rt in self.multi_account.runtimes().items():
                 lines = await asyncio.to_thread(
-                    lambda r=rt: r.trader.run_volatility_sl_schedule_tick(admin_widen=True)
+                    lambda r=rt: r.trader.run_volatility_sl_schedule_tick(admin_drop=True)
                 )
                 msg = (
                     "\n".join(lines)
                     if lines
-                    else "ℹ️ VOLSL WIDEN: no eligible active trades (need OCO ids, open broker qty, sl_true > 0)."
+                    else "ℹ️ VOLSL DROP: no eligible active trades (need OCO ids and open broker qty)."
                 )
                 parts.append(f"[{account_id}] {msg}")
             msg = "\n".join(parts)
             await self.notifier.send(msg)
-        elif command == "volsl_restore":
-            logger.info("[STAGE 1] Admin override command: VOLSL RESTORE")
+        elif command == "volsl_rearm":
+            logger.info("[STAGE 1] Admin override command: VOLSL REARM")
             parts = []
             for account_id, rt in self.multi_account.runtimes().items():
                 lines = await asyncio.to_thread(
-                    lambda r=rt: r.trader.run_volatility_sl_schedule_tick(admin_restore=True)
+                    lambda r=rt: r.trader.run_volatility_sl_schedule_tick(admin_rearm=True)
                 )
                 msg = (
                     "\n".join(lines)
                     if lines
-                    else "ℹ️ VOLSL RESTORE: no eligible trades (need widened state: vol_sl_needs_restore, or use RESTORE SL <SYMBOL>)."
+                    else "ℹ️ VOLSL REARM: no eligible active trades (need open broker qty and sl_true > 0)."
                 )
                 parts.append(f"[{account_id}] {msg}")
             msg = "\n".join(parts)
@@ -766,8 +766,8 @@ class BotListener:
                 "- EXIT <TRADING_SYMBOL> — close one active trade\n"
                 "- EXIT ALL — close all active trades\n"
                 "- REARM — re-arm missing OCO protection for active trades\n"
-                "- VOLSL WIDEN — run scheduled widen now (VOL_SL_WIDEN_PCT / sl_true; ignores today's widen idempotency)\n"
-                "- VOLSL RESTORE — run scheduled restore now (requires prior widen / vol_sl_needs_restore)\n"
+                "- VOLSL DROP — cancel all OCO legs now (open-auction SL drop; ignores today's idempotency)\n"
+                "- VOLSL REARM — re-arm fresh OCO with sl_true now (post-auction; ignores today's idempotency)\n"
                 "- PROGRESS — multi-target SL progression sync for all active trades\n"
                 "- PROGRESS <TRADING_SYMBOL> — progression sync for one active trade\n"
                 "- DAY SUMMARY / PROFIT DAY — today's realized P&L (per leg)\n"

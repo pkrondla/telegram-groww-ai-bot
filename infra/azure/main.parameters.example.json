@@ -231,16 +231,12 @@
           "value": "false"
         },
         {
-          "name": "VOL_SL_WIDEN_TIME_IST",
-          "value": "15:15"
+          "name": "VOL_SL_DROP_SL_TIME_IST",
+          "value": "09:10"
         },
         {
-          "name": "VOL_SL_RESTORE_TIME_IST",
-          "value": "09:25"
-        },
-        {
-          "name": "VOL_SL_WIDEN_PCT",
-          "value": "0.10"
+          "name": "VOL_SL_REARM_SL_TIME_IST",
+          "value": "09:20"
         },
         {
           "name": "VOL_SL_SCHEDULE_POLL_SEC",

@@ -132,12 +132,12 @@ class Config:
     # - ENFORCE: mark integrity degraded and force repair paths.
     OCO_PLAN_ENFORCEMENT_MODE = os.getenv("OCO_PLAN_ENFORCEMENT_MODE", "ENFORCE").strip().upper()
 
-    # Volatility schedule: widen OCO SL before close, restore next morning (IST). Policy 1: admin TRAIL_SL
-    # still updates broker SL immediately; sl_true in active_trades tracks the channel's true SL.
+    # Volatility schedule: drop OCO SL before market open auction, re-arm after spike window (IST).
+    # Drop at VOL_SL_DROP_SL_TIME_IST cancels all OCO legs (no SL during opening spike).
+    # Re-arm at VOL_SL_REARM_SL_TIME_IST recreates OCO with sl_true once the spike window passes.
     VOL_SL_SCHEDULE_ENABLED = os.getenv("VOL_SL_SCHEDULE_ENABLED", "false").lower() == "true"
-    VOL_SL_WIDEN_TIME_IST = os.getenv("VOL_SL_WIDEN_TIME_IST", "15:15")  # HH:MM
-    VOL_SL_RESTORE_TIME_IST = os.getenv("VOL_SL_RESTORE_TIME_IST", "09:25")
-    VOL_SL_WIDEN_PCT = max(0.0, min(0.95, float(os.getenv("VOL_SL_WIDEN_PCT", "0.10"))))
+    VOL_SL_DROP_SL_TIME_IST = os.getenv("VOL_SL_DROP_SL_TIME_IST", "09:10")   # HH:MM cancel OCO
+    VOL_SL_REARM_SL_TIME_IST = os.getenv("VOL_SL_REARM_SL_TIME_IST", "09:20")  # HH:MM re-arm OCO
     VOL_SL_SCHEDULE_POLL_SEC = max(10, int(os.getenv("VOL_SL_SCHEDULE_POLL_SEC", "30")))
     VOL_SL_SKIP_WEEKENDS = os.getenv("VOL_SL_SKIP_WEEKENDS", "true").lower() == "true"
 

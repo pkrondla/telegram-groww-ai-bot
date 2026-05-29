@@ -96,9 +96,8 @@ jobs:
           AUTO_REARM_POLL_SEC: ${{ vars.AUTO_REARM_POLL_SEC || '900' }}
           OCO_PLAN_ENFORCEMENT_MODE: ${{ vars.OCO_PLAN_ENFORCEMENT_MODE || 'ENFORCE' }}
           VOL_SL_SCHEDULE_ENABLED: ${{ vars.VOL_SL_SCHEDULE_ENABLED || 'true' }}
-          VOL_SL_WIDEN_TIME_IST: ${{ vars.VOL_SL_WIDEN_TIME_IST || '15:20' }}
-          VOL_SL_RESTORE_TIME_IST: ${{ vars.VOL_SL_RESTORE_TIME_IST || '09:20' }}
-          VOL_SL_WIDEN_PCT: ${{ vars.VOL_SL_WIDEN_PCT || '0.20' }}
+          VOL_SL_DROP_SL_TIME_IST: ${{ vars.VOL_SL_DROP_SL_TIME_IST || '09:10' }}
+          VOL_SL_REARM_SL_TIME_IST: ${{ vars.VOL_SL_REARM_SL_TIME_IST || '09:20' }}
           VOL_SL_SCHEDULE_POLL_SEC: ${{ vars.VOL_SL_SCHEDULE_POLL_SEC || '30' }}
           VOL_SL_SKIP_WEEKENDS: ${{ vars.VOL_SL_SKIP_WEEKENDS || 'false' }}
           EOD_SUMMARY_ENABLED: ${{ vars.EOD_SUMMARY_ENABLED || 'true' }}
@@ -229,9 +228,8 @@ jobs:
                 "AUTO_REARM_POLL_SEC",
                 "OCO_PLAN_ENFORCEMENT_MODE",
                 "VOL_SL_SCHEDULE_ENABLED",
-                "VOL_SL_WIDEN_TIME_IST",
-                "VOL_SL_RESTORE_TIME_IST",
-                "VOL_SL_WIDEN_PCT",
+                "VOL_SL_DROP_SL_TIME_IST",
+                "VOL_SL_REARM_SL_TIME_IST",
                 "VOL_SL_SCHEDULE_POLL_SEC",
                 "VOL_SL_SKIP_WEEKENDS",
                 "EOD_SUMMARY_ENABLED",

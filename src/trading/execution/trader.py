@@ -892,12 +892,6 @@ class Trader:
             "sl_true_at_close": float(sl_true),
             "target_at_close": float(self._num_or(rec.get("target"), 0.0)),
             "per_target_rr": per_target_rr,
-            "volatility_sl_state": {
-                "sl_mode": str(rec.get("sl_mode") or "NORMAL"),
-                "sl_widened": float(self._num_or(rec.get("sl_widened"), 0.0)),
-                "sl_widen_pct": float(self._num_or(rec.get("sl_widen_pct"), 0.0)),
-                "vol_sl_needs_restore": bool(self._bool_or(rec, "vol_sl_needs_restore", False)),
-            },
             "reconcile_attempts": 0,
             "last_reconcile_try_ist": "",
         }
@@ -1637,26 +1631,6 @@ class Trader:
             return "PE"
         return ""
 
-    @classmethod
-    def _widened_sl_from_true(cls, symbol: str, sl_true: float, widen_pct: float) -> float | None:
-        try:
-            st = float(sl_true)
-            p = float(widen_pct)
-        except Exception:
-            return None
-        if st <= 0 or p <= 0:
-            return None
-        opt = cls._option_type_from_symbol(symbol)
-        delta = st * p
-        if opt == "PE":
-            widened = st + delta
-        else:
-            # Default CE (and unknown): widen by moving SL farther from zero strike-side → lower trigger.
-            widened = st - delta
-        if widened <= 0:
-            return None
-        return widened
-
     @staticmethod
     def _position_quantity(position: dict) -> int:
         # When the broker sends net_* fields, they are authoritative (0 = flat).
@@ -1752,14 +1726,7 @@ class Trader:
         if raw_true_sl <= 0:
             logger.warning(f"[REARM] Skip {symbol}: invalid stored SL (sl_true={raw_true_sl}).")
             return False, f"⚠️ OCO re-arm skipped for {symbol}: invalid stored SL (sl_true={raw_true_sl})."
-        broker_sl = float(raw_true_sl)
-        if bool(rec_norm.get("vol_sl_needs_restore")):
-            widened = self._widened_sl_from_true(
-                symbol, raw_true_sl, float(rec_norm.get("sl_widen_pct") or Config.VOL_SL_WIDEN_PCT)
-            )
-            if widened is not None and widened > 0:
-                broker_sl = float(widened)
-        broker_sl = self._round_price_to_tick(broker_sl, mode="nearest")
+        broker_sl = self._round_price_to_tick(float(raw_true_sl), mode="nearest")
         if broker_sl <= 0:
             logger.warning(
                 f"[REARM] Skip {symbol}: invalid broker SL after tick-rounding "
@@ -2042,9 +2009,6 @@ class Trader:
             symbol,
             stop_loss=float(broker_sl),
             sl_true=float(raw_true_sl),
-            sl_widened=(broker_sl if bool(rec_norm.get("vol_sl_needs_restore")) else 0.0),
-            sl_mode=("WIDENED" if bool(rec_norm.get("vol_sl_needs_restore")) else "NORMAL"),
-            sl_widen_pct=float(rec_norm.get("sl_widen_pct") or Config.VOL_SL_WIDEN_PCT),
         )
         trades = self._load_active_trades()
         nrec = self._normalize_active_trade_record(trades.get(symbol))
@@ -2721,10 +2685,22 @@ class Trader:
         positions_map: dict[str, dict],
         stats: dict,
     ) -> None:
+        today = self._today_ist_iso()
         for symbol, rec in list(updated.items()):
             try:
                 pos = positions_map.get(symbol)
                 if not pos:
+                    continue
+                # Suppress auto-rearm during VOL_SL drop window: drop has fired today but
+                # re-arm has not yet — let VOL_SL scheduler place the OCO at the right time.
+                rec_norm = self._normalize_active_trade_record(rec)
+                drop_done = str(rec_norm.get("vol_sl_drop_done_for") or "") == today
+                rearm_done = str(rec_norm.get("vol_sl_rearm_done_for") or "") == today
+                if drop_done and not rearm_done:
+                    logger.debug(
+                        f"[REARM] {symbol}: skipped — inside VOL_SL drop window "
+                        f"(drop_done={today}, rearm_done=False)."
+                    )
                     continue
                 result = self._execute_rearm_for_symbol(
                     source=source,
@@ -3327,7 +3303,7 @@ class Trader:
                 out["signal_targets"] = [float(out.get("target") or 0)]
             stage = str(out.get("sl_progress_stage") or "").upper().strip()
             out["sl_progress_stage"] = stage if stage in ("NONE", "T1_HIT", "T2_HIT") else "NONE"
-            for k in ("sl_true", "sl_widened", "sl_widen_pct"):
+            for k in ("sl_true",):
                 if k in out:
                     try:
                         out[k] = float(out.get(k) or 0)
@@ -3348,18 +3324,9 @@ class Trader:
             for k in ("entry_side", "opened_at_ist", "entry_order_id", "spread_group_id"):
                 if k in out and out.get(k) is not None:
                     out[k] = str(out.get(k) or "")
-            if "sl_mode" in out:
-                out["sl_mode"] = str(out.get("sl_mode") or "").upper().strip() or "NORMAL"
-            for k in ("vol_sl_widen_done_for", "vol_sl_restore_done_for"):
+            for k in ("vol_sl_drop_done_for", "vol_sl_rearm_done_for"):
                 if k in out and out.get(k) is not None:
                     out[k] = str(out.get(k) or "").strip()
-            if "vol_sl_needs_restore" in out:
-                v = out.get("vol_sl_needs_restore")
-                if isinstance(v, bool):
-                    out["vol_sl_needs_restore"] = v
-                else:
-                    sv = str(v or "").strip().lower()
-                    out["vol_sl_needs_restore"] = sv in ("1", "true", "yes", "y", "on")
             if "exit_in_progress" in out:
                 v = out.get("exit_in_progress")
                 if isinstance(v, bool):
@@ -3467,7 +3434,6 @@ class Trader:
             # Fresh protection uses channel SL as the authoritative true SL unless already explicitly tracked.
             if float(current.get("sl_true") or 0) <= 0:
                 current["sl_true"] = float(stop_loss)
-            current.setdefault("sl_mode", "NORMAL")
         if target is not None:
             current["target"] = float(target)
         if entry_side is not None:
@@ -4160,12 +4126,6 @@ class Trader:
                 )
 
         broker_sl = float(next_true)
-        if bool(next_rec.get("vol_sl_needs_restore")):
-            widened = self._widened_sl_from_true(
-                symbol, float(next_true), float(next_rec.get("sl_widen_pct") or Config.VOL_SL_WIDEN_PCT)
-            )
-            if widened is not None:
-                broker_sl = float(widened)
 
         if self.client is not None:
             ids = self._active_leg_order_ids(next_rec)
@@ -4192,9 +4152,6 @@ class Trader:
             symbol,
             stop_loss=float(broker_sl),
             sl_true=float(next_true),
-            sl_widened=(broker_sl if bool(next_rec.get("vol_sl_needs_restore")) else 0.0),
-            sl_mode=("WIDENED" if bool(next_rec.get("vol_sl_needs_restore")) else "NORMAL"),
-            sl_widen_pct=float(next_rec.get("sl_widen_pct") or Config.VOL_SL_WIDEN_PCT),
         )
         logger.info(
             f"[PROGRESS] {symbol}: progression applied. broker_sl={broker_sl:.2f}, "
@@ -4213,12 +4170,8 @@ class Trader:
         stop_loss: float | None = None,
         target: float | None = None,
         sl_true: float | None = None,
-        sl_widened: float | None = None,
-        sl_widen_pct: float | None = None,
-        sl_mode: str | None = None,
-        vol_sl_needs_restore: bool | None = None,
-        vol_sl_widen_done_for: str | None = None,
-        vol_sl_restore_done_for: str | None = None,
+        vol_sl_drop_done_for: str | None = None,
+        vol_sl_rearm_done_for: str | None = None,
     ):
         trades = self._load_active_trades()
         if symbol not in trades:
@@ -4252,25 +4205,10 @@ class Trader:
                     if state in ("FILLED", "CANCELLED"):
                         continue
                     leg["sl_true_current"] = float(sl_true)
-        if sl_widened is not None:
-            if float(sl_widened) <= 0:
-                rec.pop("sl_widened", None)
-            else:
-                rec["sl_widened"] = float(sl_widened)
-        if sl_widen_pct is not None:
-            try:
-                rec["sl_widen_pct"] = float(sl_widen_pct)
-            except Exception:
-                rec.pop("sl_widen_pct", None)
-        if sl_mode is not None:
-            sm = str(sl_mode or "").upper().strip()
-            rec["sl_mode"] = sm or "NORMAL"
-        if vol_sl_needs_restore is not None:
-            rec["vol_sl_needs_restore"] = bool(vol_sl_needs_restore)
-        if vol_sl_widen_done_for is not None:
-            rec["vol_sl_widen_done_for"] = str(vol_sl_widen_done_for or "").strip()
-        if vol_sl_restore_done_for is not None:
-            rec["vol_sl_restore_done_for"] = str(vol_sl_restore_done_for or "").strip()
+        if vol_sl_drop_done_for is not None:
+            rec["vol_sl_drop_done_for"] = str(vol_sl_drop_done_for or "").strip()
+        if vol_sl_rearm_done_for is not None:
+            rec["vol_sl_rearm_done_for"] = str(vol_sl_rearm_done_for or "").strip()
         if isinstance(rec.get("protection_plan_legs"), list):
             rec["protection_plan_version"] = max(1, int(self._num_or(rec.get("protection_plan_version"), 1))) + 1
             rec["protection_materialized_at"] = self._now_ist_iso()
@@ -4290,15 +4228,7 @@ class Trader:
         if broker_sl > 0:
             return broker_sl
         st = float(self._num_or(nrec.get("sl_true"), 0.0))
-        if st <= 0:
-            return 0.0
-        if bool(nrec.get("vol_sl_needs_restore")):
-            widened = self._widened_sl_from_true(
-                sym, st, float(nrec.get("sl_widen_pct") or Config.VOL_SL_WIDEN_PCT)
-            )
-            if widened is not None and float(widened) > 0:
-                return float(widened)
-        return float(st)
+        return float(st) if st > 0 else 0.0
 
     def _require_live_oco_payload_for_modify(self, order_id: str, payload: dict) -> None:
         """
@@ -4475,8 +4405,8 @@ class Trader:
 
     def restore_channel_sl(self, symbol: str, *, source: str) -> str:
         """
-        Restore broker OCO SL to persisted sl_true (Policy 1 source of truth).
-        Marks scheduled restore idempotency for today when source is admin/channel restore.
+        Set broker OCO SL to sl_true (channel source-of-truth).
+        If OCO is stale/expired, creates fresh protection via re-arm.
         """
         rec = self._get_active_trade_record(symbol) or {}
         order_ids = self._oco_ids_from_record(rec)
@@ -4487,23 +4417,14 @@ class Trader:
             sl_true = float(rec.get("sl_true") or rec.get("stop_loss") or 0)
             if sl_true <= 0:
                 return f"⚠️ RESTORE_SL skipped for {symbol}: missing sl_true in local book.{self._ltp_suffix_for_symbol(symbol)}"
-            today = self._today_ist_iso()
-            self._update_active_trade_levels(
-                symbol,
-                stop_loss=sl_true,
-                sl_true=sl_true,
-                sl_mode="NORMAL",
-                sl_widened=0.0,
-                vol_sl_needs_restore=False,
-                vol_sl_restore_done_for=today,
-            )
+            self._update_active_trade_levels(symbol, stop_loss=sl_true, sl_true=sl_true)
             return (
                 f"🧪 [DRY RUN] RESTORE_SL for {symbol}: broker SL would be set to sl_true={sl_true} "
                 f"(simulated; no OCO on broker)."
             )
 
         if not self.client:
-                    return f"⚠️ NO GROWW CLIENT: Cannot RESTORE_SL for {symbol}. Configure GROWW_ACCOUNTS_JSON account credentials.{self._ltp_suffix_for_symbol(symbol)}"
+            return f"⚠️ NO GROWW CLIENT: Cannot RESTORE_SL for {symbol}. Configure GROWW_ACCOUNTS_JSON account credentials.{self._ltp_suffix_for_symbol(symbol)}"
 
         sl_true = float(rec.get("sl_true") or rec.get("stop_loss") or 0)
         if sl_true <= 0:
@@ -4548,20 +4469,10 @@ class Trader:
                 )
             rec_rearm = dict(rec)
             rec_rearm["stop_loss"] = float(last_sl_true)
-            # Force immediate re-arm regardless of today's armed date.
             rec_rearm["protection_armed_date"] = ""
             ok, alert = self._rearm_oco_for_open_position(symbol, rec_rearm, pos or {})
             if ok:
-                today = self._today_ist_iso()
-                self._update_active_trade_levels(
-                    symbol,
-                    stop_loss=last_sl_true,
-                    sl_true=last_sl_true,
-                    sl_mode="NORMAL",
-                    sl_widened=0.0,
-                    vol_sl_needs_restore=False,
-                    vol_sl_restore_done_for=today,
-                )
+                self._update_active_trade_levels(symbol, stop_loss=last_sl_true, sl_true=last_sl_true)
                 return (
                     f"🔁 RESTORE_SL RE-ARMED: {symbol} had no modifiable OCO; "
                     f"created fresh protection at sl_true={last_sl_true} ({source}).{self._ltp_suffix_for_symbol(symbol)}"
@@ -4588,18 +4499,9 @@ class Trader:
             )
 
         sl_true = float(last_sl_true)
-        today = self._today_ist_iso()
-        self._update_active_trade_levels(
-            symbol,
-            stop_loss=sl_true,
-            sl_true=sl_true,
-            sl_mode="NORMAL",
-            sl_widened=0.0,
-            vol_sl_needs_restore=False,
-            vol_sl_restore_done_for=today,
-        )
+        self._update_active_trade_levels(symbol, stop_loss=sl_true, sl_true=sl_true)
         return (
-            f"🔁 RESTORE_SL SUCCESS: {symbol} broker SL restored to sl_true={sl_true} "
+            f"🔁 RESTORE_SL SUCCESS: {symbol} broker SL set to sl_true={sl_true} "
             f"({source}; updated={success}/{attempted}, stale={skipped_stale}, failed={len(failed)})."
             f"{self._ltp_suffix_for_symbol(symbol)}"
         )
@@ -4607,18 +4509,24 @@ class Trader:
     def run_volatility_sl_schedule_tick(
         self,
         *,
-        admin_widen: bool = False,
-        admin_restore: bool = False,
+        admin_drop: bool = False,
+        admin_rearm: bool = False,
     ) -> list[str]:
         """
-        IST widen/restore tick driven by Config.VOL_SL_*.
-        Optional admin_widen / admin_restore force the corresponding branch immediately
-        (bypass clock and, for widen, today's widen idempotency flag).
+        IST drop/rearm tick driven by Config.VOL_SL_*.
+
+        Drop at VOL_SL_DROP_SL_TIME_IST: cancel all OCO legs before market open auction
+        so no SL fires during the opening spike window.
+
+        Re-arm at VOL_SL_REARM_SL_TIME_IST: recreate OCO with sl_true after the spike
+        window has passed.
+
+        admin_drop / admin_rearm bypass clock and idempotency for forced runs.
         Returns human-readable lines suitable for admin notifications/logging.
         """
         lines: list[str] = []
         now = self._now_ist()
-        admin_any = bool(admin_widen or admin_restore)
+        admin_any = bool(admin_drop or admin_rearm)
 
         if not admin_any and not Config.VOL_SL_SCHEDULE_ENABLED:
             return lines
@@ -4626,138 +4534,102 @@ class Trader:
         if Config.VOL_SL_SKIP_WEEKENDS and now.weekday() >= 5 and not admin_any:
             return lines
 
-        widen_t = self._parse_hhmm_ist(Config.VOL_SL_WIDEN_TIME_IST)
-        restore_t = self._parse_hhmm_ist(Config.VOL_SL_RESTORE_TIME_IST)
+        drop_t = self._parse_hhmm_ist(Config.VOL_SL_DROP_SL_TIME_IST)
+        rearm_t = self._parse_hhmm_ist(Config.VOL_SL_REARM_SL_TIME_IST)
 
         if admin_any:
-            want_widen = bool(admin_widen)
-            want_restore = bool(admin_restore)
+            want_drop = bool(admin_drop)
+            want_rearm = bool(admin_rearm)
         else:
-            if not widen_t or not restore_t:
+            if not drop_t or not rearm_t:
                 lines.append(
-                    "⚠️ VOL_SL schedule: invalid VOL_SL_WIDEN_TIME_IST / VOL_SL_RESTORE_TIME_IST (expected HH:MM IST)."
+                    "⚠️ VOL_SL schedule: invalid VOL_SL_DROP_SL_TIME_IST / VOL_SL_REARM_SL_TIME_IST (expected HH:MM IST)."
                 )
                 return lines
             hm = now.strftime("%H:%M")
-            want_widen = hm == f"{widen_t[0]:02d}:{widen_t[1]:02d}"
-            want_restore = hm == f"{restore_t[0]:02d}:{restore_t[1]:02d}"
+            want_drop = hm == f"{drop_t[0]:02d}:{drop_t[1]:02d}"
+            want_rearm = hm == f"{rearm_t[0]:02d}:{rearm_t[1]:02d}"
 
-        if not want_widen and not want_restore:
+        if not want_drop and not want_rearm:
             return lines
 
-        restore_source = "admin" if admin_restore else "schedule"
-
         today = now.date().isoformat()
-        pct = float(Config.VOL_SL_WIDEN_PCT or 0.0)
         trades = self._load_active_trades()
+
         for symbol, raw in trades.items():
             rec = self._normalize_active_trade_record(raw)
-            order_ids = self._oco_ids_from_record(rec)
-            if not order_ids:
-                continue
-            if any(oid == self.DRY_RUN_PLACEHOLDER_ORDER_ID for oid in order_ids):
-                continue
 
-            pos, qty = self._get_open_position_for_symbol(symbol)
-            if qty == 0:
-                continue
-
-            sl_true = float(rec.get("sl_true") or rec.get("stop_loss") or 0)
-            if sl_true <= 0:
-                continue
-
-            if want_widen:
-                if not admin_widen and str(rec.get("vol_sl_widen_done_for") or "") == today:
+            if want_drop:
+                if not admin_drop and str(rec.get("vol_sl_drop_done_for") or "") == today:
                     continue
-                widened = self._widened_sl_from_true(symbol, sl_true, pct)
-                if widened is None:
-                    lines.append(f"⚠️ VOL_SL widen skipped for {symbol}: could not compute widened SL.")
+
+                pos, qty = self._get_open_position_for_symbol(symbol)
+                if qty == 0:
                     continue
+
+                order_ids = self._oco_ids_from_record(rec)
+                if not order_ids or any(oid == self.DRY_RUN_PLACEHOLDER_ORDER_ID for oid in order_ids):
+                    continue
+
                 if not self.client:
-                    lines.append("⚠️ VOL_SL widen skipped: Groww client not initialized.")
+                    lines.append("⚠️ VOL_SL drop skipped: Groww client not initialized.")
                     return lines
-                try:
-                    logger.info(
-                        f"[VOL_SL] Widen ({'admin' if admin_widen else 'schedule'}): {symbol} sl_true={sl_true} "
-                        f"pct={pct} → broker_sl={widened} (smart_order_ids={order_ids})."
-                    )
-                    vol_sl_cache: dict[str, dict] = {}
-                    for oid in order_ids:
-                        widened = self._modify_oco_sl(symbol, oid, widened, payload_cache=vol_sl_cache)
-                    self._update_active_trade_levels(
-                        symbol,
-                        stop_loss=widened,
-                        sl_true=sl_true,
-                        sl_widened=widened,
-                        sl_widen_pct=pct,
-                        sl_mode="WIDENED",
-                        vol_sl_needs_restore=True,
-                        vol_sl_widen_done_for=today,
-                    )
+
+                logger.info(
+                    f"[VOL_SL] Drop ({'admin' if admin_drop else 'schedule'}): {symbol} "
+                    f"cancelling OCO legs {order_ids} (open auction window)."
+                )
+                cancelled, cancel_errors = self._cancel_oco_ids_for_symbol(symbol, rec)
+                self._update_active_trade_levels(symbol, vol_sl_drop_done_for=today)
+                if cancel_errors:
                     lines.append(
-                        f"VOL_SL WIDEN: {symbol} broker SL -> {widened} "
-                        f"(sl_true {sl_true}, pct {pct})."
+                        f"VOL_SL DROP: {symbol} cancelled {cancelled} OCO leg(s); "
+                        f"errors: {' | '.join(cancel_errors[:3])}"
                     )
-                except Exception as e:
-                    if self._is_stale_oco_error(str(e)) and self.client:
-                        try:
-                            rec_rearm = dict(rec)
-                            rec_rearm["stop_loss"] = float(sl_true)
-                            rec_rearm["protection_armed_date"] = ""
-                            ok, alert = self._rearm_oco_for_open_position(symbol, rec_rearm, pos or {})
-                            if ok:
-                                rec_after = self._get_active_trade_record(symbol) or {}
-                                retry_ids = self._oco_ids_from_record(rec_after)
-                                retry_widened = widened
-                                vol_sl_retry_cache: dict[str, dict] = {}
-                                for rid in retry_ids:
-                                    retry_widened = self._modify_oco_sl(
-                                        symbol, rid, retry_widened, payload_cache=vol_sl_retry_cache
-                                    )
-                                self._update_active_trade_levels(
-                                    symbol,
-                                    stop_loss=retry_widened,
-                                    sl_true=sl_true,
-                                    sl_widened=retry_widened,
-                                    sl_widen_pct=pct,
-                                    sl_mode="WIDENED",
-                                    vol_sl_needs_restore=True,
-                                    vol_sl_widen_done_for=today,
-                                )
-                                lines.append(
-                                    f"VOL_SL WIDEN RE-ARMED: {symbol} broker SL -> {retry_widened} "
-                                    f"(sl_true {sl_true}, pct {pct})."
-                                )
-                            else:
-                                msg = alert or str(e)
-                                lines.append(f"VOL_SL widen failed for {symbol}: {msg}")
-                        except Exception as rearm_err:
-                            logger.error(f"[VOL_SL] Widen re-arm failed for {symbol}: {rearm_err}", exc_info=True)
-                            lines.append(f"VOL_SL widen failed for {symbol}: {rearm_err}")
-                    else:
-                        logger.error(f"[VOL_SL] Widen failed for {symbol}: {e}", exc_info=True)
-                        lines.append(f"VOL_SL widen failed for {symbol}: {e}")
+                else:
+                    lines.append(f"VOL_SL DROP: {symbol} OCO cancelled ({cancelled} leg(s)).")
                 rec = self._get_active_trade_record(symbol) or rec
 
-            if want_restore:
-                if not admin_restore and str(rec.get("vol_sl_restore_done_for") or "") == today:
+            if want_rearm:
+                if not admin_rearm and str(rec.get("vol_sl_rearm_done_for") or "") == today:
                     continue
-                if not bool(rec.get("vol_sl_needs_restore")):
-                    if admin_restore:
-                        lines.append(
-                            f"ℹ️ VOLSL RESTORE skipped {symbol}: not awaiting restore "
-                            f"(run VOLSL WIDEN first, or use RESTORE SL <SYMBOL>)."
-                        )
+
+                pos, qty = self._get_open_position_for_symbol(symbol)
+                if qty == 0:
                     continue
+
+                sl_true = float(rec.get("sl_true") or rec.get("stop_loss") or 0)
+                if sl_true <= 0:
+                    lines.append(f"⚠️ VOL_SL rearm skipped for {symbol}: missing sl_true.")
+                    continue
+
                 if not self.client:
-                    lines.append("⚠️ VOL_SL restore skipped: Groww client not initialized.")
+                    lines.append("⚠️ VOL_SL rearm skipped: Groww client not initialized.")
                     return lines
+
+                drop_seen = str(rec.get("vol_sl_drop_done_for") or "") == today
+                drop_warn = "" if drop_seen else " (WARN: drop step not seen today)"
+
+                logger.info(
+                    f"[VOL_SL] Re-arm ({'admin' if admin_rearm else 'schedule'}): {symbol} "
+                    f"sl_true={sl_true} drop_seen={drop_seen}."
+                )
                 try:
-                    msg = self.restore_channel_sl(symbol, source=restore_source)
-                    lines.append(msg)
+                    rec_rearm = dict(rec)
+                    rec_rearm["stop_loss"] = float(sl_true)
+                    rec_rearm["protection_armed_date"] = ""
+                    ok, alert = self._rearm_oco_for_open_position(symbol, rec_rearm, pos or {}, force=True)
+                    self._update_active_trade_levels(symbol, vol_sl_rearm_done_for=today)
+                    if ok:
+                        lines.append(
+                            f"VOL_SL REARM: {symbol} OCO re-armed sl_true={sl_true}.{drop_warn}"
+                        )
+                    else:
+                        msg = alert or "re-arm did not complete"
+                        lines.append(f"VOL_SL REARM failed for {symbol}: {msg}{drop_warn}")
                 except Exception as e:
-                    logger.error(f"[VOL_SL] Restore failed for {symbol}: {e}", exc_info=True)
-                    lines.append(f"VOL_SL restore failed for {symbol}: {e}")
+                    logger.error(f"[VOL_SL] Re-arm failed for {symbol}: {e}", exc_info=True)
+                    lines.append(f"VOL_SL REARM failed for {symbol}: {e}{drop_warn}")
 
         return lines
 
@@ -7381,32 +7253,17 @@ class Trader:
                         )
                     if action == "TRAIL_SL":
                         new_sl = float(trade_data["stop_loss"])
-                        rec0 = self._get_active_trade_record(symbol) or {}
-                        broker_sl = float(new_sl)
-                        if bool(rec0.get("vol_sl_needs_restore")):
-                            widened = self._widened_sl_from_true(
-                                symbol, float(new_sl), float(rec0.get("sl_widen_pct") or Config.VOL_SL_WIDEN_PCT)
-                            )
-                            if widened is None:
-                                return (
-                                    f"⚠️ TRAIL_SL skipped for {symbol}: could not compute widened broker SL "
-                                    f"from sl_true={new_sl}.{self._ltp_suffix_for_symbol(symbol)}"
-                                )
-                            broker_sl = float(widened)
                         self._update_active_trade_levels(
                             symbol,
-                            stop_loss=broker_sl,
+                            stop_loss=float(new_sl),
                             sl_true=float(new_sl),
-                            sl_widened=(broker_sl if bool(rec0.get("vol_sl_needs_restore")) else 0.0),
-                            sl_mode=("WIDENED" if bool(rec0.get("vol_sl_needs_restore")) else "NORMAL"),
-                            sl_widen_pct=float(rec0.get("sl_widen_pct") or Config.VOL_SL_WIDEN_PCT),
                         )
                         logger.info(
-                            f"[STAGE 4] DRY RUN book: TRAIL_SL {symbol} sl_true={new_sl} broker_sl={broker_sl} "
+                            f"[STAGE 4] DRY RUN book: TRAIL_SL {symbol} sl_true={new_sl} "
                             f"(not sent to broker)."
                         )
                         return (
-                            f"🧪 [DRY RUN] TRAIL_SL for {symbol}: sl_true={new_sl}, broker_sl={broker_sl} "
+                            f"🧪 [DRY RUN] TRAIL_SL for {symbol}: sl_true={new_sl} "
                             f"(simulated; no OCO on broker for this symbol).{self._ltp_suffix_for_symbol(symbol)}"
                         )
                     if action == "RESTORE_SL":
@@ -7548,18 +7405,7 @@ class Trader:
                 
                 elif action == "TRAIL_SL":
                     new_sl = float(trade_data["stop_loss"])
-                    rec0 = self._get_active_trade_record(symbol) or {}
                     broker_sl = float(new_sl)
-                    if bool(rec0.get("vol_sl_needs_restore")):
-                        widened = self._widened_sl_from_true(
-                            symbol, float(new_sl), float(rec0.get("sl_widen_pct") or Config.VOL_SL_WIDEN_PCT)
-                        )
-                        if widened is None:
-                            return (
-                                f"⚠️ TRAIL_SL skipped for {symbol}: could not compute widened broker SL "
-                                f"from sl_true={new_sl}.{self._ltp_suffix_for_symbol(symbol)}"
-                            )
-                        broker_sl = float(widened)
                     logger.info(
                         f"[STAGE 4] Calling Groww modify_smart_order for {symbol}: "
                         f"sl_true={new_sl} broker_sl={broker_sl}."
@@ -7619,9 +7465,6 @@ class Trader:
                         symbol,
                         stop_loss=broker_sl,
                         sl_true=float(new_sl),
-                        sl_widened=(broker_sl if bool(rec0.get("vol_sl_needs_restore")) else 0.0),
-                        sl_mode=("WIDENED" if bool(rec0.get("vol_sl_needs_restore")) else "NORMAL"),
-                        sl_widen_pct=float(rec0.get("sl_widen_pct") or Config.VOL_SL_WIDEN_PCT),
                     )
                     logger.info(
                         f"[STAGE 4] TRAIL SUCCESS: {symbol} sl_true={new_sl} broker_sl={broker_sl} "
@@ -7813,11 +7656,6 @@ class Trader:
                             target=float(targets[0] if targets else raw_tgt),
                             stop_loss=(0.0 if clear_stop_loss else None),
                             sl_true=(0.0 if clear_stop_loss else None),
-                            sl_widened=(0.0 if clear_stop_loss else None),
-                            sl_mode=("NORMAL" if clear_stop_loss else None),
-                            vol_sl_needs_restore=(False if clear_stop_loss else None),
-                            vol_sl_widen_done_for=("" if clear_stop_loss else None),
-                            vol_sl_restore_done_for=("" if clear_stop_loss else None),
                         )
                     logger.info(
                         f"[STAGE 4] UPDATE_TGT SUCCESS: {symbol} broker target {eff_tgt} "

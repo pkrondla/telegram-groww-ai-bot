@@ -7229,10 +7229,21 @@ class Trader:
                 rec_active = self._get_active_trade_record(symbol) or {}
                 order_ids = self._oco_ids_from_record(rec_active)
                 order_id = order_ids[0] if order_ids else None
+                no_oco_exit_fallback = False
                 logger.info(f"[STAGE 4] Order IDs for {symbol}: {order_ids}")
                 if not order_id:
-                    logger.warning(f"[STAGE 4] No order ID found for {symbol} in active_trades.json.")
-                    return f"⚠️ NO ACTIVE TRADE: Could not find an open Order ID for {symbol}.{self._ltp_suffix_for_symbol(symbol)}"
+                    # EXIT_ALL can still flatten a live broker position even when
+                    # this trade has no stored OCO id (e.g., entry came with SL=0
+                    # so no protection order was attached).
+                    if action == "EXIT_ALL":
+                        no_oco_exit_fallback = True
+                        logger.info(
+                            f"[STAGE 4] No OCO order ID for {symbol}; proceeding with EXIT_ALL "
+                            "position-flatten fallback."
+                        )
+                    else:
+                        logger.warning(f"[STAGE 4] No order ID found for {symbol} in active_trades.json.")
+                        return f"⚠️ NO ACTIVE TRADE: Could not find an open Order ID for {symbol}.{self._ltp_suffix_for_symbol(symbol)}"
 
                 # Simulated book row from dry-run entry — nothing exists on the broker to exit/modify.
                 if order_id == self.DRY_RUN_PLACEHOLDER_ORDER_ID:
@@ -7284,6 +7295,9 @@ class Trader:
                     return f"⚠️ NO GROWW CLIENT: Cannot {action} for {symbol}. Configure GROWW_ACCOUNTS_JSON account credentials.{self._ltp_suffix_for_symbol(symbol)}"
 
                 if action == "EXIT_ALL":
+                    fallback_note = (
+                        " [mode=position-fallback:no-oco-id]" if no_oco_exit_fallback else ""
+                    )
                     lock = self._get_exit_lock(symbol)
                     if lock.get("active") and lock.get("stale"):
                         logger.warning(
@@ -7340,7 +7354,10 @@ class Trader:
                         logger.info(
                             f"[STAGE 4] EXIT SUCCESS: {symbol} has no open position after cancel; removed from active book."
                         )
-                        return f"🚨 EXIT SUCCESS: {symbol} already flat; cleared local active trade.{self._ltp_suffix_for_symbol(symbol)}"
+                        return (
+                            f"🚨 EXIT SUCCESS: {symbol} already flat; cleared local active trade."
+                            f"{fallback_note}{self._ltp_suffix_for_symbol(symbol)}"
+                        )
 
                     tx = "SELL" if qty > 0 else "BUY"
                     flat_qty = abs(int(qty))
@@ -7376,7 +7393,7 @@ class Trader:
                         )
                         return (
                             f"⚠️ EXIT PARTIAL: Cancelled protection for {symbol}, but position still open "
-                            f"(remaining qty {qty_after}).{self._ltp_suffix_for_symbol(symbol)}"
+                            f"(remaining qty {qty_after}).{fallback_note}{self._ltp_suffix_for_symbol(symbol)}"
                         )
 
                     self._remove_active_trade(symbol)
@@ -7401,7 +7418,10 @@ class Trader:
                     logger.info(
                         f"[STAGE 4] EXIT SUCCESS: {symbol} flattened and removed from active book."
                     )
-                    return f"🚨 EXIT SUCCESS: Closed {symbol} position and cleared active trade.{self._ltp_suffix_for_symbol(symbol)}"
+                    return (
+                        f"🚨 EXIT SUCCESS: Closed {symbol} position and cleared active trade."
+                        f"{fallback_note}{self._ltp_suffix_for_symbol(symbol)}"
+                    )
                 
                 elif action == "TRAIL_SL":
                     new_sl = float(trade_data["stop_loss"])

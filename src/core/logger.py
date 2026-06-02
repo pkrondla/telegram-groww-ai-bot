@@ -1,6 +1,7 @@
 import logging
 import sys
 import time
+from logging.handlers import TimedRotatingFileHandler
 import requests
 from .config import Config
 
@@ -51,7 +52,7 @@ class TelegramErrorAlertHandler(logging.Handler):
 def setup_logger():
     """
     Industrial-standard dual-output logger setup.
-    Outputs to both the console and a persistent 'bot_activity.log' file.
+    Outputs to both the console and a daily-rotated persistent log file.
     """
     
     # Create a custom logger
@@ -64,13 +65,12 @@ def setup_logger():
         return logger
 
     import os
-    from datetime import datetime
     
     # Create logs directory if missing
     if not os.path.exists("logs"):
         os.makedirs("logs")
         
-    log_filename = f"logs/trading_{datetime.now().strftime('%Y-%m-%d')}.log"
+    log_filename = "logs/trading.log"
 
     # Force stdout to handle UTF-8 if possible (Fix for Windows Unicode Errors)
     if hasattr(sys.stdout, 'reconfigure'):
@@ -78,7 +78,15 @@ def setup_logger():
     
     # Create handlers
     c_handler = logging.StreamHandler(sys.stdout)
-    f_handler = logging.FileHandler(log_filename, encoding='utf-8')
+    f_handler = TimedRotatingFileHandler(
+        log_filename,
+        when='midnight',
+        interval=1,
+        backupCount=30,
+        encoding='utf-8',
+    )
+    # Keep historical files in trading_YYYY-MM-DD.log format.
+    f_handler.suffix = "%Y-%m-%d"
     
     c_handler.setLevel(Config.LOG_LEVEL)
     f_handler.setLevel(Config.LOG_LEVEL)

@@ -1,7 +1,8 @@
 import logging
 import sys
 import time
-from logging.handlers import TimedRotatingFileHandler
+from datetime import datetime
+from pathlib import Path
 import requests
 from .config import Config
 
@@ -49,10 +50,78 @@ class TelegramErrorAlertHandler(logging.Handler):
             pass
 
 
+class DailyDateFileHandler(logging.Handler):
+    """
+    Writes to logs/trading_YYYY-MM-DD.log and switches automatically after midnight.
+    Keeps only the latest `backup_count` dated files.
+    """
+
+    def __init__(self, log_dir: str = "logs", prefix: str = "trading", backup_count: int = 30, encoding: str = "utf-8"):
+        super().__init__()
+        self.log_dir = Path(log_dir)
+        self.prefix = prefix
+        self.backup_count = max(1, int(backup_count))
+        self.encoding = encoding
+        self._current_date = None
+        self._file_handler = None
+        self.log_dir.mkdir(parents=True, exist_ok=True)
+        self._ensure_handler()
+
+    def _today_str(self) -> str:
+        return datetime.now().strftime("%Y-%m-%d")
+
+    def _log_path_for(self, date_str: str) -> Path:
+        return self.log_dir / f"{self.prefix}_{date_str}.log"
+
+    def _ensure_handler(self):
+        today = self._today_str()
+        if self._file_handler is not None and self._current_date == today:
+            return
+
+        if self._file_handler is not None:
+            self._file_handler.close()
+
+        self._current_date = today
+        self._file_handler = logging.FileHandler(self._log_path_for(today), encoding=self.encoding)
+        self._file_handler.setLevel(self.level)
+        if self.formatter:
+            self._file_handler.setFormatter(self.formatter)
+        self._cleanup_old_files()
+
+    def _cleanup_old_files(self):
+        pattern = f"{self.prefix}_*.log"
+        dated_logs = sorted(self.log_dir.glob(pattern), key=lambda p: p.stat().st_mtime)
+        excess = len(dated_logs) - self.backup_count
+        if excess > 0:
+            for old_file in dated_logs[:excess]:
+                try:
+                    old_file.unlink()
+                except OSError:
+                    pass
+
+    def emit(self, record: logging.LogRecord):
+        try:
+            self._ensure_handler()
+            self._file_handler.emit(record)
+        except Exception:
+            self.handleError(record)
+
+    def setFormatter(self, fmt):
+        super().setFormatter(fmt)
+        if self._file_handler:
+            self._file_handler.setFormatter(fmt)
+
+    def close(self):
+        if self._file_handler is not None:
+            self._file_handler.close()
+            self._file_handler = None
+        super().close()
+
+
 def setup_logger():
     """
     Industrial-standard dual-output logger setup.
-    Outputs to both the console and a daily-rotated persistent log file.
+    Outputs to both the console and a daily-dated persistent log file.
     """
     
     # Create a custom logger
@@ -70,23 +139,13 @@ def setup_logger():
     if not os.path.exists("logs"):
         os.makedirs("logs")
         
-    log_filename = "logs/trading.log"
-
     # Force stdout to handle UTF-8 if possible (Fix for Windows Unicode Errors)
     if hasattr(sys.stdout, 'reconfigure'):
         sys.stdout.reconfigure(encoding='utf-8')
     
     # Create handlers
     c_handler = logging.StreamHandler(sys.stdout)
-    f_handler = TimedRotatingFileHandler(
-        log_filename,
-        when='midnight',
-        interval=1,
-        backupCount=30,
-        encoding='utf-8',
-    )
-    # Keep historical files in trading_YYYY-MM-DD.log format.
-    f_handler.suffix = "%Y-%m-%d"
+    f_handler = DailyDateFileHandler(log_dir="logs", prefix="trading", backup_count=30, encoding="utf-8")
     
     c_handler.setLevel(Config.LOG_LEVEL)
     f_handler.setLevel(Config.LOG_LEVEL)

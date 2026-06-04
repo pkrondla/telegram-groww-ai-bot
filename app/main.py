@@ -6,7 +6,15 @@ from telethon.errors import AuthKeyDuplicatedError, PhoneNumberInvalidError
 from src.integrations.telegram.listener import BotListener
 from src.core.logger import logger
 from src.core.config import Config
-from app.bootstrap import runtime_dir
+from app.bootstrap import (
+    clear_restart_flag,
+    repo_root,
+    restart_flag_path,
+    restart_requested,
+    runtime_dir,
+    spawn_bot_process,
+    stop_flag_path,
+)
 
 
 def _session_file(path: str) -> str:
@@ -75,16 +83,17 @@ async def run_bot():
 
     bot = BotListener()
     _bot = bot
-    stop_file = runtime_dir() / "bot.stop"
+    stop_file = stop_flag_path()
     stop_watcher_task: asyncio.Task | None = None
 
-    # If a previous stop task left the flag behind, clear it so startup can proceed.
-    if stop_file.exists():
-        try:
-            stop_file.unlink()
-            logger.info(f"Removed stale stop flag at startup: {stop_file}")
-        except Exception as e:
-            logger.warning(f"Unable to remove stale stop flag ({stop_file}): {e}")
+    # If a previous stop/restart task left flags behind, clear them so startup can proceed.
+    for stale_flag in (stop_file, restart_flag_path()):
+        if stale_flag.exists():
+            try:
+                stale_flag.unlink()
+                logger.info(f"Removed stale runtime flag at startup: {stale_flag}")
+            except Exception as e:
+                logger.warning(f"Unable to remove stale runtime flag ({stale_flag}): {e}")
 
     loop = asyncio.get_running_loop()
     shutdown_lock = asyncio.Lock()
@@ -184,6 +193,20 @@ async def run_bot():
             )
         else:
             _save_session()
+        if restart_requested():
+            clear_restart_flag()
+            new_pid = spawn_bot_process()
+            if new_pid:
+                logger.info(
+                    "Bot restart spawned new process PID=%s (repo=%s).",
+                    new_pid,
+                    repo_root(),
+                )
+            else:
+                logger.error(
+                    "Bot restart requested but failed to spawn a new process. "
+                    "Start manually with scripts/start_bot_windows.ps1 or start_bot_linux.sh."
+                )
         logger.info("Bot Process Terminated.")
 
 

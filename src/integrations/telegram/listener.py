@@ -10,6 +10,7 @@ from src.integrations.ai.assistant import Assistant
 from src.trading.execution.multi_account_manager import MultiAccountExecutionManager
 from src.integrations.telegram.notifier import Notifier
 from src.trading.reference.symbol_manager import symbol_manager
+from app.bootstrap import request_graceful_restart
 
 
 # Admin override commands (sent by admin to their own chat or bot)
@@ -17,6 +18,8 @@ _OVERRIDE_COMMANDS = {
     "PAUSE":    "pause",
     "RESUME":   "resume",
     "KILL":     "kill",
+    "RESTART":  "restart",
+    "REBOOT":   "restart",
     "STATUS":   "status",
     "TRADES":   "trades",
     "ACTIVE TRADES": "trades",
@@ -501,6 +504,12 @@ class BotListener:
         elif command == "kill":
             self.multi_account.kill_all()
             await self.notifier.send_status("KILLED", "Kill switch activated. Restart bot to reset.")
+        elif command == "restart":
+            await self.notifier.send(
+                "Restart requested. Shutting down gracefully and starting a new bot process..."
+            )
+            request_graceful_restart()
+            logger.info("[STAGE 1] Admin restart requested — graceful shutdown scheduled.")
         elif command == "status":
             lines = [f"State: {self.multi_account.status_summary()}"]
             for account_id, rt in self.multi_account.runtimes().items():
@@ -784,6 +793,7 @@ class BotListener:
                 "- PAUSE — ignore all incoming signals\n"
                 "- RESUME — resume signal processing\n"
                 "- KILL — emergency stop (restart required)\n"
+                "- RESTART / REBOOT — graceful shutdown and start a fresh bot process\n"
                 "- DRYRUN ON — no live entry orders\n"
                 "- DRYRUN OFF — live entry orders enabled\n\n"
                 "Single-trade management (no reply context needed)\n"

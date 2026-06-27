@@ -464,6 +464,26 @@ class BotListener:
             return "volsl_drop"
         if t in ("VOLSL REARM", "VOL_SL REARM", "VOL SL REARM"):
             return "volsl_rearm"
+        if t in (
+            "INVESTMENT",
+            "CAPITAL",
+            "ACCOUNT CAPITAL",
+            "INVESTMENT STATUS",
+            "CAPITAL STATUS",
+        ):
+            return "investment_status"
+        m_invest_all = re.fullmatch(
+            r"(?:INVESTMENT|CAPITAL|ACCOUNT CAPITAL)\s+(\d+(?:\.\d+)?)",
+            t,
+        )
+        if m_invest_all:
+            return f"investment_set_all:{m_invest_all.group(1)}"
+        m_invest_one = re.fullmatch(
+            r"(?:INVESTMENT|CAPITAL|ACCOUNT CAPITAL)\s+([A-Za-z0-9_-]+)\s+(\d+(?:\.\d+)?)",
+            t,
+        )
+        if m_invest_one:
+            return f"investment_set:{m_invest_one.group(1)}:{m_invest_one.group(2)}"
         for cmd in _OVERRIDE_COMMANDS:
             if t == cmd:
                 return _OVERRIDE_COMMANDS[cmd]
@@ -522,6 +542,47 @@ class BotListener:
                 )
             detail = "\n".join(lines)
             await self.notifier.send_status(self.multi_account.status_summary(), detail)
+        elif command == "investment_status":
+            await self.notifier.send(self.multi_account.investment_summary())
+        elif command.startswith("investment_set_all:"):
+            try:
+                amount = float(command.split(":", 1)[1])
+            except ValueError:
+                await self.notifier.send("Invalid investment amount.")
+                return
+            if amount <= 0:
+                await self.notifier.send("Investment amount must be greater than zero.")
+                return
+            try:
+                msg = self.multi_account.update_investment(amount)
+            except ValueError as e:
+                await self.notifier.send(f"Investment update failed: {e}")
+                return
+            await self.notifier.send(msg)
+            logger.info(f"[STAGE 1] Admin investment updated for all accounts: INR {amount:,.0f}")
+        elif command.startswith("investment_set:"):
+            parts = command.split(":", 2)
+            if len(parts) < 3:
+                await self.notifier.send("Invalid investment command format.")
+                return
+            account_id = parts[1].strip()
+            try:
+                amount = float(parts[2])
+            except ValueError:
+                await self.notifier.send("Invalid investment amount.")
+                return
+            if amount <= 0:
+                await self.notifier.send("Investment amount must be greater than zero.")
+                return
+            try:
+                msg = self.multi_account.update_investment(amount, account_id=account_id)
+            except ValueError as e:
+                await self.notifier.send(f"Investment update failed: {e}")
+                return
+            await self.notifier.send(msg)
+            logger.info(
+                f"[STAGE 1] Admin investment updated for [{account_id}]: INR {amount:,.0f}"
+            )
         elif command == "sizing_status":
             index_mode = str(Config.INDEX_POSITION_SIZING_MODE or "fixed").strip().lower()
             stock_mode = str(Config.STOCK_POSITION_SIZING_MODE or "fixed").strip().lower()
@@ -786,6 +847,9 @@ class BotListener:
                 "- PNL DIFF / BROKER DIFF — compare local book + leg_exits vs broker positions (today)\n"
                 "- PNL DIFF WEEK / PNL DIFF MONTH — same diff for week or month leg_exits range\n"
                 "- CLEAR PENDING — clear pending entry queue\n"
+                "- INVESTMENT / CAPITAL — show per-account capital (account_capital_inr)\n"
+                "- INVESTMENT <AMOUNT> — set capital for all accounts (updates .env when present)\n"
+                "- INVESTMENT <ACCOUNT_ID> <AMOUNT> — set capital for one account\n"
                 "- SIZING — show current position sizing modes\n"
                 "- SIZING INDEX FIXED|RISK — set index sizing mode\n"
                 "- SIZING STOCK FIXED|RISK — set stock sizing mode\n"

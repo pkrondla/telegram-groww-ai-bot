@@ -6,6 +6,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from src.trading.execution.accounts import AccountConfig
 from src.core.config import Config
+from src.core import env_file
 from src.persistence.db import db
 from src.core.logger import logger
 from src.core.metrics import metrics
@@ -73,6 +74,60 @@ class MultiAccountExecutionManager:
         if "PAUSED" in statuses:
             return "PAUSED"
         return "ACTIVE"
+
+    def investment_summary(self) -> str:
+        lines = ["Account investment (account_capital_inr)"]
+        for account_id, rt in sorted(self._runtimes.items()):
+            cap = float(rt.trader.account_capital_inr or 0.0)
+            per_trade = cap * float(Config.RISK_PCT_PER_TRADE)
+            portfolio = cap * float(Config.MAX_TOTAL_OPEN_RISK_PCT)
+            lines.append(
+                f"[{account_id}] {rt.config.display_name}\n"
+                f"  capital: INR {cap:,.0f}\n"
+                f"  per-trade budget: INR {per_trade:,.0f} "
+                f"({float(Config.RISK_PCT_PER_TRADE):.2%})\n"
+                f"  portfolio budget: INR {portfolio:,.0f} "
+                f"({float(Config.MAX_TOTAL_OPEN_RISK_PCT):.2%})"
+            )
+        lines.append(
+            "\nUpdate with INVESTMENT <AMOUNT> (all accounts) or "
+            "INVESTMENT <ACCOUNT_ID> <AMOUNT>."
+        )
+        return "\n\n".join(lines)
+
+    def update_investment(
+        self,
+        capital_inr: float,
+        account_id: str | None = None,
+    ) -> str:
+        new_json, changed_ids, env_file_written = env_file.persist_account_capital(
+            Config.GROWW_ACCOUNTS_JSON,
+            capital_inr,
+            account_id,
+        )
+        Config.GROWW_ACCOUNTS_JSON = new_json
+        cap = max(0.0, float(capital_inr))
+        targets = {aid.lower() for aid in changed_ids}
+        for aid, rt in self._runtimes.items():
+            if aid.lower() in targets:
+                rt.config.account_capital_inr = cap
+                rt.trader.account_capital_inr = cap
+
+        scope = account_id or "all accounts"
+        persist_note = (
+            f"Saved to {env_file.dotenv_path()}."
+            if env_file_written
+            else f"No .env file at {env_file.dotenv_path()} — applied for this process only."
+        )
+        changed_text = ", ".join(changed_ids)
+        return (
+            "Investment updated\n"
+            f"Scope: {scope}\n"
+            f"New capital: INR {cap:,.0f}\n"
+            f"Accounts: {changed_text}\n"
+            f"{persist_note}\n"
+            "Applies immediately to risk-based sizing for new entries."
+        )
 
     def process_signal(self, signal, *, signal_id: str = "") -> dict[str, str]:
         """

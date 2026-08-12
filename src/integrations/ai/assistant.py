@@ -662,6 +662,11 @@ class Assistant:
         """
         Extract explicit multi-target ladder from signal text.
         Examples: "TARGETS: 68, 88" or "TGT : 18/24/36+".
+
+        Skips lines that are target-hit announcements like "TARGET 2 : 374 HITS"
+        to avoid treating the ordinal index (1, 2) or a trailing hit-count as a
+        price.  A line is treated as a hit announcement when it contains a HIT/HITS
+        word after the number cluster.
         """
         raw = str(text or "")
         if not raw.strip():
@@ -672,9 +677,16 @@ class Assistant:
             m = re.search(r"\b(?:TARGETS?|TGT)\b\s*[:\-]?\s*(.+)$", line, flags=re.IGNORECASE)
             if not m:
                 continue
+            rest = m.group(1)
+            # Skip lines that are hit-announcements, e.g. "TARGET 2 : 374 HITS".
+            # These contain a HIT / HITS token and are informational, not a price
+            # ladder directive.  Accepting them would parse ordinal indices (1, 2)
+            # as target prices and corrupt UPDATE_TGT / BUY ladders.
+            if re.search(r"\bHIT(?:S)?\b", rest, re.IGNORECASE):
+                continue
             # Ignore "2X/3X" style RR multipliers often written after targets, e.g.
             # "TARGETS : 26, 48 [2X,3X]".
-            for num in re.findall(r"(\d+(?:\.\d+)?)(?!\s*[xX]\b)\+?", m.group(1)):
+            for num in re.findall(r"(\d+(?:\.\d+)?)(?!\s*[xX]\b)\+?", rest):
                 try:
                     value = float(num)
                 except ValueError:
@@ -1392,7 +1404,11 @@ Rules:
         # Target-update detection: must be a reply and tail must match a known phrase.
         # Runs BEFORE exit/trail detection to prevent the LLM ignoring it as commentary.
         if has_context and tail.strip():
-            if self._has_target_hit_phrase(tail) and not self._detect_forced_intent(tail, text):
+            # Check for forced intent on the TAIL only (not full text which includes the
+            # parent context).  A trail phrase in the parent (e.g. "TSL TO 202.5") must
+            # not suppress RECONCILE when the child message itself is clearly a target-hit
+            # announcement like "TARGET 2 : 374 HITS".
+            if self._has_target_hit_phrase(tail) and not self._detect_forced_intent(tail, tail):
                 logger.info("[STAGE 2] Deterministic intent: RECONCILE (target hit without exit/trail).")
                 data = self._llm_parse_forced(
                     text,
@@ -1951,9 +1967,19 @@ Return is_trade: false for:
                 signal_targets = self._extract_signal_targets(ladder_source)
                 logger.info(f"[STAGE 2] Parsed ladder targets from message: {signal_targets}")
                 if len(signal_targets) >= 2:
-                    data["targets"] = signal_targets[:3]
-                    data["target"] = float(signal_targets[0])
-                    logger.info(f"[STAGE 2] Applied multi-target ladder: {data['targets']}")
+                    # Sanity-check: for UPDATE_TGT the first extracted value should be
+                    # a plausible option/futures price (> 5).  Ordinal indices like 1
+                    # or 2 that survived the HIT-line filter would produce nonsense.
+                    # Preserve the LLM target in that case and drop the bad ladder.
+                    if str(data.get("action") or "").upper() == "UPDATE_TGT" and float(signal_targets[0]) <= 5:
+                        logger.info(
+                            f"[STAGE 2] Ladder first value {signal_targets[0]} is implausibly small "
+                            f"for UPDATE_TGT — keeping LLM target ({data.get('target')}), skipping ladder."
+                        )
+                    else:
+                        data["targets"] = signal_targets[:3]
+                        data["target"] = float(signal_targets[0])
+                        logger.info(f"[STAGE 2] Applied multi-target ladder: {data['targets']}")
 
             logger.info(f"[STAGE 2] Signal ready: {data['action']} {data['stock']} "
                         f"strike={data.get('strike')} {data.get('option_type')} "

@@ -1,6 +1,6 @@
 """
-Unit tests for Assistant._extract_signal_targets and
-Assistant._split_context_and_tail.
+Unit tests for Assistant._extract_signal_targets,
+Assistant._split_context_and_tail, and related target / hit logic.
 """
 import sys
 import os
@@ -76,6 +76,49 @@ class TestSplitContextAndTail:
         assert tail == "child only"
 
 
+class TestExtractSignalTargetsHitLines:
+    """Regression tests: hit-announcement lines must not corrupt target ladders."""
+
+    def test_hit_line_with_price_ignored(self):
+        # "TARGET 2 : 374 HITS" — the 2 and 374 must not become ladder prices.
+        result = Assistant._extract_signal_targets("TARGET 2 : 374 HITS")
+        assert result == []
+
+    def test_hit_line_target1_ignored(self):
+        result = Assistant._extract_signal_targets("TARGET 1 👍 : 255 HITS")
+        assert result == []
+
+    def test_multiline_hit_lines_produce_no_ladder(self):
+        # Mirrors the exact channel messages that caused the bug.
+        child = "TARGET 2 : 374 HITS ⭐️⭐️⭐️⭐️\n\n#SENSEX 77900 PE\n200 TO 374 🔥🔥🔥🔥 | +174 PTS"
+        parent = (
+            "TARGET 1 👍 : 255 HITS ✅ ✨\n\n"
+            "TSL TO 202.5 COST\n"
+            "HOLD FOR 402\n\n"
+            "#SENSEX 77900 PE 13TH AUG\n"
+            "202.5 TO 255 | +52.5 PTS [+25.9%] 💰"
+        )
+        combined = "\n".join([child, parent])
+        result = Assistant._extract_signal_targets(combined)
+        # Neither "1", "2", "255", nor "374" should appear — all are on HIT lines.
+        assert result == []
+
+    def test_real_ladder_line_still_parsed(self):
+        # A genuine ladder directive must still work after the hit-line fix.
+        result = Assistant._extract_signal_targets("TGT : 255/374/402")
+        assert result == [255.0, 374.0, 402.0]
+
+    def test_hold_for_line_not_captured(self):
+        # "HOLD FOR 402" is not a TGT/TARGET line — should return nothing.
+        result = Assistant._extract_signal_targets("HOLD FOR 402")
+        assert result == []
+
+    def test_hits_keyword_anywhere_on_line_suppresses(self):
+        # HIT/HITS anywhere after TGT/TARGET on the same line → skip.
+        result = Assistant._extract_signal_targets("TARGETS 6/11/16 HITS")
+        assert result == []
+
+
 class TestUpdateTargetDetection:
     def test_detect_update_tgt_accepts_plain_target_price(self):
         assert Assistant._detect_update_tgt("TARGET 52") == 52.0
@@ -83,3 +126,23 @@ class TestUpdateTargetDetection:
     def test_detect_update_tgt_ignores_target_hit_progression(self):
         msg = "TARGET 1 HITS | TSL TO 21.5 | HOLD FOR 52"
         assert Assistant._detect_update_tgt(msg) is None
+
+
+class TestHasTargetHitPhrase:
+    """RECONCILE gate: hit phrases must be detected even with prices embedded."""
+
+    def test_target_2_hits_with_price(self):
+        assert Assistant._has_target_hit_phrase("TARGET 2 : 374 HITS ⭐️") is True
+
+    def test_target_1_hits_with_price(self):
+        assert Assistant._has_target_hit_phrase("TARGET 1 👍 : 255 HITS ✅") is True
+
+    def test_t1_hit_shorthand(self):
+        assert Assistant._has_target_hit_phrase("T1 HIT") is True
+
+    def test_plain_target_price_not_hit(self):
+        # "TARGET 52" without HIT/HITS is not a hit announcement.
+        assert Assistant._has_target_hit_phrase("TARGET 52") is False
+
+    def test_hold_for_not_hit(self):
+        assert Assistant._has_target_hit_phrase("HOLD FOR 402") is False

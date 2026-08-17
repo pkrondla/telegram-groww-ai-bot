@@ -144,7 +144,7 @@
         },
         {
           "name": "STOCK_POSITION_SIZING_MODE",
-          "value": "risk"
+          "value": "fixed"
         },
         {
           "name": "RISK_PCT_PER_TRADE",

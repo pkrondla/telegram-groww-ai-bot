@@ -14,16 +14,19 @@ from app.bootstrap import (
     repo_root,
     restart_flag_path,
     restart_requested,
+    runtime_dir,
     spawn_bot_process,
     stop_flag_path,
 )
-from app.process_lock import acquire_singleton_lock
+from app.process_lock import acquire_singleton_lock, terminate_other_bot_processes
 
 if TYPE_CHECKING:
     from src.integrations.telegram.listener import BotListener
 
 
 def _session_file(path: str) -> str:
+    if str(path).endswith(".session"):
+        return path
     return path + ".session"
 
 
@@ -31,24 +34,37 @@ def _is_session_locked_error(exc: BaseException) -> bool:
     return "database is locked" in str(exc).lower()
 
 
-def _restore_session() -> None:
-    """Copy session file from persistent storage (Azure Files) to local path on startup.
+_durable_session_path: str | None = None
 
-    Telethon's SQLite session uses its own sqlite3 connection which has no
-    retry logic.  On Azure Files SMB that connection fails with 'database is
-    locked'.  Keeping the active session file on local /tmp storage avoids the
-    SMB locking entirely; this function seeds /tmp from the durable copy on
-    container start.
-    """
+
+def _remove_sqlite_sidecars(session_file: str) -> None:
+    for suffix in ("-journal", "-wal", "-shm"):
+        sidecar = session_file + suffix
+        try:
+            os.remove(sidecar)
+        except FileNotFoundError:
+            pass
+        except OSError as e:
+            logger.warning("Could not remove SQLite sidecar %s: %s", sidecar, e)
+
+
+def _copy_session_file(src: str, dst: str) -> bool:
+    if not os.path.exists(src):
+        return False
+    os.makedirs(os.path.dirname(os.path.abspath(dst)), exist_ok=True)
+    shutil.copy2(src, dst)
+    return True
+
+
+def _restore_session() -> None:
+    """Seed the durable session from persistent storage when configured."""
     persistent = Config.SESSION_PERSISTENT_PATH
-    local = Config.SESSION_PATH
+    local = _durable_session_path or Config.SESSION_PATH
     if not persistent or persistent == local:
         return
     src = _session_file(persistent)
     dst = _session_file(local)
-    os.makedirs(os.path.dirname(os.path.abspath(dst)), exist_ok=True)
-    if os.path.exists(src):
-        shutil.copy2(src, dst)
+    if _copy_session_file(src, dst):
         logger.info("Session restored from persistent storage: %s → %s", src, dst)
     else:
         logger.warning(
@@ -56,17 +72,60 @@ def _restore_session() -> None:
         )
 
 
+def _prepare_working_session() -> None:
+    """Copy the durable Telethon session to a private runtime file.
+
+    Telethon can keep ``data/session_name.session`` locked on Windows long after
+    a crashed process. Connecting against ``runtime/telegram.session`` avoids
+    that leftover handle, as long as no other bot is still using the same
+    Telegram auth key.
+    """
+    global _durable_session_path
+    _durable_session_path = Config.SESSION_PATH
+    _restore_session()
+    work = str(runtime_dir() / "telegram")
+    src = _session_file(_durable_session_path)
+    dst = _session_file(work)
+    try:
+        _remove_sqlite_sidecars(dst)
+        if os.path.exists(dst):
+            os.remove(dst)
+        if _copy_session_file(src, dst):
+            logger.info("Telegram session working copy: %s → %s", src, dst)
+            Config.SESSION_PATH = work
+            return
+        logger.warning(
+            "No durable Telegram session at %s — a new login may be required.", src
+        )
+        Config.SESSION_PATH = work
+    except OSError as e:
+        logger.warning(
+            "Could not create working session copy (%s). Using durable session %s.",
+            e,
+            src,
+        )
+        Config.SESSION_PATH = _durable_session_path
+
+
 def _save_session() -> None:
-    """Copy local session file back to persistent storage (Azure Files) on shutdown."""
+    """Copy the working session back to durable / persistent storage."""
+    work = _session_file(Config.SESSION_PATH)
+    durable_base = _durable_session_path or Config.SESSION_PATH
+    durable = _session_file(durable_base)
+    if os.path.exists(work) and os.path.abspath(work) != os.path.abspath(durable):
+        try:
+            if _copy_session_file(work, durable):
+                logger.info("Session saved to durable storage: %s → %s", work, durable)
+        except Exception as e:
+            logger.warning("Failed to save working session to durable path: %s", e)
     persistent = Config.SESSION_PERSISTENT_PATH
-    local = Config.SESSION_PATH
-    if not persistent or persistent == local:
+    if not persistent or persistent == durable_base:
         return
-    src = _session_file(local)
     dst = _session_file(persistent)
+    src = durable if os.path.exists(durable) else work
     if os.path.exists(src):
         try:
-            shutil.copy2(src, dst)
+            _copy_session_file(src, dst)
             logger.info("Session saved to persistent storage: %s → %s", src, dst)
         except Exception as e:
             logger.warning("Failed to save session to persistent storage: %s", e)
@@ -79,13 +138,14 @@ async def run_bot():
     Main entry point for the Industrial-Standard AI Trading Bot.
     """
     acquire_singleton_lock()
+    terminate_other_bot_processes(wait_sec=8.0)
+    _prepare_working_session()
     # Import after the process lock so Database() / Telethon session are not
     # opened while another instance is still shutting down.
     from src.integrations.telegram.listener import BotListener
 
     global _bot
     logger.info("Initializing Industrial-Standard Trading Bot...")
-    _restore_session()
 
     try:
         accounts = Config.groww_accounts()
@@ -198,8 +258,10 @@ async def run_bot():
         if _is_session_locked_error(e):
             logger.error(
                 "Telegram session file is still locked after retries: %s. "
-                "Stop every leftover bot process using this session, then start "
-                "once. Waiting 20s before exit to avoid a restart storm.",
+                "A leftover python process is still using this Telegram login. "
+                "On the server run scripts/stop_bot_windows.ps1, then in Task "
+                "Manager end every python.exe whose command line contains app.main, "
+                "wait 10 seconds, and start once.",
                 _session_file(Config.SESSION_PATH),
                 exc_info=True,
             )

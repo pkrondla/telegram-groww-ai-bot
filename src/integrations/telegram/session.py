@@ -1,4 +1,4 @@
-"""Telethon SQLite session with busy_timeout.
+"""Telethon SQLite session with busy_timeout and autocommit.
 
 Stock Telethon ``SQLiteSession`` connects with the default sqlite timeout
 (5s) and no ``PRAGMA busy_timeout``. A brief overlap with a shutting-down
@@ -20,10 +20,17 @@ class BusyTimeoutSQLiteSession(SQLiteSession):
         conn = getattr(self, "_conn", None)
         if conn is None:
             timeout = getattr(self, "_sqlite_timeout_sec", 30.0)
+            # isolation_level=None = autocommit so a failed write cannot leave
+            # this connection holding a SQLite reservation across retries.
             self._conn = sqlite3.connect(
                 self.filename,
                 timeout=timeout,
                 check_same_thread=False,
+                isolation_level=None,
             )
             self._conn.execute(f"PRAGMA busy_timeout={int(timeout * 1000)}")
+            try:
+                self._conn.execute("PRAGMA journal_mode=WAL")
+            except sqlite3.Error:
+                pass
         return self._conn.cursor()

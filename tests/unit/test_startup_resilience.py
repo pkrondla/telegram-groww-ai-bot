@@ -47,7 +47,7 @@ class _FakeGrowwAPI:
 _groww.GrowwAPI = _FakeGrowwAPI
 sys.modules["growwapi"] = _groww
 
-from app.process_lock import ProcessLock  # noqa: E402
+from app.process_lock import ProcessLock, _is_bot_command_line  # noqa: E402
 from src.integrations.telegram.listener import BotListener  # noqa: E402
 from src.integrations.telegram.session import BusyTimeoutSQLiteSession  # noqa: E402
 from src.trading.execution.trader import Trader  # noqa: E402
@@ -66,6 +66,12 @@ class TestProcessLock(unittest.TestCase):
                 first.release()
             self.assertTrue(second.acquire(timeout_sec=1))
             second.release()
+
+    def test_bot_command_line_detection(self):
+        self.assertTrue(_is_bot_command_line(r"python.exe -m app.main"))
+        self.assertTrue(_is_bot_command_line(r"C:\Python\python.exe C:\groww-bot\app\main.py"))
+        self.assertFalse(_is_bot_command_line(r"python.exe -m pytest tests/unit/test_startup_resilience.py"))
+        self.assertFalse(_is_bot_command_line(r"python.exe scripts\other.py"))
 
 
 class TestBusyTimeoutSession(unittest.TestCase):
@@ -140,23 +146,36 @@ class TestTelegramStartRetry(unittest.TestCase):
     def test_retries_then_succeeds_on_session_lock(self):
         listener = BotListener.__new__(BotListener)
         listener.session_name = "session_test"
-        client = MagicMock()
-        client.start = AsyncMock(
-            side_effect=[
-                sqlite3.OperationalError("database is locked"),
-                None,
-            ]
-        )
-        client.disconnect = AsyncMock()
-        listener.client = client
+        clients: list[MagicMock] = []
+
+        def make():
+            client = MagicMock()
+            if not clients:
+                client.start = AsyncMock(
+                    side_effect=sqlite3.OperationalError("database is locked")
+                )
+            else:
+                client.start = AsyncMock(return_value=None)
+            client.disconnect = AsyncMock()
+            client.session = MagicMock()
+            clients.append(client)
+            return client
+
+        listener._make_telegram_client = make
+        listener.client = None
 
         async def _run():
-            with patch("src.integrations.telegram.listener.asyncio.sleep", new_callable=AsyncMock):
+            with patch(
+                "src.integrations.telegram.listener.asyncio.sleep",
+                new_callable=AsyncMock,
+            ), patch("app.process_lock.terminate_other_bot_processes", return_value=[]):
                 await listener._start_telegram_client()
 
         asyncio.run(_run())
-        self.assertEqual(client.start.await_count, 2)
-        client.disconnect.assert_awaited()
+        self.assertEqual(len(clients), 2)
+        self.assertEqual(clients[0].start.await_count, 1)
+        self.assertEqual(clients[1].start.await_count, 1)
+        clients[0].session.close.assert_called()
 
 
 if __name__ == "__main__":

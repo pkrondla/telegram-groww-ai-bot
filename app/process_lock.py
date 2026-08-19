@@ -11,6 +11,9 @@ kept in ``_HELD_LOCK``). The OS releases it on crash or kill.
 from __future__ import annotations
 
 import os
+import re
+import signal
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -23,6 +26,139 @@ _HELD_LOCK: "ProcessLock | None" = None
 
 def lock_file_path() -> Path:
     return runtime_dir() / "bot.lock"
+
+
+_BOT_CMDLINE_RE = re.compile(
+    r"app\.main|app[/\\]main\.py",
+    re.IGNORECASE,
+)
+
+
+def _is_bot_command_line(command_line: str | None) -> bool:
+    text = str(command_line or "")
+    if not text:
+        return False
+    if "pytest" in text.lower():
+        return False
+    return bool(_BOT_CMDLINE_RE.search(text))
+
+
+def list_other_bot_pids() -> list[int]:
+    """Return PIDs of other Python processes that look like this bot."""
+    my_pid = os.getpid()
+    pids: list[int] = []
+    if sys.platform == "win32":
+        ps = (
+            "Get-CimInstance Win32_Process | "
+            "Where-Object { $_.CommandLine -and $_.Name -match '^python(w)?\\.exe$' } | "
+            "ForEach-Object { '{0}|{1}' -f $_.ProcessId, $_.CommandLine }"
+        )
+        try:
+            result = subprocess.run(
+                [
+                    "powershell",
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-Command",
+                    ps,
+                ],
+                capture_output=True,
+                text=True,
+                timeout=20,
+            )
+        except (OSError, subprocess.TimeoutExpired) as e:
+            logger.warning("Could not list leftover bot processes: %s", e)
+            return []
+        for line in result.stdout.splitlines():
+            line = line.strip()
+            if "|" not in line:
+                continue
+            pid_text, cmd = line.split("|", 1)
+            if not pid_text.isdigit():
+                continue
+            pid = int(pid_text)
+            if pid == my_pid:
+                continue
+            if _is_bot_command_line(cmd):
+                pids.append(pid)
+        return sorted(set(pids))
+
+    try:
+        result = subprocess.run(
+            ["pgrep", "-af", "python"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired) as e:
+        logger.warning("Could not list leftover bot processes: %s", e)
+        return []
+    for line in result.stdout.splitlines():
+        parts = line.strip().split(None, 1)
+        if len(parts) < 2 or not parts[0].isdigit():
+            continue
+        pid = int(parts[0])
+        if pid == my_pid:
+            continue
+        if _is_bot_command_line(parts[1]):
+            pids.append(pid)
+    return sorted(set(pids))
+
+
+def _kill_pid(pid: int, *, force: bool) -> None:
+    if sys.platform == "win32":
+        args = ["taskkill", "/PID", str(pid)]
+        if force:
+            args.insert(1, "/F")
+        subprocess.run(args, capture_output=True, text=True, timeout=15)
+        return
+    sig = signal.SIGKILL if force else signal.SIGTERM
+    try:
+        os.kill(pid, sig)
+    except OSError:
+        pass
+
+
+def terminate_other_bot_processes(*, wait_sec: float = 20.0) -> list[int]:
+    """Stop leftover ``app.main`` processes so they release the Telegram session.
+
+    Returns the PIDs that were targeted. Safe to call when none exist.
+    """
+    pids = list_other_bot_pids()
+    if not pids:
+        return []
+    logger.warning(
+        "Found leftover bot PID(s) %s still running. Stopping them so "
+        "data/session_name.session can be opened.",
+        pids,
+    )
+    for pid in pids:
+        try:
+            _kill_pid(pid, force=False)
+        except Exception as e:
+            logger.warning("Could not signal leftover PID %s: %s", pid, e)
+    deadline = time.monotonic() + max(1.0, float(wait_sec))
+    while time.monotonic() < deadline:
+        alive = list_other_bot_pids()
+        if not alive:
+            logger.info("Leftover bot processes exited.")
+            return pids
+        time.sleep(0.5)
+    still = list_other_bot_pids()
+    for pid in still:
+        logger.warning("Force-killing leftover bot PID %s.", pid)
+        try:
+            _kill_pid(pid, force=True)
+        except Exception as e:
+            logger.warning("Could not force-kill leftover PID %s: %s", pid, e)
+    time.sleep(1.0)
+    leftover = list_other_bot_pids()
+    if leftover:
+        logger.error(
+            "Still running after force-kill: %s. Telegram session may stay locked.",
+            leftover,
+        )
+    return pids
 
 
 class ProcessLock:
@@ -125,6 +261,7 @@ def acquire_singleton_lock(*, timeout_sec: float | None = None) -> None:
     path = lock_file_path()
     if timeout_sec is None:
         timeout_sec = float(os.getenv("BOT_SINGLETON_LOCK_WAIT_SEC", "120"))
+    terminate_other_bot_processes()
     lock = ProcessLock(path)
     logger.info(
         "Acquiring exclusive bot lock at %s (wait up to %.0fs)...",
@@ -132,13 +269,21 @@ def acquire_singleton_lock(*, timeout_sec: float | None = None) -> None:
         timeout_sec,
     )
     if not lock.acquire(timeout_sec=timeout_sec):
-        logger.error(
-            "Another bot instance already holds %s. Stop every leftover python "
-            "process running app.main (scripts/stop_bot_windows.ps1 or "
-            "stop_bot_linux.sh), then start once. Exiting without calling "
-            "Groww or Telegram so we do not worsen rate limits or session locks.",
+        lock.release()
+        logger.warning(
+            "Lock wait timed out for %s. Stopping leftover bot processes and retrying.",
             path,
         )
-        sys.exit(0)
+        terminate_other_bot_processes()
+        lock = ProcessLock(path)
+        if not lock.acquire(timeout_sec=min(30.0, timeout_sec)):
+            logger.error(
+                "Another bot instance already holds %s. Stop every leftover python "
+                "process running app.main (scripts/stop_bot_windows.ps1 or "
+                "stop_bot_linux.sh), then start once. Exiting without calling "
+                "Groww or Telegram so we do not worsen rate limits or session locks.",
+                path,
+            )
+            sys.exit(0)
     _HELD_LOCK = lock
     logger.info("Acquired exclusive bot lock (PID %s).", os.getpid())

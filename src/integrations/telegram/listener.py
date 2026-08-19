@@ -82,16 +82,9 @@ class BotListener:
         self.api_hash = Config.API_HASH
         self.session_name = Config.SESSION_PATH
         self.target_chat_id = Config.TARGET_CHAT_ID
-
-        self.client = TelegramClient(
-            BusyTimeoutSQLiteSession(self.session_name, timeout_sec=30.0),
-            self.api_id,
-            self.api_hash,
-            connection_retries=-1,   # retry forever on disconnect (covers WinError 121)
-            retry_delay=5,           # wait 5s between reconnect attempts
-            auto_reconnect=True,     # re-establish MTProto session automatically
-            flood_sleep_threshold=60,
-        )
+        # Open the SQLite session only when connecting. Holding it open during
+        # Groww init is a long-lived lock that collides with leftover processes.
+        self.client = None
         self.assistant = Assistant()
         self.multi_account = MultiAccountExecutionManager(Config.groww_accounts())
         self.notifier = Notifier()
@@ -158,7 +151,7 @@ class BotListener:
                         except Exception as notify_err:
                             logger.error(f"Pending notify error: {notify_err}")
                             try:
-                                if not self.client.is_connected():
+                                if self.client is not None and not self.client.is_connected():
                                     await self.client.connect()
                             except Exception as reconnect_err:
                                 logger.error(f"Pending watcher reconnect error: {reconnect_err}")
@@ -1088,32 +1081,59 @@ class BotListener:
     # Startup
     # ------------------------------------------------------------------
 
+    def _make_telegram_client(self) -> TelegramClient:
+        return TelegramClient(
+            BusyTimeoutSQLiteSession(self.session_name, timeout_sec=15.0),
+            self.api_id,
+            self.api_hash,
+            connection_retries=-1,   # retry forever on disconnect (covers WinError 121)
+            retry_delay=5,           # wait 5s between reconnect attempts
+            auto_reconnect=True,     # re-establish MTProto session automatically
+            flood_sleep_threshold=60,
+        )
+
+    async def _close_telegram_client(self) -> None:
+        client = self.client
+        self.client = None
+        if client is None:
+            return
+        try:
+            await client.disconnect()
+        except Exception:
+            pass
+        try:
+            client.session.close()
+        except Exception:
+            pass
+
     async def _start_telegram_client(self):
-        """Connect Telethon, retrying if the session SQLite file is briefly locked."""
+        """Connect Telethon, rebuilding the SQLite session if it is locked."""
+        from app.process_lock import terminate_other_bot_processes
+
         last_err: BaseException | None = None
-        attempts = 8
+        attempts = 6
         for attempt in range(1, attempts + 1):
             try:
+                if self.client is None:
+                    self.client = self._make_telegram_client()
                 await self.client.start(phone=Config.PHONE or _telegram_login_prompt)
                 return
             except sqlite3.OperationalError as e:
                 if "locked" not in str(e).lower():
                     raise
                 last_err = e
-                wait = min(30, 2 * attempt)
+                wait = min(10, 2 * attempt)
                 logger.warning(
-                    "Telegram session SQLite is locked (attempt %d/%d). "
-                    "Another bot instance is likely using %s.session. "
-                    "Disconnecting and retrying in %ds.",
+                    "Telegram session SQLite is locked (attempt %d/%d) at %s.session. "
+                    "Closing our connection, stopping leftover bot processes, "
+                    "retrying in %ds.",
                     attempt,
                     attempts,
                     self.session_name,
                     wait,
                 )
-                try:
-                    await self.client.disconnect()
-                except Exception:
-                    pass
+                await self._close_telegram_client()
+                terminate_other_bot_processes(wait_sec=8.0)
                 await asyncio.sleep(wait)
         raise last_err
 
@@ -1180,7 +1200,12 @@ class BotListener:
         except Exception as e:
             logger.warning(f"Failed to send shutdown status notification: {e}")
         try:
-            await self.client.disconnect()
+            if self.client is not None:
+                await self.client.disconnect()
+                try:
+                    self.client.session.close()
+                except Exception:
+                    pass
         except Exception as e:
             logger.warning(f"Disconnect error during shutdown: {e}")
         logger.info("Bot stopped cleanly.")

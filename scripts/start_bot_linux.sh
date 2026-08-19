@@ -10,6 +10,13 @@ LOG_FILE="$RUNTIME_DIR/bot.log"
 mkdir -p "$RUNTIME_DIR"
 rm -f "$STOP_FILE"
 
+existing_pids="$(pgrep -f '[p]ython.*-m app\.main' || true)"
+if [[ -n "${existing_pids}" ]]; then
+  echo "Bot is already running with PID(s) $(echo "${existing_pids}" | tr '\n' ' ')."
+  echo "Stop it first with scripts/stop_bot_linux.sh."
+  exit 0
+fi
+
 if [[ -f "$PID_FILE" ]]; then
   EXISTING_PID="$(tr -d '[:space:]' < "$PID_FILE")"
   if [[ -n "${EXISTING_PID}" ]] && kill -0 "$EXISTING_PID" 2>/dev/null; then

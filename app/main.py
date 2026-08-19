@@ -1,9 +1,12 @@
+from __future__ import annotations
+
 import asyncio
 import os
 import shutil
 import signal
+from typing import TYPE_CHECKING
+
 from telethon.errors import AuthKeyDuplicatedError, PhoneNumberInvalidError
-from src.integrations.telegram.listener import BotListener
 from src.core.logger import logger
 from src.core.config import Config
 from app.bootstrap import (
@@ -11,14 +14,21 @@ from app.bootstrap import (
     repo_root,
     restart_flag_path,
     restart_requested,
-    runtime_dir,
     spawn_bot_process,
     stop_flag_path,
 )
+from app.process_lock import acquire_singleton_lock
+
+if TYPE_CHECKING:
+    from src.integrations.telegram.listener import BotListener
 
 
 def _session_file(path: str) -> str:
     return path + ".session"
+
+
+def _is_session_locked_error(exc: BaseException) -> bool:
+    return "database is locked" in str(exc).lower()
 
 
 def _restore_session() -> None:
@@ -68,6 +78,11 @@ async def run_bot():
     """
     Main entry point for the Industrial-Standard AI Trading Bot.
     """
+    acquire_singleton_lock()
+    # Import after the process lock so Database() / Telethon session are not
+    # opened while another instance is still shutting down.
+    from src.integrations.telegram.listener import BotListener
+
     global _bot
     logger.info("Initializing Industrial-Standard Trading Bot...")
     _restore_session()
@@ -180,7 +195,17 @@ async def run_bot():
             exc_info=True,
         )
     except Exception as e:
-        logger.error(f"Bot Crash Encountered: {str(e)}", exc_info=True)
+        if _is_session_locked_error(e):
+            logger.error(
+                "Telegram session file is still locked after retries: %s. "
+                "Stop every leftover bot process using this session, then start "
+                "once. Waiting 20s before exit to avoid a restart storm.",
+                _session_file(Config.SESSION_PATH),
+                exc_info=True,
+            )
+            await asyncio.sleep(20)
+        else:
+            logger.error(f"Bot Crash Encountered: {str(e)}", exc_info=True)
     finally:
         if stop_watcher_task:
             stop_watcher_task.cancel()
@@ -212,6 +237,7 @@ async def run_bot():
 
 if __name__ == "__main__":
     Config.validate()
+    acquire_singleton_lock()
     try:
         asyncio.run(run_bot())
     except KeyboardInterrupt:

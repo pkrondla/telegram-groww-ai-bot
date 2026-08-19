@@ -33,6 +33,8 @@ class Trader:
     # Stored in active_trades.json when a BUY was validated in dry run but not sent to Groww.
     DRY_RUN_PLACEHOLDER_ORDER_ID = "DRY_RUN_NO_ORDER"
     SMART_SEGMENT = "FNO"
+    # Shared across accounts so one 429 cools down every subsequent token fetch.
+    _token_cooldown_until = 0.0
     INDEX_UNDERLYINGS = frozenset({"NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX", "BANKEX"})
     EXIT_LOCK_TTL_SECONDS = 180
     
@@ -69,6 +71,29 @@ class Trader:
         self.client = None
         self._initialize_groww_client(log_fail=True)
 
+    @staticmethod
+    def _is_groww_rate_limit_error(exc: BaseException) -> bool:
+        msg = str(exc).lower()
+        return any(
+            token in msg
+            for token in ("rate limit", "ratelimit", "too many requests", "429")
+        )
+
+    @classmethod
+    def _groww_token_cooldown_remaining(cls) -> float:
+        return max(0.0, cls._token_cooldown_until - time.monotonic())
+
+    @classmethod
+    def _arm_groww_token_cooldown(cls, reason: str) -> None:
+        cooldown = max(60, int(getattr(Config, "GROWW_TOKEN_COOLDOWN_SEC", 180)))
+        cls._token_cooldown_until = time.monotonic() + cooldown
+        logger.warning(
+            "Groww token fetch paused for %ds after rate limit (%s). "
+            "Do not restart the bot until this cooldown ends.",
+            cooldown,
+            reason[:160],
+        )
+
     def _initialize_groww_client(self, *, log_fail: bool = True) -> bool:
         api_key = str(self._api_key_override or "").strip()
         api_secret = str(self._api_secret_override or "").strip()
@@ -77,20 +102,40 @@ class Trader:
                 logger.warning("Groww api_key missing for account %s. Groww client not initialized.", self.account_id)
             self.client = None
             return False
+        remaining = self._groww_token_cooldown_remaining()
+        if remaining > 0:
+            if log_fail:
+                logger.warning(
+                    "Skipping Groww token fetch for account %s (rate-limit cooldown, %.0fs left).",
+                    self.account_id,
+                    remaining,
+                )
+            return self.client is not None
         try:
             from growwapi import GrowwAPI
 
             # Prefer exchanging API key + secret for an access token.
             # growwapi expects Authorization: Bearer <token> for API calls.
             token = None
+            token_error: BaseException | None = None
             if api_secret:
                 try:
                     token = GrowwAPI.get_access_token(
                         api_key=api_key, secret=api_secret
                     )
                 except Exception as e:
+                    token_error = e
+                    if self._is_groww_rate_limit_error(e):
+                        self._arm_groww_token_cooldown(str(e))
                     if log_fail:
                         logger.error(f"Groww access token fetch failed: {e}")
+
+            # A rate-limited token exchange must not fall back to the raw api_key:
+            # that produces "Access forbidden" and then another token fetch.
+            if not token and token_error is not None and self._is_groww_rate_limit_error(token_error):
+                self._access_token = None
+                self.client = None
+                return False
 
             # Fall back to using api_key directly (some users store bearer tokens there)
             self._access_token = token or api_key
@@ -176,6 +221,9 @@ class Trader:
         except Exception as e:
             if log_fail:
                 logger.error(f"Groww Connection Error: {str(e)}")
+            # Immediate re-init after 403/429 doubles token fetches during a crash loop.
+            if self._is_groww_rate_limit_error(e) or self._groww_token_cooldown_remaining() > 0:
+                return False
             # Token could have become valid after manual approval; retry full client init once.
             self._initialize_groww_client(log_fail=log_fail)
             if self.client is None:

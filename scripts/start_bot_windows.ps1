@@ -14,6 +14,15 @@ function Write-StartLog {
     Add-Content -Path $StartLogFile -Value "[$ts] $Message"
 }
 
+function Get-BotPythonProcesses {
+    Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
+        Where-Object {
+            $_.Name -match '^python(w)?\.exe$' -and
+            $_.CommandLine -and
+            $_.CommandLine -match 'app\.main'
+        }
+}
+
 try {
     if (!(Test-Path $RuntimeDir)) {
         New-Item -ItemType Directory -Path $RuntimeDir | Out-Null
@@ -23,6 +32,14 @@ try {
     if (Test-Path $StopFile) {
         Remove-Item $StopFile -Force
         Write-StartLog "Removed stale stop flag: $StopFile"
+    }
+
+    $running = @(Get-BotPythonProcesses)
+    if ($running.Count -gt 0) {
+        $pids = ($running | ForEach-Object { $_.ProcessId }) -join ", "
+        Write-StartLog "Bot already running with PID(s) $pids (app.main). Refusing second start."
+        Write-Output "Bot is already running with PID(s) $pids. Stop it first with scripts/stop_bot_windows.ps1."
+        exit 0
     }
 
     if (Test-Path $PidFile) {

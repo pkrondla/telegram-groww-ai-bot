@@ -3,12 +3,14 @@ import asyncio
 import datetime
 import re
 import hashlib
+import sqlite3
 import pytz
 from src.core.config import Config
 from src.core.logger import logger
 from src.integrations.ai.assistant import Assistant
 from src.trading.execution.multi_account_manager import MultiAccountExecutionManager
 from src.integrations.telegram.notifier import Notifier
+from src.integrations.telegram.session import BusyTimeoutSQLiteSession
 from src.trading.reference.symbol_manager import symbol_manager
 from app.bootstrap import request_graceful_restart
 
@@ -82,7 +84,7 @@ class BotListener:
         self.target_chat_id = Config.TARGET_CHAT_ID
 
         self.client = TelegramClient(
-            self.session_name,
+            BusyTimeoutSQLiteSession(self.session_name, timeout_sec=30.0),
             self.api_id,
             self.api_hash,
             connection_retries=-1,   # retry forever on disconnect (covers WinError 121)
@@ -1086,8 +1088,37 @@ class BotListener:
     # Startup
     # ------------------------------------------------------------------
 
+    async def _start_telegram_client(self):
+        """Connect Telethon, retrying if the session SQLite file is briefly locked."""
+        last_err: BaseException | None = None
+        attempts = 8
+        for attempt in range(1, attempts + 1):
+            try:
+                await self.client.start(phone=Config.PHONE or _telegram_login_prompt)
+                return
+            except sqlite3.OperationalError as e:
+                if "locked" not in str(e).lower():
+                    raise
+                last_err = e
+                wait = min(30, 2 * attempt)
+                logger.warning(
+                    "Telegram session SQLite is locked (attempt %d/%d). "
+                    "Another bot instance is likely using %s.session. "
+                    "Disconnecting and retrying in %ds.",
+                    attempt,
+                    attempts,
+                    self.session_name,
+                    wait,
+                )
+                try:
+                    await self.client.disconnect()
+                except Exception:
+                    pass
+                await asyncio.sleep(wait)
+        raise last_err
+
     async def start(self):
-        await self.client.start(phone=Config.PHONE or _telegram_login_prompt)
+        await self._start_telegram_client()
         self.notifier.set_client(self.client)
 
         # Resolve "me" to a real ID if needed

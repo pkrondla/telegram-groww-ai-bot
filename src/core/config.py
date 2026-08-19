@@ -156,6 +156,9 @@ class Config:
     BROKER_WINDOW_PREOPEN_MIN = max(0, int(os.getenv("BROKER_WINDOW_PREOPEN_MIN", "15")))
     BROKER_WINDOW_POSTCLOSE_MIN = max(0, int(os.getenv("BROKER_WINDOW_POSTCLOSE_MIN", "15")))
     GROWW_AUTH_POLL_SEC = max(15, int(os.getenv("GROWW_AUTH_POLL_SEC", "60")))
+    # Pause Groww get_access_token after HTTP 429 so a crash-loop cannot keep
+    # exhausting the broker quota. Background auth watcher resumes after this.
+    GROWW_TOKEN_COOLDOWN_SEC = max(60, int(os.getenv("GROWW_TOKEN_COOLDOWN_SEC", "180")))
 
     # When False (default), EXTEND_RANGE for an unknown symbol is rejected instead of
     # silently becoming a fresh BUY. Set True only if you intentionally want that behaviour.

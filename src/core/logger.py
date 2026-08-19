@@ -118,6 +118,28 @@ class DailyDateFileHandler(logging.Handler):
         super().close()
 
 
+def _console_stream():
+    """
+    Stream for console logging that is not a colorama AnsiToWin32 wrapper.
+
+    On Windows, colorama may wrap sys.stderr/stdout in a self-referential
+    StreamWrapper. logging.lastResort writes to stderr; that wrap loop
+    raises RecursionError and aborts the trade thread.
+    """
+    for candidate in (
+        getattr(sys, "__stdout__", None),
+        getattr(sys, "__stderr__", None),
+        sys.stdout,
+        sys.stderr,
+    ):
+        if candidate is None:
+            continue
+        if getattr(candidate, "_StreamWrapper__convertor", None) is not None:
+            continue
+        return candidate
+    return sys.__stdout__
+
+
 def setup_logger():
     """
     Industrial-standard dual-output logger setup.
@@ -138,13 +160,16 @@ def setup_logger():
     # Create logs directory if missing
     if not os.path.exists("logs"):
         os.makedirs("logs")
-        
-    # Force stdout to handle UTF-8 if possible (Fix for Windows Unicode Errors)
-    if hasattr(sys.stdout, 'reconfigure'):
-        sys.stdout.reconfigure(encoding='utf-8')
+
+    log_stream = _console_stream()
+    if hasattr(log_stream, "reconfigure"):
+        try:
+            log_stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
     
     # Create handlers
-    c_handler = logging.StreamHandler(sys.stdout)
+    c_handler = logging.StreamHandler(log_stream)
     f_handler = DailyDateFileHandler(log_dir="logs", prefix="trading", backup_count=30, encoding="utf-8")
     
     c_handler.setLevel(Config.LOG_LEVEL)
@@ -165,6 +190,21 @@ def setup_logger():
     err_handler.setLevel(logging.ERROR)
     err_handler.setFormatter(log_format)
     logger.addHandler(err_handler)
+
+    # logging.getLogger(__name__) in trader/db/queue_manager must not fall
+    # through to lastResort on a colorama-wrapped stderr.
+    root = logging.getLogger()
+    root.setLevel(Config.LOG_LEVEL)
+    for handler in (c_handler, f_handler, err_handler):
+        if handler not in root.handlers:
+            root.addHandler(handler)
+    try:
+        last_resort = logging.StreamHandler(log_stream)
+        last_resort.setLevel(logging.WARNING)
+        last_resort.setFormatter(log_format)
+        logging.lastResort = last_resort
+    except Exception:
+        logging.lastResort = None
     
     return logger
 

@@ -1,5 +1,4 @@
 import json
-import logging
 import uuid
 import os
 import re
@@ -14,9 +13,7 @@ import pytz
 from src.core.config import Config
 from src.core.metrics import metrics
 from src.persistence.db import db
-from src.core.logger import logger as app_logger
-
-logger = logging.getLogger(__name__)
+from src.core.logger import logger
 
 class Trader:
     """
@@ -4685,7 +4682,7 @@ class Trader:
                 else:
                     out = res
             else:
-                app_logger.debug(
+                logger.debug(
                     "[OCO_PAYLOAD] get_smart_order id=%s unexpected_response_type=%s",
                     sid,
                     type(res).__name__,
@@ -4705,7 +4702,7 @@ class Trader:
             sl_blk = "dict" if isinstance(sl_node, dict) else (
                 type(sl_node).__name__ if sl_node is not None else "missing"
             )
-            app_logger.debug(
+            logger.debug(
                 "[OCO_PAYLOAD] get_smart_order id=%s status=%s expire_at=%s protection_live=%s "
                 "live_reason=%s has_target=%s has_stop=%s target_trigger=%s stop_trigger=%s "
                 "target_block=%s stop_block=%s",
@@ -4723,7 +4720,7 @@ class Trader:
             )
             return out
         except Exception as e:
-            app_logger.warning(f"OCO verify get_smart_order failed for id={sid}: {e}")
+            logger.warning(f"OCO verify get_smart_order failed for id={sid}: {e}")
         return {}
 
     def _get_oco_order_payload_cached(self, smart_order_id: str, payload_cache: dict[str, dict] | None) -> dict:
@@ -5275,10 +5272,17 @@ class Trader:
 
     def _variant_list(self, symbol: str) -> list[str]:
         variants = [symbol]
-        m = re.match(r"^(?P<underlying>[A-Z&_\-]+?)(?P<rest>\d.*)$", symbol)
-        if m:
-            underlying = m.group("underlying")
-            rest = m.group("rest")
+        parsed = self._parse_option_symbol_parts(symbol)
+        underlying = str(parsed.get("underlying") or "") if parsed else ""
+        rest = ""
+        if underlying and str(symbol).upper().startswith(underlying.upper()):
+            rest = str(symbol)[len(underlying):]
+        else:
+            m = re.match(r"^(?P<underlying>[A-Z0-9&_\-]*[A-Z][A-Z0-9&_\-]*?)(?P<rest>\d.*)$", symbol)
+            if m:
+                underlying = m.group("underlying")
+                rest = m.group("rest")
+        if underlying and rest:
             underlying_variants = {underlying}
             underlying_variants.add(underlying.replace("&", ""))
             underlying_variants.add(underlying.replace("&", "_"))
@@ -5330,6 +5334,12 @@ class Trader:
             s,
         )
         if not m:
+            # Tickers that start with digits (360ONE) then YY + date + strike.
+            m = re.match(
+                r"^(?P<underlying>\d+[A-Z][A-Z0-9&_\-]*)(?P<yy>\d{2})(?P<tail>\d+)(?P<option_type>CE|PE)$",
+                s,
+            )
+        if not m:
             return None
         yy_s = m.group("yy")
         tail = m.group("tail")
@@ -5377,13 +5387,13 @@ class Trader:
         Parse Groww option trading symbols into comparable components.
         Supports:
           - Index weekly: NIFTY2650524200CE (yy + m + dd + strike + opt, padded or compact month)
-          - Stock monthly: WIPRO26APR200PE   (yy + MON + strike + opt)
+          - Stock monthly: WIPRO26APR200PE, 360ONE26AUG1180CE (yy + MON + strike + opt)
         """
         s = str(symbol or "").upper().strip()
         if not s:
             return None
         m = re.match(
-            r"^(?P<underlying>[A-Z&_\-]+)"
+            r"^(?P<underlying>[A-Z0-9&_\-]*[A-Z][A-Z0-9&_\-]*?)"
             r"(?P<yy>\d{2})"
             r"(?P<month_abbr>JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)"
             r"(?P<strike>\d+)"
@@ -5661,6 +5671,8 @@ class Trader:
                         res = self._get_instrument(exchange=ex, trading_symbol=sym_variant)
                         if res and res.get("segment"):
                             return res["exchange"], sym_variant, res["segment"], res
+                    except RecursionError:
+                        raise
                     except Exception:
                         continue
             return None
@@ -6859,6 +6871,8 @@ class Trader:
                 return self.client.get_instrument_by_exchange_and_trading_symbol(
                     exchange=exchange, trading_symbol=trading_symbol
                 )
+            except RecursionError:
+                raise
             except Exception as e:
                 # Fall back to local cache (commonly fails when instruments CSV download is blocked)
                 logger.debug(f"Instrument lookup via API failed for {exchange}:{trading_symbol}: {e}")
@@ -7074,7 +7088,10 @@ class Trader:
         exchange, found_symbol, segment, instrument = self._resolve_option_instrument(trade_data)
         if not exchange:
             variants = self._variant_list(symbol)
-            logger.warning(f"[STAGE 4] Instrument NOT found for {symbol}. Variants tried: {variants}")
+            try:
+                logger.warning(f"[STAGE 4] Instrument NOT found for {symbol}. Variants tried: {variants}")
+            except RecursionError:
+                pass
             return f"❌ FAILURE: Could not find instrument details for {symbol} (Variants tried: {variants}) on Groww."
 
         lot_size = self._extract_lot_size(instrument)
@@ -7695,8 +7712,13 @@ class Trader:
             logger.info(f"[STAGE 4] Routing to option entry executor for {action} {symbol}.")
             return self._execute_option_entry(trade_data)
 
+        except RecursionError:
+            return f"❌ ERROR for {symbol}: maximum recursion depth exceeded"
         except Exception as e:
-            logger.error(f"[STAGE 4] Execution Error for {symbol}: {str(e)}", exc_info=True)
+            try:
+                logger.error(f"[STAGE 4] Execution Error for {symbol}: {str(e)}", exc_info=True)
+            except RecursionError:
+                pass
             mgmt_actions = {"EXIT_ALL", "TRAIL_SL", "RESTORE_SL", "UPDATE_TGT"}
             from_queue = bool(trade_data.get("_from_mgmt_queue"))
             if action in mgmt_actions and not from_queue and Config.MGMT_QUEUE_ENABLED:

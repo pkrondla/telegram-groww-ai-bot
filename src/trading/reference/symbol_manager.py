@@ -88,9 +88,23 @@ class SymbolManager:
         """
         matches: dict[str, str] = {}  # original_token → groww_symbol
 
-        # Tokenise: split on whitespace and common separators, strip punctuation
-        raw_tokens = re.split(r"[\s,|/\-\(\)\[\]]+", text)
-        for tok in raw_tokens:
+        # Tokenise: split on whitespace and common separators, strip punctuation.
+        # Also merge a leading numeric token with the next alphabetic one ("360 ONE" → "360ONE").
+        raw_tokens = [t for t in re.split(r"[\s,|/\-\(\)\[\]]+", text) if t]
+        tokens: list[str] = []
+        i = 0
+        while i < len(raw_tokens):
+            if (
+                i + 1 < len(raw_tokens)
+                and raw_tokens[i].isdigit()
+                and re.match(r"^[A-Za-z]", raw_tokens[i + 1])
+            ):
+                tokens.append(raw_tokens[i] + raw_tokens[i + 1])
+                i += 2
+                continue
+            tokens.append(raw_tokens[i])
+            i += 1
+        for tok in tokens:
             # Strip leading # and surrounding punctuation
             clean = re.sub(r"[^A-Za-z0-9&_\-]", "", tok)
             if len(clean) < 2:
@@ -383,8 +397,11 @@ class SymbolManager:
                 seen.add(tok)
                 candidates.append(tok)
 
-        # ALL-CAPS words 3+ chars (likely tickers)
-        for m in re.finditer(r"\b([A-Z][A-Z0-9&_\-]{2,})\b", text.upper()):
+        # Tickers including those that start with digits (360ONE) and ALL-CAPS words 3+ chars
+        for m in re.finditer(
+            r"\b(\d+[A-Z][A-Z0-9&_\-]+|[A-Z][A-Z0-9&_\-]{2,})\b",
+            text.upper(),
+        ):
             tok = m.group(1)
             # Skip common non-symbol words
             if tok in (

@@ -115,6 +115,8 @@
     "HDFCBK":             "HDFCBANK",
     "ICICIBK":            "ICICIBANK",
     "RELIND":             "RELIANCE",
-    "RELIANCEIND":        "RELIANCE"
+    "RELIANCEIND":        "RELIANCE",
+    "360 ONE":            "360ONE",
+    "360-ONE":            "360ONE"
   }
 }

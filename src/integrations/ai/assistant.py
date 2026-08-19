@@ -1161,14 +1161,25 @@ class Assistant:
         s = s.replace("#", " ")
         s = re.sub(r"\s+", "", s)
         s = re.sub(r"[^A-Z0-9&_\-]", "", s)
+        stripped_contract = False
         if strike and option_type and s.endswith(f"{strike}{option_type}"):
             s = s[: -(len(strike) + len(option_type))]
+            stripped_contract = True
         elif strike and s.endswith(strike):
             s = s[: -len(strike)]
+            stripped_contract = True
         if option_type and s.endswith(option_type):
             s = s[: -len(option_type)]
-        s = re.sub(r"\d+$", "", s)
-        s = re.sub(r"[^A-Z&_\-]", "", s)
+            stripped_contract = True
+        if stripped_contract:
+            # Full trading symbol was passed in: drop expiry tokens, keep ticker digits (360ONE).
+            s = re.sub(r"\d+$", "", s)
+            s = re.sub(
+                r"(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)$",
+                "",
+                s,
+            )
+            s = re.sub(r"\d+$", "", s)
         return s
 
     @staticmethod
@@ -1235,7 +1246,7 @@ You extract structured fields from Indian F&O trading messages. The action is FI
 {date_ctx}
 
 Return JSON only with these keys:
-  official_symbol  — underlying ticker root only (e.g. "WAAREEENER", "SENSEX"). NO strike or CE/PE in this field.
+  official_symbol  — underlying ticker root only (e.g. "WAAREEENER", "SENSEX", "360ONE"). Keep ticker digits. NO strike or CE/PE in this field.
   stock            — same as official_symbol (will be overwritten by symbol factory)
   strike           — numeric string only (e.g. "3500"). Empty string if unknown.
   option_type      — "CE" or "PE" only. Empty string if unknown.
@@ -1781,8 +1792,9 @@ FIELD RULES
 ════════════════════════════════════════
 
 official_symbol / stock:
-  - Bare underlying ticker root ONLY (e.g. "WAAREEENER", "SENSEX", "LTF", "NMDC").
+  - Bare underlying ticker root ONLY (e.g. "WAAREEENER", "SENSEX", "LTF", "NMDC", "360ONE").
   - NEVER include strike price or CE/PE in this field.
+  - Keep digits that are part of the ticker (e.g. "360ONE", never "ONE").
   - Prefer the F&O/broker symbol root, not NSE cash-market name variants.
 
 strike:

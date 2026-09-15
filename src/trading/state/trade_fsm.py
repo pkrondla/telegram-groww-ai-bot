@@ -4,7 +4,7 @@ Explicit trade lifecycle FSM.
 States
 ------
 PENDING  — Signal parsed; waiting for LTP to enter the entry range (pending queue).
-ACTIVE   — Entry filled; OCO protection armed on broker.
+ACTIVE   — Entry filled on broker (OCO may or may not be armed yet).
 EXITING  — EXIT_ALL dispatched; waiting for broker confirmation.
 CLOSED   — Position confirmed flat on broker; removed from active book.
 
@@ -53,6 +53,39 @@ def can_transition(state: TradeState, action: str) -> bool:
     return action in _ALLOWED.get(state, frozenset())
 
 
+def record_has_fill_evidence(record: dict | None) -> bool:
+    """
+    True when the active-book row represents a filled entry.
+
+    OCO / smart_order_id is protection, not fill. A zero-SL fill still has
+    entry_order_id, entry_avg_price, and opened_at_ist.
+    """
+    rec = record if isinstance(record, dict) else {}
+    if str(rec.get("smart_order_id") or "").strip():
+        return True
+    oco_legs = rec.get("oco_legs")
+    if isinstance(oco_legs, list) and any(
+        isinstance(leg, dict) and str(leg.get("smart_order_id") or "").strip()
+        for leg in oco_legs
+    ):
+        return True
+    if str(rec.get("entry_order_id") or "").strip():
+        return True
+    if str(rec.get("opened_at_ist") or "").strip():
+        return True
+    try:
+        if float(rec.get("entry_avg_price") or 0) > 0:
+            return True
+    except (TypeError, ValueError):
+        pass
+    try:
+        if int(float(rec.get("entry_qty") or 0)) > 0:
+            return True
+    except (TypeError, ValueError):
+        pass
+    return False
+
+
 def state_from_record(record: dict) -> TradeState:
     """
     Derive the current TradeState from a raw active-trade dict.
@@ -66,7 +99,7 @@ def state_from_record(record: dict) -> TradeState:
     # Infer from existing fields for records created before the FSM was introduced.
     if record.get("exit_in_progress"):
         return TradeState.EXITING
-    if record.get("smart_order_id") or record.get("oco_legs"):
+    if record_has_fill_evidence(record):
         return TradeState.ACTIVE
     return TradeState.PENDING
 

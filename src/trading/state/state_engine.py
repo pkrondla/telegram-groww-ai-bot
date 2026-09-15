@@ -295,13 +295,13 @@ class StateEngine:
 
     def _handle_reconcile_only(self, signal: TradeSignal) -> str | None:
         symbol = signal.trading_symbol
-        if not symbol:
-            return "❌ RECONCILE: missing trading symbol."
-
-        logger.info(f"[STAGE 3] RECONCILE requested for: {symbol}")
-        resolved = self._resolve_active_symbol(symbol)
+        resolved = self._resolve_management_symbol(symbol)
         if not resolved:
+            if not str(symbol or "").strip():
+                return self._unresolved_management_message("RECONCILE")
             return f"⚠️ NO ACTIVE TRADE: Could not find an open position for {symbol}."
+
+        logger.info(f"[STAGE 3] RECONCILE requested for: {resolved}")
 
         # Immediate broker-validated progression sync for target-hit messages.
         prog_msg = self._trader.sync_target_progression_for_symbol(resolved)
@@ -321,10 +321,12 @@ class StateEngine:
         logger.info(f"[STAGE 3] {signal.action} requested for: {symbol}")
         logger.info(f"[STAGE 3] Active book: {list(active.keys())}")
 
-        resolved = self._resolve_active_symbol(symbol)
+        resolved = self._resolve_management_symbol(symbol)
 
         if not resolved:
             logger.info(f"[STAGE 3] No active trade matched for '{symbol}' — cannot exit/trail.")
+            if not str(symbol or "").strip():
+                return self._unresolved_management_message(signal.action)
             return f"⚠️ NO ACTIVE TRADE: Could not find an open position for {symbol}."
 
         # FSM guard — validate the action is permitted for the current trade state.
@@ -462,3 +464,45 @@ class StateEngine:
 
     def _resolve_active_symbol(self, symbol: str) -> str | None:
         return self._trader.resolve_active_symbol(symbol)
+
+    @staticmethod
+    def unique_filled_active_symbol(active: dict | None) -> str | None:
+        """Return the sole filled active-book symbol, else None."""
+        filled: list[str] = []
+        for sym, rec in (active or {}).items():
+            name = str(sym or "").strip()
+            if not name:
+                continue
+            st = state_from_record(rec if isinstance(rec, dict) else {})
+            if st in (TradeState.ACTIVE, TradeState.EXITING):
+                filled.append(name)
+        if len(filled) == 1:
+            return filled[0]
+        return None
+
+    def _resolve_management_symbol(self, symbol: str) -> str | None:
+        resolved = self._resolve_active_symbol(symbol)
+        if resolved:
+            return resolved
+        # Only bind to the unique book when the parser could not name a contract.
+        # A concrete unmatched symbol must not silently retarget the sole open trade.
+        if str(symbol or "").strip():
+            return None
+        active = self._trader._load_active_trades()
+        unique = self.unique_filled_active_symbol(active)
+        if unique:
+            logger.info(
+                f"[STAGE 3] Unique active-book bind: '{symbol or '(empty)'}' → '{unique}'"
+            )
+            return unique
+        return None
+
+    def _unresolved_management_message(self, action: str) -> str:
+        active = self._trader._load_active_trades()
+        keys = [str(k) for k in (active or {}).keys() if str(k)]
+        if not keys:
+            return f"⚠️ {action}: no active trade to bind (instrument unresolved)."
+        return (
+            f"⚠️ {action}: instrument unresolved and {len(keys)} active trades exist "
+            f"({', '.join(keys)}); not guessing."
+        )

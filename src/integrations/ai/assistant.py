@@ -794,6 +794,55 @@ class Assistant:
         under = str(data.get("official_symbol", data.get("stock", "")) or "").strip()
         return bool(under) and bool(strike) and opt in ("CE", "PE")
 
+    _BOOK_BIND_REASONS = frozenset({
+        "missing_exit_symbol",
+        "missing_trail_symbol",
+        "missing_restore_symbol",
+        "reconcile_missing_symbol",
+        "model_marked_non_trade",
+    })
+
+    @staticmethod
+    def _management_book_bind_payload(
+        action: str, *, stop_loss: float = 0.0, target: float = 0.0
+    ) -> dict:
+        """
+        Management intent with no resolvable contract. StateEngine binds to the
+        unique filled active trade when exactly one exists.
+        """
+        return {
+            "is_trade": True,
+            "action": str(action or "").upper(),
+            "official_symbol": "",
+            "stock": "",
+            "trading_symbol": "",
+            "strike": "",
+            "option_type": "",
+            "expiry_day": "",
+            "expiry_month": "",
+            "expiry_year": "",
+            "entry_range": [0, 0],
+            "buy_range_min": 0.0,
+            "buy_range_max": 0.0,
+            "stop_loss": float(stop_loss or 0),
+            "target": float(target or 0),
+            "bind_unique_active": True,
+        }
+
+    def _or_book_bind(
+        self,
+        action: str,
+        *,
+        reason: str = "",
+        stop_loss: float = 0.0,
+        target: float = 0.0,
+    ) -> dict:
+        logger.info(
+            f"[STAGE 2] {action}: instrument unresolved ({reason or 'no symbol'}) — "
+            "emitting unique-active-book bind signal."
+        )
+        return self._management_book_bind_payload(action, stop_loss=stop_loss, target=target)
+
     def _validate_intent(
         self,
         data: dict,
@@ -1436,8 +1485,7 @@ Rules:
                     data = self._apply_symbol_factory(data)
                     logger.info(f"[STAGE 2] Signal ready: RECONCILE {data.get('stock')} (target-hit reply).")
                     return data
-                logger.info("[STAGE 2] RECONCILE: could not resolve instrument from parent — ignoring.")
-                return None
+                return self._or_book_bind("RECONCILE", reason="target-hit parent had no instrument")
 
             update_tgt_price = self._detect_update_tgt(tail)
             if update_tgt_price is not None:
@@ -1516,8 +1564,7 @@ Rules:
             )
             logger.info(f"[STAGE 2] LLM raw (forced): {data}")
             if not data or not data.get("is_trade"):
-                logger.info("[STAGE 2] Decision: IGNORE — forced EXIT_ALL could not resolve instrument.")
-                return None
+                return self._or_book_bind("EXIT_ALL", reason="forced EXIT_ALL could not resolve instrument")
             data["action"] = "EXIT_ALL"
             data, reason = self._validate_intent(
                 data,
@@ -1527,6 +1574,8 @@ Rules:
                 forced_action="EXIT_ALL",
             )
             if not data:
+                if reason in self._BOOK_BIND_REASONS:
+                    return self._or_book_bind("EXIT_ALL", reason=reason)
                 logger.info(f"[STAGE 2] Decision: IGNORE forced EXIT_ALL — validator rejected ({reason}).")
                 return None
             data = self._apply_alias_to_data(data)
@@ -1566,8 +1615,7 @@ Rules:
             )
             logger.info(f"[STAGE 2] LLM raw (forced): {data}")
             if not data or not data.get("is_trade"):
-                logger.info("[STAGE 2] Decision: IGNORE — forced RESTORE_SL could not resolve instrument.")
-                return None
+                return self._or_book_bind("RESTORE_SL", reason="forced RESTORE_SL could not resolve instrument")
             data["action"] = "RESTORE_SL"
             data["stop_loss"] = 0
             data["target"] = 0
@@ -1579,6 +1627,8 @@ Rules:
                 forced_action="RESTORE_SL",
             )
             if not data:
+                if reason in self._BOOK_BIND_REASONS:
+                    return self._or_book_bind("RESTORE_SL", reason=reason)
                 logger.info(f"[STAGE 2] Decision: IGNORE forced RESTORE_SL — validator rejected ({reason}).")
                 return None
             data = self._apply_alias_to_data(data)
@@ -1596,9 +1646,20 @@ Rules:
                 is_reply=has_context,
             )
             logger.info(f"[STAGE 2] LLM raw (forced): {data}")
+            hold_tgt = self._extract_hold_target_price(tail or child_text or text)
             if not data or not data.get("is_trade"):
-                logger.info("[STAGE 2] Decision: IGNORE — forced TRAIL_SL could not resolve instrument.")
-                return None
+                sl_missing = forced[1]
+                if sl_missing is None:
+                    logger.info("[STAGE 2] Decision: IGNORE — forced TRAIL_SL could not resolve instrument and no SL price.")
+                    return None
+                if hold_tgt and hold_tgt > 0:
+                    logger.info(f"[STAGE 2] TRAIL_SL companion target detected from HOLD phrase: {hold_tgt}")
+                return self._or_book_bind(
+                    "TRAIL_SL",
+                    reason="forced TRAIL_SL could not resolve instrument",
+                    stop_loss=float(sl_missing),
+                    target=float(hold_tgt or 0),
+                )
             data["action"] = "TRAIL_SL"
             sl = forced[1]
             if sl is not None:
@@ -1606,7 +1667,6 @@ Rules:
             elif not data.get("stop_loss"):
                 logger.info("[STAGE 2] Decision: IGNORE — TRAIL_SL detected but no stop price found.")
                 return None
-            hold_tgt = self._extract_hold_target_price(tail or child_text or text)
             if hold_tgt and hold_tgt > 0:
                 data["target"] = hold_tgt
                 logger.info(f"[STAGE 2] TRAIL_SL companion target detected from HOLD phrase: {hold_tgt}")
@@ -1619,6 +1679,13 @@ Rules:
                 forced_action="TRAIL_SL",
             )
             if not data:
+                if reason in self._BOOK_BIND_REASONS:
+                    return self._or_book_bind(
+                        "TRAIL_SL",
+                        reason=reason,
+                        stop_loss=float(forced[1] or 0),
+                        target=float(hold_tgt or 0) if hold_tgt else 0.0,
+                    )
                 logger.info(f"[STAGE 2] Decision: IGNORE forced TRAIL_SL — validator rejected ({reason}).")
                 return None
             data = self._apply_alias_to_data(data)

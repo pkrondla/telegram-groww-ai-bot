@@ -5,7 +5,12 @@ import sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import pytest
-from src.trading.state.trade_fsm import TradeState, can_transition, state_from_record
+from src.trading.state.trade_fsm import (
+    TradeState,
+    can_transition,
+    record_has_fill_evidence,
+    state_from_record,
+)
 
 
 class TestCanTransition:
@@ -57,4 +62,37 @@ class TestStateFromRecord:
 
     def test_invalid_fsm_state_falls_back_to_inference(self):
         rec = {"fsm_state": "UNKNOWN", "smart_order_id": "abc"}
+        assert state_from_record(rec) == TradeState.ACTIVE
+
+    def test_zero_sl_fill_without_oco_is_active(self):
+        rec = {
+            "smart_order_id": "",
+            "oco_legs": [],
+            "entry_order_id": "GROWW-1",
+            "entry_avg_price": 34.3,
+            "entry_qty": 65,
+            "opened_at_ist": "2026-09-15T11:11:51+05:30",
+            "stop_loss": 0.0,
+            "sl_true": 0.0,
+        }
+        assert record_has_fill_evidence(rec)
+        assert state_from_record(rec) == TradeState.ACTIVE
+        assert can_transition(TradeState.ACTIVE, "TRAIL_SL")
+        assert can_transition(TradeState.ACTIVE, "EXIT_ALL")
+
+    def test_entry_avg_price_alone_infers_active(self):
+        rec = {"entry_avg_price": 12.5, "smart_order_id": "", "oco_legs": []}
+        assert state_from_record(rec) == TradeState.ACTIVE
+
+    def test_opened_at_infers_active(self):
+        rec = {"opened_at_ist": "2026-09-15T11:11:51+05:30"}
+        assert state_from_record(rec) == TradeState.ACTIVE
+
+    def test_empty_oco_legs_without_fill_stays_pending(self):
+        rec = {"smart_order_id": "", "oco_legs": []}
+        assert not record_has_fill_evidence(rec)
+        assert state_from_record(rec) == TradeState.PENDING
+
+    def test_stored_active_wins_over_missing_oco(self):
+        rec = {"fsm_state": "ACTIVE", "smart_order_id": "", "oco_legs": []}
         assert state_from_record(rec) == TradeState.ACTIVE

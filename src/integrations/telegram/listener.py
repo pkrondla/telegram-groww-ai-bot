@@ -15,6 +15,25 @@ from src.trading.reference.symbol_manager import symbol_manager
 from app.bootstrap import request_graceful_restart
 
 
+REPLY_CHAIN_MAX_DEPTH = 5
+
+
+def collapse_reply_ancestor_texts(texts: list[str] | None) -> str:
+    """
+    Join reply-chain texts (immediate parent first, then older ancestors).
+    Dedupes exact repeats. Empty / whitespace-only parts are skipped.
+    """
+    parts: list[str] = []
+    seen: set[str] = set()
+    for raw in texts or []:
+        text = str(raw or "").strip()
+        if not text or text in seen:
+            continue
+        parts.append(text)
+        seen.add(text)
+    return "\n\n".join(parts)
+
+
 # Admin override commands (sent by admin to their own chat or bot)
 _OVERRIDE_COMMANDS = {
     "PAUSE":    "pause",
@@ -888,6 +907,31 @@ class BotListener:
             )
             logger.info(f"[STAGE 1] Admin clear_pending executed: removed={total_removed}")
 
+    async def _collect_reply_chain_parent_text(self, event) -> str:
+        """
+        Walk Telegram reply ancestors (immediate parent first) so nested
+        updates like TARGET 3 → TARGET 2 → original BUY still see the contract.
+        """
+        texts: list[str] = []
+        current = event
+        for depth in range(REPLY_CHAIN_MAX_DEPTH):
+            try:
+                reply_msg = await current.get_reply_message()
+            except Exception as e:
+                logger.debug(f"[STAGE 1] Reply-chain walk stopped at depth={depth}: {e}")
+                break
+            if not reply_msg:
+                break
+            texts.append(str(getattr(reply_msg, "raw_text", None) or ""))
+            current = reply_msg
+        parent_text = collapse_reply_ancestor_texts(texts)
+        if len(texts) > 1:
+            logger.info(
+                f"[STAGE 1] Reply chain walked {len(texts)} ancestor(s); "
+                f"parent_len={len(parent_text)}"
+            )
+        return parent_text
+
     # ------------------------------------------------------------------
     # Main signal handler
     # ------------------------------------------------------------------
@@ -937,10 +981,8 @@ class BotListener:
                 return
 
         if event.is_reply:
-            reply_msg = await event.get_reply_message()
-            if reply_msg:
-                is_reply = True
-                parent_text = reply_msg.raw_text or ""
+            is_reply = True
+            parent_text = await self._collect_reply_chain_parent_text(event)
 
         raw_text = f"[CONTEXT: {parent_text}] {child_text}" if is_reply else child_text
         advisory_mode, advisory_reason, advisory_scope = self._detect_size_override_advisory(child_text)

@@ -164,6 +164,11 @@ class Config:
     # silently becoming a fresh BUY. Set True only if you intentionally want that behaviour.
     EXTEND_RANGE_ALLOWS_ENTRY = os.getenv("EXTEND_RANGE_ALLOWS_ENTRY", "false").lower() == "true"
 
+    # Pending leg_exits backfill: give up when the broker fill never appears
+    # (expired contracts, missing order ids). Avoids unbounded reconcile loops.
+    LEG_EXIT_BACKFILL_MAX_ATTEMPTS = max(1, int(os.getenv("LEG_EXIT_BACKFILL_MAX_ATTEMPTS", "30")))
+    LEG_EXIT_BACKFILL_MAX_AGE_DAYS = max(1, int(os.getenv("LEG_EXIT_BACKFILL_MAX_AGE_DAYS", "3")))
+
     @classmethod
     def groww_accounts(cls) -> list[AccountConfig]:
         """

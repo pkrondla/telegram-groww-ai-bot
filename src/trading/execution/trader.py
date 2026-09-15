@@ -14,6 +14,7 @@ from src.core.config import Config
 from src.core.metrics import metrics
 from src.persistence.db import db
 from src.core.logger import logger
+from src.trading.state.trade_fsm import TradeState, record_has_fill_evidence
 
 class Trader:
     """
@@ -975,6 +976,47 @@ class Trader:
             "segment": str(data.get("segment") or row.get("segment") or "FNO"),
         }
 
+    @staticmethod
+    def _pending_leg_exit_abandon_reason(
+        row: dict,
+        data_blob: dict | None = None,
+        *,
+        now_ist: datetime.date | None = None,
+        max_attempts: int | None = None,
+        max_age_days: int | None = None,
+    ) -> str:
+        """
+        Return a reason string if this pending leg_exit should stop polling.
+        Empty string means keep trying.
+        """
+        blob = data_blob if isinstance(data_blob, dict) else (
+            dict(row.get("data") or {}) if isinstance(row.get("data"), dict) else {}
+        )
+        try:
+            attempts = int(float(blob.get("reconcile_attempts") or 0))
+        except (TypeError, ValueError):
+            attempts = 0
+        cap_attempts = int(
+            max_attempts if max_attempts is not None else Config.LEG_EXIT_BACKFILL_MAX_ATTEMPTS
+        )
+        if attempts >= cap_attempts:
+            return f"max_attempts={attempts}"
+
+        cap_age = int(
+            max_age_days if max_age_days is not None else Config.LEG_EXIT_BACKFILL_MAX_AGE_DAYS
+        )
+        today = now_ist or datetime.datetime.now(pytz.timezone("Asia/Kolkata")).date()
+        trade_date_raw = str(row.get("trade_date") or "").strip()
+        trade_date = None
+        if trade_date_raw:
+            try:
+                trade_date = datetime.date.fromisoformat(trade_date_raw[:10])
+            except ValueError:
+                trade_date = None
+        if trade_date is not None and (today - trade_date).days >= cap_age:
+            return f"max_age_days={(today - trade_date).days}"
+        return ""
+
     def _backfill_pending_leg_exits(self) -> int:
         """
         Auto-backfill pending ``leg_exits`` rows with real broker exit fills.
@@ -1060,6 +1102,37 @@ class Trader:
                         exit_qty = int(inferred["exit_qty"])
 
             if exit_price <= 0 or exit_qty <= 0:
+                abandon_reason = self._pending_leg_exit_abandon_reason(row, data_blob)
+                if abandon_reason:
+                    logger.warning(
+                        f"[RECONCILE] Abandoning pending exit fill for {symbol} "
+                        f"(leg_id={leg_id}, {abandon_reason})."
+                    )
+                    data_blob["abandoned_reason"] = abandon_reason
+                    data_blob["abandoned_at_ist"] = self._now_ist_iso()
+                    try:
+                        db.update_leg_exit_fill(
+                            leg_id,
+                            {
+                                "exit_price": float(row.get("exit_price") or 0.0),
+                                "qty": int(row.get("qty") or 0),
+                                "pnl_inr": float(row.get("pnl_inr") or 0.0),
+                                "pnl_points": float(row.get("pnl_points") or 0.0),
+                                "exit_pending": False,
+                                "pnl_pending": False,
+                                "exit_fill_source": "abandoned_no_fill",
+                                "close_reason": "abandoned_no_fill",
+                                "closed_at_ist": self._now_ist_iso(),
+                                "data": data_blob,
+                            },
+                            account_id=self.account_id,
+                        )
+                    except Exception as e:
+                        logger.warning(
+                            f"[RECONCILE] Failed to abandon pending exit for {symbol} "
+                            f"leg_id={leg_id}: {e}"
+                        )
+                    continue
                 # Still no fill — bump attempt counter and try again next tick.
                 try:
                     db.update_leg_exit_fill(
@@ -2124,6 +2197,106 @@ class Trader:
             f"Re-armed and retried action.\n{retry_result}"
         )
 
+    def _is_unprotected_zero_sl_fill(self, rec: dict | None) -> bool:
+        """Filled position with no SL and no OCO — waiting for the first TRAIL_SL."""
+        rec_norm = self._normalize_active_trade_record(rec or {})
+        if not record_has_fill_evidence(rec_norm):
+            return False
+        sl = float(self._num_or(rec_norm.get("sl_true"), rec_norm.get("stop_loss")))
+        if sl > 0:
+            return False
+        sid = str(rec_norm.get("smart_order_id") or "")
+        if sid and sid != self.DRY_RUN_PLACEHOLDER_ORDER_ID:
+            return False
+        if self._oco_ids_from_record(rec_norm):
+            return False
+        return True
+
+    def _skip_rearm_unprotected_fill(self, *, source: str, symbol: str, rec: dict) -> dict:
+        """Do not force-create OCO when SL is still 0; alert once then stay quiet."""
+        rec_norm = self._normalize_active_trade_record(rec or {})
+        already = bool(rec_norm.get("unprotected_fill_alerted"))
+        if not already:
+            rec_norm["unprotected_fill_alerted"] = True
+            rec_norm["fsm_state"] = str(rec_norm.get("fsm_state") or TradeState.ACTIVE.value)
+            self._persist_active_trade_record(symbol, rec_norm)
+            logger.warning(
+                f"[REARM] {symbol}: filled with no SL/OCO — waiting for TRAIL_SL "
+                f"(source={source}). Skipping integrity retry."
+            )
+            line = (
+                f"ℹ️ REARM[{source}] {symbol}: unprotected fill (SL=0, no OCO) — "
+                "waiting for TRAIL_SL; not an integrity failure."
+            )
+            return {
+                "rearmed": 0,
+                "line": line,
+                "attempted": True,
+                "success": True,
+                "primary_alert": line,
+            }
+        logger.info(
+            f"[REARM] Skip {symbol}: unprotected fill still has no SL to arm."
+        )
+        return {
+            "rearmed": 0,
+            "line": None,
+            "attempted": False,
+            "success": True,
+            "primary_alert": "",
+        }
+
+    def _trail_sl_create_protection(self, symbol: str, new_sl: float, rec: dict | None) -> str:
+        """
+        First TRAIL_SL on a zero-SL fill: persist sl_true and create OCO.
+        Existing modify-OCO trail path is unchanged when ids already exist.
+        """
+        sl = float(new_sl or 0.0)
+        if sl <= 0:
+            return (
+                f"⚠️ TRAIL_SL skipped for {symbol}: trail price must be > 0."
+                f"{self._ltp_suffix_for_symbol(symbol)}"
+            )
+        self._update_active_trade_levels(symbol, stop_loss=sl, sl_true=sl)
+        if not self.place_entry_orders:
+            logger.info(
+                f"[STAGE 4] DRY RUN book: TRAIL_SL {symbol} sl_true={sl} "
+                "(create-protection path; not sent to broker)."
+            )
+            return (
+                f"🧪 [DRY RUN] TRAIL_SL for {symbol}: sl_true={sl} "
+                f"(simulated; would create OCO).{self._ltp_suffix_for_symbol(symbol)}"
+            )
+        if self.client is None:
+            return (
+                f"⚠️ TRAIL_SL stored sl_true={sl} for {symbol} locally, but cannot create OCO "
+                f"(no Groww client).{self._ltp_suffix_for_symbol(symbol)}"
+            )
+        pos, qty = self._get_open_position_for_symbol(symbol)
+        if qty <= 0:
+            return (
+                f"⚠️ TRAIL_SL stored sl_true={sl} for {symbol} locally, but no open broker "
+                f"position to protect.{self._ltp_suffix_for_symbol(symbol)}"
+            )
+        rec_rearm = dict(self._get_active_trade_record(symbol) or rec or {})
+        rec_rearm["stop_loss"] = sl
+        rec_rearm["sl_true"] = sl
+        rec_rearm["protection_armed_date"] = ""
+        ok, alert = self._rearm_oco_for_open_position(symbol, rec_rearm, pos or {}, force=True)
+        if ok:
+            logger.info(
+                f"[STAGE 4] TRAIL SUCCESS: created first OCO for {symbol} sl_true={sl}."
+            )
+            return (
+                f"📈 TRAIL SUCCESS: Created protection for {symbol} sl_true={sl} "
+                f"(first OCO after zero-SL fill).{self._ltp_suffix_for_symbol(symbol)}"
+            )
+        return (
+            f"⚠️ TRAIL_SL stored sl_true={sl} for {symbol} but OCO create failed"
+            f"{(': ' + str(alert)) if alert else '.'}"
+            f"{self._ltp_suffix_for_symbol(symbol)}"
+        )
+
     def _has_modifiable_oco(self, symbol: str, rec: dict) -> bool:
         """
         Best-effort broker OCO liveness check for maintenance runs.
@@ -2565,6 +2738,8 @@ class Trader:
         rec_norm = self._normalize_active_trade_record(rec)
         pos = pos or {}
         open_qty = abs(self._position_quantity(pos))
+        if self._is_unprotected_zero_sl_fill(rec_norm):
+            return self._skip_rearm_unprotected_fill(source=source, symbol=symbol, rec=rec_norm)
         if open_qty > 0:
             rec_norm = self._sync_protection_plan_from_progress(rec_norm, open_qty)
             self._persist_active_trade_record(symbol, rec_norm)
@@ -3388,6 +3563,13 @@ class Trader:
                 out["exit_lock_id"] = str(out.get("exit_lock_id") or "")
             if "exit_reason" in out and out.get("exit_reason") is not None:
                 out["exit_reason"] = str(out.get("exit_reason") or "")
+            stored_fsm = str(out.get("fsm_state") or "").upper().strip()
+            if stored_fsm in ("PENDING", "ACTIVE", "EXITING", "CLOSED"):
+                out["fsm_state"] = stored_fsm
+            elif out.get("exit_in_progress"):
+                out["fsm_state"] = TradeState.EXITING.value
+            elif record_has_fill_evidence(out):
+                out["fsm_state"] = TradeState.ACTIVE.value
             # Policy bookkeeping: if sl_true missing, treat current stop_loss as authoritative channel SL.
             st = float(out.get("sl_true") or 0)
             if st <= 0 and float(out.get("stop_loss") or 0) > 0:
@@ -3430,6 +3612,7 @@ class Trader:
         rec["exit_lock_id"] = str(lock_id or "")
         rec["exit_started_at"] = float(time.time())
         rec["exit_reason"] = str(reason or "")
+        rec["fsm_state"] = TradeState.EXITING.value
         trades[symbol] = rec
         self._save_all_trades(trades)
 
@@ -3442,6 +3625,7 @@ class Trader:
         rec.pop("exit_lock_id", None)
         rec.pop("exit_started_at", None)
         rec.pop("exit_reason", None)
+        rec["fsm_state"] = TradeState.ACTIVE.value
         trades[symbol] = rec
         self._save_all_trades(trades)
 
@@ -3624,6 +3808,11 @@ class Trader:
                 current["protection_materialized_at"] = self._now_ist_iso()
         if oid and oid != self.DRY_RUN_PLACEHOLDER_ORDER_ID:
             current["protection_armed_date"] = self._today_ist_iso()
+        # A persisted active-book row is a fill (or dry-run fill), even with SL=0 / no OCO.
+        if current.get("exit_in_progress") or str(current.get("fsm_state") or "").upper() == TradeState.EXITING.value:
+            current["fsm_state"] = TradeState.EXITING.value
+        else:
+            current["fsm_state"] = TradeState.ACTIVE.value
         trades[symbol] = current
         self._save_all_trades(trades)
 
@@ -7295,6 +7484,7 @@ class Trader:
                 order_ids = self._oco_ids_from_record(rec_active)
                 order_id = order_ids[0] if order_ids else None
                 no_oco_exit_fallback = False
+                trail_create_protection = False
                 logger.info(f"[STAGE 4] Order IDs for {symbol}: {order_ids}")
                 if not order_id:
                     # EXIT_ALL can still flatten a live broker position even when
@@ -7305,6 +7495,12 @@ class Trader:
                         logger.info(
                             f"[STAGE 4] No OCO order ID for {symbol}; proceeding with EXIT_ALL "
                             "position-flatten fallback."
+                        )
+                    elif action == "TRAIL_SL":
+                        trail_create_protection = True
+                        logger.info(
+                            f"[STAGE 4] No OCO order ID for {symbol}; TRAIL_SL will create "
+                            "first protection from trail price."
                         )
                     else:
                         logger.warning(f"[STAGE 4] No order ID found for {symbol} in active_trades.json.")
@@ -7354,6 +7550,11 @@ class Trader:
                     return (
                         f"🧪 [DRY RUN] UPDATE_TGT for {symbol}: signal {raw_tgt} → would place {eff_tgt} "
                         f"(simulated; no OCO on broker for this symbol).{self._ltp_suffix_for_symbol(symbol)}"
+                    )
+
+                if trail_create_protection and action == "TRAIL_SL":
+                    return self._trail_sl_create_protection(
+                        symbol, float(trade_data.get("stop_loss") or 0), rec_active
                     )
 
                 if not self.client:

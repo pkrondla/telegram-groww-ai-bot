@@ -15,6 +15,13 @@ from src.core.metrics import metrics
 from src.persistence.db import db
 from src.core.logger import logger
 from src.trading.state.trade_fsm import TradeState, record_has_fill_evidence
+from src.trading.reference.option_symbols import (
+    INDEX_UNDERLYINGS as _SHARED_INDEX_UNDERLYINGS,
+    build_index_monthly_symbol,
+    build_index_weekly_symbol,
+    parse_expiry_date_field,
+    weekly_token_to_month,
+)
 
 class Trader:
     """
@@ -36,7 +43,7 @@ class Trader:
     SMART_SEGMENT = "FNO"
     # Shared across accounts so one 429 cools down every subsequent token fetch.
     _token_cooldown_until = 0.0
-    INDEX_UNDERLYINGS = frozenset({"NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX", "BANKEX"})
+    INDEX_UNDERLYINGS = _SHARED_INDEX_UNDERLYINGS
     EXIT_LOCK_TTL_SECONDS = 180
     
     def __init__(
@@ -5459,8 +5466,9 @@ class Trader:
     @staticmethod
     def _index_monthly_alpha_variant(symbol: str) -> str | None:
         """
-        Derive NIFTY26MAY23850CE-style symbol from a weekly-style token when month
-        was given without a day (mis-built as NIFTY2652623850CE).
+        Derive NIFTY26MAY23850CE-style symbol from a weekly-style token.
+        Used only when month-end / same-expiry promotion is confirmed — not as a
+        blind resolve fallback for true weeklies.
         """
         p = Trader._parse_option_symbol_parts(symbol)
         if not p:
@@ -5474,26 +5482,22 @@ class Trader:
         ot = str(p.get("option_type") or "").upper()
         if len(yy) != 2 or mm < 1 or mm > 12 or not strike or ot not in ("CE", "PE"):
             return None
-        month_abbr = {
-            1: "JAN", 2: "FEB", 3: "MAR", 4: "APR", 5: "MAY", 6: "JUN",
-            7: "JUL", 8: "AUG", 9: "SEP", 10: "OCT", 11: "NOV", 12: "DEC",
-        }.get(mm)
-        if not month_abbr:
-            return None
-        monthly = f"{u}{yy}{month_abbr}{strike}{ot}"
+        monthly = build_index_monthly_symbol(u, yy, mm, strike, ot)
         if monthly.upper() == str(symbol).upper():
             return None
         return monthly
 
     def _index_weekly_symbol_encoding_variants(self, symbol: str) -> list[str]:
         """
-        Groww/NSE index weeklies use YY + M + DD + strike (month 1-9 unpadded).
-        Older builds emitted YY + MM + DD; add the compact token so resolution still hits.
+        Emit canonical NSE weekly encoding (1-9 / O / N / D) plus legacy numeric
+        forms (10/11/12 and zero-padded month) so older in-flight symbols still resolve.
         """
         p = self._parse_option_symbol_parts(symbol)
         if not p or not isinstance(p.get("expiry"), datetime.date):
             return []
         u = str(p.get("underlying") or "").upper()
+        if u not in self.INDEX_UNDERLYINGS:
+            return []
         yy = str(p.get("yy") or "")
         mm = int(p.get("month_num") or 0)
         day = int(p.get("day") or 0)
@@ -5502,10 +5506,37 @@ class Trader:
         if not u or len(yy) != 2 or mm < 1 or mm > 12 or day < 1 or day > 31 or not strike or ot not in ("CE", "PE"):
             return []
         dd = str(day).zfill(2)
-        compact = f"{u}{yy}{mm}{dd}{strike}{ot}"
+        canonical = build_index_weekly_symbol(u, yy, mm, day, strike, ot)
+        legacy_num = f"{u}{yy}{mm}{dd}{strike}{ot}"
         padded_m = f"{u}{yy}{str(mm).zfill(2)}{dd}{strike}{ot}"
-        out = [compact, padded_m]
+        out = [canonical, legacy_num, padded_m]
         return [s for s in out if s and s.upper() != str(symbol).upper()]
+
+    def _same_expiry_monthly_variant(self, symbol: str) -> str | None:
+        """
+        If the weekly request's calendar day is the monthly contract's expiry on Groww,
+        return the monthly alpha symbol. Prevents blind weekly→monthly swaps (wrong LTP).
+        """
+        p = self._parse_option_symbol_parts(symbol)
+        if not p or not isinstance(p.get("expiry"), datetime.date):
+            return None
+        monthly = self._index_monthly_alpha_variant(symbol)
+        if not monthly:
+            return None
+        # Prefer live/API instrument row when available.
+        for ex in ("NSE", "NFO", "BSE", "BFO"):
+            try:
+                row = self._get_instrument(exchange=ex, trading_symbol=monthly)
+            except Exception:
+                row = None
+            if not row:
+                continue
+            exp = parse_expiry_date_field(row.get("expiry_date") or row.get("expiry"))
+            if exp == p.get("expiry"):
+                return monthly
+            # Monthly exists but different expiry — do not promote.
+            return None
+        return None
 
     def _variant_list(self, symbol: str) -> list[str]:
         variants = [symbol]
@@ -5554,54 +5585,71 @@ class Trader:
                     variants.extend(m_variants)
                     break
         variants.extend(self._index_weekly_symbol_encoding_variants(symbol))
-        monthly_alpha = self._index_monthly_alpha_variant(symbol)
-        if monthly_alpha:
-            variants.append(monthly_alpha)
+        # Only promote weekly → monthly when Groww monthly expiry matches the requested day.
+        if parsed and isinstance(parsed.get("expiry"), datetime.date):
+            same_exp_monthly = self._same_expiry_monthly_variant(symbol)
+            if same_exp_monthly:
+                variants.append(same_exp_monthly)
+        else:
+            monthly_alpha = self._index_monthly_alpha_variant(symbol)
+            if monthly_alpha:
+                variants.append(monthly_alpha)
         return list(dict.fromkeys(variants))
 
     @staticmethod
     def _parse_index_weekly_numeric(s: str) -> dict | None:
         """
-        Index weekly after YY (NSE-style): Oct–Dec use a 2-digit month 10|11|12; Jan–Sep
-        use a single digit 1–9 then DD (2 digits) then strike. Padded months 01–09 use
-        a leading 0 on the tail (YY + 0M + DD + strike).
+        Index weekly after YY (NSE-style):
+          - Jan–Sep: digit 1–9 + DD + strike
+          - Oct–Dec: letter O/N/D + DD + strike
+          - Legacy/mis-built: 10|11|12 or zero-padded 0M + DD + strike
         """
         m = re.match(
-            r"^(?P<underlying>[A-Z&_\-]+)(?P<yy>\d{2})(?P<tail>\d+)(?P<option_type>CE|PE)$",
+            r"^(?P<underlying>[A-Z&_\-]+)(?P<yy>\d{2})(?P<body>.+)(?P<option_type>CE|PE)$",
             s,
         )
         if not m:
-            # Tickers that start with digits (360ONE) then YY + date + strike.
             m = re.match(
-                r"^(?P<underlying>\d+[A-Z][A-Z0-9&_\-]*)(?P<yy>\d{2})(?P<tail>\d+)(?P<option_type>CE|PE)$",
+                r"^(?P<underlying>\d+[A-Z][A-Z0-9&_\-]*)(?P<yy>\d{2})(?P<body>.+)(?P<option_type>CE|PE)$",
                 s,
             )
         if not m:
             return None
-        yy_s = m.group("yy")
-        tail = m.group("tail")
-        if len(tail) < 3:
+        # Reject monthly-alpha bodies (handled by the other parser branch).
+        body = m.group("body")
+        if re.match(
+            r"^(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)",
+            body,
+        ):
             return None
 
-        mm: int
-        dd: int
-        strike: str
-        if tail.startswith(("10", "11", "12")):
-            if len(tail) < 4:
-                return None
-            mm = int(tail[:2])
-            dd = int(tail[2:4])
-            strike = tail[4:]
-        elif tail.startswith("0") and len(tail) >= 4:
-            mm = int(tail[0:2])
-            dd = int(tail[2:4])
-            strike = tail[4:]
-        else:
-            mm = int(tail[0])
-            dd = int(tail[1:3])
-            strike = tail[3:]
+        yy_s = m.group("yy")
+        mm: int | None = None
+        dd: int | None = None
+        strike: str = ""
 
-        if mm < 1 or mm > 12 or dd < 1 or dd > 31 or not strike.isdigit():
+        # Letter codes O/N/D (Oct/Nov/Dec weeklies).
+        if body and body[0] in "OND" and len(body) >= 3 and body[1:3].isdigit():
+            mm = weekly_token_to_month(body[0])
+            dd = int(body[1:3])
+            strike = body[3:]
+        elif body.startswith(("10", "11", "12")) and len(body) >= 4 and body[2:4].isdigit():
+            # Legacy numeric Oct–Dec (incorrect vs NSE, but parse for in-flight symbols).
+            mm = int(body[:2])
+            dd = int(body[2:4])
+            strike = body[4:]
+        elif body.startswith("0") and len(body) >= 4 and body[0:2].isdigit() and body[2:4].isdigit():
+            mm = int(body[0:2])
+            dd = int(body[2:4])
+            strike = body[4:]
+        elif body and body[0].isdigit() and len(body) >= 3 and body[1:3].isdigit():
+            mm = int(body[0])
+            dd = int(body[1:3])
+            strike = body[3:]
+        else:
+            return None
+
+        if mm is None or dd is None or mm < 1 or mm > 12 or dd < 1 or dd > 31 or not strike.isdigit():
             return None
         try:
             exp = datetime.date(2000 + int(yy_s), mm, dd)

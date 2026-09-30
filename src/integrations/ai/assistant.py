@@ -9,6 +9,11 @@ from src.core.config import Config
 from src.core.logger import logger
 from src.core.models import TradeSignal
 from src.trading.reference.symbol_manager import symbol_manager
+from src.trading.reference.option_symbols import (
+    build_index_monthly_symbol,
+    build_index_weekly_symbol,
+    is_index_monthly_expiry_day,
+)
 from src.core.metrics import metrics
 
 # ---------------------------------------------------------------------------
@@ -1011,8 +1016,8 @@ class Assistant:
     @classmethod
     def _safe_month_num(cls, raw_month) -> str:
         abbr = cls._safe_month_abbr(raw_month)
-        # Calendar month number 01-12 (used for date math). Index *weekly* Groww symbols
-        # use a single-digit month 1-9 / two-digit 10-11/11-12 in the token (see _apply_symbol_factory).
+        # Calendar month number 01-12 (used for date math / monthly expiry checks).
+        # Index weekly Groww tokens use 1-9 / O / N / D — see option_symbols.weekly_month_token.
         mm = cls._MONTH_NUM.get(abbr, str(cls._now_ist().month))
         mm = re.sub(r"[^\d]", "", str(mm or ""))
         if not mm:
@@ -1182,16 +1187,25 @@ class Assistant:
         groww_symbol = f"{underlying}{yy}{expiry_month}{strike}{option_type}"
 
         if is_index:
-            if index_month_only:
-                # Month name only (e.g. "MAY") → NIFTY26MAY23850CE on Groww/NSE.
-                groww_symbol = f"{underlying}{yy}{expiry_month}{strike}{option_type}"
+            month_num = int(self._safe_month_num(raw_month))
+            year_4d = int(yyyy)
+            day_num = int(expiry_day)
+            # Month-name only, or explicit day that is the monthly expiry week:
+            # Groww lists that contract as monthly alpha (NIFTY26OCT…), never weekly (NIFTY26O27…).
+            use_monthly = index_month_only or is_index_monthly_expiry_day(
+                underlying, day=day_num, month=month_num, year=year_4d
+            )
+            if use_monthly:
+                groww_symbol = build_index_monthly_symbol(
+                    underlying, yy, month_num, strike, option_type
+                )
                 data["expiry_format"] = "monthly"
             else:
-                # NSE/Groww index weekly: YY + M (no leading zero) + DD + strike + CE|PE
-                # e.g. 5 May 2026 -> NIFTY2650524200CE — NOT NIFTY26050524200CE (YY+MM+DD).
-                month_num = self._safe_month_num(raw_month)
-                month_token = str(int(month_num))
-                groww_symbol = f"{underlying}{yy}{month_token}{expiry_day}{strike}{option_type}"
+                # NSE/Groww index weekly: YY + (1-9|O|N|D) + DD + strike + CE|PE
+                # e.g. 5 May -> NIFTY26505…; 6 Oct -> NIFTY26O06… (not …261006…).
+                groww_symbol = build_index_weekly_symbol(
+                    underlying, yy, month_num, day_num, strike, option_type
+                )
                 data["expiry_format"] = "weekly"
 
         # Keep normalized expiry fields in sync with the symbol factory output.

@@ -109,7 +109,7 @@ class TestGrowwTokenCooldown(unittest.TestCase):
             dry_run=False,
             account_id="a1",
             api_key="k",
-            api_secret="s",
+            totp_secret="JBSWY3DPEHPK3PXP",
         )
         self.assertIsNone(first.client)
         self.assertEqual(_FakeGrowwAPI.token_calls, 1)
@@ -118,7 +118,7 @@ class TestGrowwTokenCooldown(unittest.TestCase):
             dry_run=False,
             account_id="a2",
             api_key="k2",
-            api_secret="s2",
+            totp_secret="KRSXG5CTMVRXEZLU",
         )
         self.assertIsNone(second.client)
         self.assertEqual(_FakeGrowwAPI.token_calls, 1)
@@ -133,7 +133,7 @@ class TestGrowwTokenCooldown(unittest.TestCase):
             dry_run=False,
             account_id="a1",
             api_key="k",
-            api_secret="s",
+            totp_secret="JBSWY3DPEHPK3PXP",
         )
         self.assertIsNotNone(trader.client)
         self.assertEqual(_FakeGrowwAPI.token_calls, 1)

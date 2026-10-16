@@ -159,6 +159,10 @@ class Config:
     # Pause Groww get_access_token after HTTP 429 so a crash-loop cannot keep
     # exhausting the broker quota. Background auth watcher resumes after this.
     GROWW_TOKEN_COOLDOWN_SEC = max(60, int(os.getenv("GROWW_TOKEN_COOLDOWN_SEC", "180")))
+    # Groww allows 150 access-token requests per 24h (30/min). Re-logins after the first are
+    # spaced at least GROWW_TOKEN_REFRESH_MIN_SEC apart and capped per rolling 24h.
+    GROWW_TOKEN_REFRESH_MIN_SEC = max(30, int(os.getenv("GROWW_TOKEN_REFRESH_MIN_SEC", "300")))
+    GROWW_TOKEN_DAILY_MAX = max(1, int(os.getenv("GROWW_TOKEN_DAILY_MAX", "100")))
 
     # When False (default), EXTEND_RANGE for an unknown symbol is rejected instead of
     # silently becoming a fresh BUY. Set True only if you intentionally want that behaviour.
@@ -173,7 +177,8 @@ class Config:
     def groww_accounts(cls) -> list[AccountConfig]:
         """
         Multi-account resolution (strict):
-        - GROWW_ACCOUNTS_JSON must be provided and must contain at least one enabled account with api_key.
+        - GROWW_ACCOUNTS_JSON must be provided and must contain at least one enabled account.
+        - Every enabled account needs api_key (the Groww TOTP token) and totp_secret.
         """
         if not cls.GROWW_ACCOUNTS_JSON:
             raise ValueError("Missing GROWW_ACCOUNTS_JSON (multi-account mode is required).")
@@ -181,7 +186,16 @@ class Config:
         enabled = [a for a in accounts if a.enabled]
         if not enabled:
             raise ValueError("GROWW_ACCOUNTS_JSON has no enabled accounts.")
-        if not any(str(a.api_key or "").strip() for a in enabled):
-            raise ValueError("GROWW_ACCOUNTS_JSON enabled accounts missing api_key.")
+        for a in enabled:
+            if not str(a.api_key or "").strip():
+                raise ValueError(
+                    f"GROWW_ACCOUNTS_JSON account '{a.account_id}' is missing api_key "
+                    "(use the Groww TOTP token)."
+                )
+            if not str(a.totp_secret or "").strip():
+                raise ValueError(
+                    f"GROWW_ACCOUNTS_JSON account '{a.account_id}' is missing totp_secret "
+                    "(the secret shown when generating the Groww TOTP token)."
+                )
         return accounts
 

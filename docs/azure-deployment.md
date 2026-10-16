@@ -215,9 +215,29 @@ The CD workflow needs these repository secrets:
 | `TELEGRAM_ADMIN_ID` | Telegram admin user ID |
 | `TELEGRAM_BOT_TOKEN` | Optional Telegram Bot API token for notifications |
 | `OPENAI_API_KEY` | OpenAI API key |
-| `GROWW_ACCOUNTS_JSON` | Groww account configuration JSON |
+| `GROWW_ACCOUNTS_JSON` | Groww account configuration JSON (TOTP login, see below) |
 | `GHCR_USERNAME` | GitHub username or org that can read the GHCR package, needed for private packages |
 | `GHCR_TOKEN` | GitHub token with `read:packages`, needed for private packages |
+
+### `GROWW_ACCOUNTS_JSON` format (TOTP login)
+
+The bot logs in to Groww with the TOTP flow, so nothing needs approving on the Groww
+Cloud API Keys page each day. Generate the credentials with **Generate TOTP token** on
+that page (under the *Generate API key* dropdown), then store:
+
+```json
+[{"account_id":"acc1","display_name":"Account 1","enabled":true,
+  "api_key":"<TOTP token>","totp_secret":"<TOTP secret>","account_capital_inr":500000}]
+```
+
+- `api_key` is the TOTP token; `totp_secret` is the base32 secret Groww shows once.
+- The old `api_key` + `api_secret` login is no longer supported; the bot refuses to start
+  if an enabled account still has `api_secret` without `totp_secret`.
+- Groww access tokens expire daily at 06:00 IST; the bot renews them itself with a fresh
+  TOTP code. The container clock must be accurate (Azure/EC2 are fine).
+- Groww allows 150 token requests per 24h. `GROWW_TOKEN_REFRESH_MIN_SEC` (default 300) and
+  `GROWW_TOKEN_DAILY_MAX` (default 100) keep re-logins within that limit.
+- Check credentials with `python scripts/verify_groww_totp.py` before deploying.
 
 The CD workflow also supports these repository variables:
 

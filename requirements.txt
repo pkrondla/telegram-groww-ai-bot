@@ -5,3 +5,4 @@ python-dotenv==0.21.0
 requests==2.32.3
 pytz==2024.1
 growwapi==1.5.0
+pyotp==2.10.0

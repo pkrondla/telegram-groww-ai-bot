@@ -149,9 +149,11 @@ async def run_bot():
 
     try:
         accounts = Config.groww_accounts()
-        any_key = any(str(a.api_key or "").strip() for a in accounts)
+        any_key = any(
+            str(a.api_key or "").strip() and str(a.totp_secret or "").strip() for a in accounts
+        )
         if not any_key:
-            logger.warning("GROWW_API credentials missing. Groww client features may not work.")
+            logger.warning("GROWW TOTP credentials missing. Groww client features may not work.")
     except Exception:
         # Config.groww_accounts() can raise if GROWW_ACCOUNTS_JSON is malformed.
         logger.warning("GROWW accounts config invalid/missing. Groww client features may not work.")

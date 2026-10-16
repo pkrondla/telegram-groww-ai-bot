@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import binascii
 import json
 from dataclasses import dataclass, field
 from typing import Any
@@ -10,8 +12,11 @@ class AccountConfig:
     account_id: str
     display_name: str
     enabled: bool = True
+    # Groww "TOTP token" (Groww Cloud API Keys > Generate TOTP token). Sent as the bearer
+    # credential when exchanging a TOTP code for the daily access token.
     api_key: str = ""
-    api_secret: str = ""
+    # Base32 secret that goes with the TOTP token (shown once by Groww; or the QR secret).
+    totp_secret: str = ""
     dry_run: bool | None = None
     account_capital_inr: float = 0.0
 
@@ -31,6 +36,23 @@ def _to_bool(value: Any, default: bool = False) -> bool:
     if s in ("0", "false", "no", "n", "off"):
         return False
     return default
+
+
+def normalize_totp_secret(value: Any) -> str:
+    """Strip whitespace/dashes and upper-case a base32 TOTP secret."""
+    return "".join(str(value or "").split()).replace("-", "").upper()
+
+
+def is_valid_totp_secret(secret: str) -> bool:
+    """True when *secret* is non-empty, valid base32 (what pyotp expects)."""
+    s = normalize_totp_secret(secret)
+    if not s:
+        return False
+    try:
+        base64.b32decode(s + "=" * (-len(s) % 8), casefold=True)
+    except (binascii.Error, ValueError):
+        return False
+    return True
 
 
 def parse_accounts_json(raw: str) -> list[AccountConfig]:
@@ -56,13 +78,27 @@ def parse_accounts_json(raw: str) -> list[AccountConfig]:
             cap = float(item.get("account_capital_inr") or 0)
         except Exception:
             cap = 0.0
+        enabled = _to_bool(item.get("enabled"), True)
+        totp_secret = normalize_totp_secret(item.get("totp_secret"))
+        if enabled:
+            if str(item.get("api_secret") or "").strip() and not totp_secret:
+                raise ValueError(
+                    f"Account '{account_id}' uses the old api_key/api_secret login, which is no "
+                    "longer supported (it needed a daily manual approval). In Groww Cloud API Keys "
+                    "use 'Generate TOTP token', then set \"api_key\" to the TOTP token and add "
+                    "\"totp_secret\" with its secret; remove \"api_secret\"."
+                )
+            if totp_secret and not is_valid_totp_secret(totp_secret):
+                raise ValueError(
+                    f"Account '{account_id}' has an invalid totp_secret (expected a base32 string)."
+                )
         out.append(
             AccountConfig(
                 account_id=account_id,
                 display_name=display_name,
-                enabled=_to_bool(item.get("enabled"), True),
+                enabled=enabled,
                 api_key=str(item.get("api_key") or "").strip(),
-                api_secret=str(item.get("api_secret") or "").strip(),
+                totp_secret=totp_secret,
                 dry_run=(
                     _to_bool(item.get("dry_run"), False)
                     if item.get("dry_run") is not None
@@ -72,4 +108,3 @@ def parse_accounts_json(raw: str) -> list[AccountConfig]:
             )
         )
     return out
-

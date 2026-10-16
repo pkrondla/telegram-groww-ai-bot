@@ -53,7 +53,7 @@ class Trader:
         account_id: str,
         account_name: str | None = None,
         api_key: str | None = None,
-        api_secret: str | None = None,
+        totp_secret: str | None = None,
         account_capital_inr: float = 0.0,
     ):
         self.account_id = str(account_id or "").strip()
@@ -61,7 +61,13 @@ class Trader:
             raise ValueError("Trader requires non-empty account_id")
         self.account_name = str(account_name or self.account_id)
         self._api_key_override = str(api_key or "")
-        self._api_secret_override = str(api_secret or "")
+        self._totp_secret_override = str(totp_secret or "")
+        # Access-token lifecycle (Groww tokens expire daily at 06:00 IST).
+        self._token_lock = threading.RLock()
+        self._token_issued_at = None  # tz-aware datetime (IST) of the last successful login
+        self._last_token_attempt_mono = 0.0
+        self._last_totp_step = None
+        self._token_fetch_times: list[float] = []  # monotonic times of fetches in rolling 24h
         try:
             self.account_capital_inr = max(0.0, float(account_capital_inr or 0.0))
         except Exception:
@@ -102,12 +108,81 @@ class Trader:
             reason[:160],
         )
 
+    # ------------------------------------------------------------------
+    # Groww authentication (TOTP flow: no daily manual approval needed)
+    # ------------------------------------------------------------------
+    _TOTP_STEP_SEC = 30
+    _TOKEN_EXPIRY_HOUR_IST = 6  # Groww access tokens expire daily at 06:00 IST
+    _TOKEN_WINDOW_SEC = 86400
+
+    @staticmethod
+    def _is_groww_totp_error(exc: BaseException) -> bool:
+        msg = str(exc).lower()
+        return any(t in msg for t in ("totp", "otp", "invalid", "bad request", "400"))
+
+    @staticmethod
+    def _is_groww_auth_error(exc: BaseException) -> bool:
+        msg = str(exc).lower()
+        return any(
+            t in msg
+            for t in (
+                "401", "403", "unauthor", "unauthenticated", "forbidden",
+                "expired", "invalid token", "invalid access token",
+            )
+        )
+
+    def _token_is_stale(self, now=None) -> bool:
+        """True when the current access token was issued before the latest 06:00 IST expiry."""
+        issued = self._token_issued_at
+        if issued is None:
+            return False
+        ist = pytz.timezone("Asia/Kolkata")
+        now = now or datetime.datetime.now(ist)
+        boundary = now.replace(hour=self._TOKEN_EXPIRY_HOUR_IST, minute=0, second=0, microsecond=0)
+        if now < boundary:
+            boundary -= datetime.timedelta(days=1)
+        return issued < boundary
+
+    def _fetch_access_token(self, api_key: str, totp_secret: str) -> str:
+        """Exchange the Groww TOTP token + a fresh TOTP code for a daily access token."""
+        import pyotp
+        from growwapi import GrowwAPI
+
+        # Never submit the same 30s TOTP code twice; wait for the next window if needed.
+        step = int(time.time() // self._TOTP_STEP_SEC)
+        if self._last_totp_step == step:
+            time.sleep(self._TOTP_STEP_SEC - (time.time() % self._TOTP_STEP_SEC) + 0.5)
+            step = int(time.time() // self._TOTP_STEP_SEC)
+        self._last_totp_step = step
+        code = pyotp.TOTP(totp_secret).now()
+        return GrowwAPI.get_access_token(api_key=api_key, totp=code)
+
+    def _refresh_access_token(self, reason: str) -> bool:
+        """
+        Re-login with TOTP (throttled/capped inside _initialize_groww_client).
+        Returns True only when a new access token was actually obtained.
+        """
+        if not str(self._totp_secret_override or "").strip():
+            return False
+        before = self._access_token
+        logger.info("Groww re-login for account %s (%s).", self.account_id, reason)
+        self._initialize_groww_client(log_fail=True)
+        return self.client is not None and bool(self._access_token) and self._access_token != before
+
     def _initialize_groww_client(self, *, log_fail: bool = True) -> bool:
+        with self._token_lock:
+            return self._initialize_groww_client_locked(log_fail=log_fail)
+
+    def _initialize_groww_client_locked(self, *, log_fail: bool) -> bool:
         api_key = str(self._api_key_override or "").strip()
-        api_secret = str(self._api_secret_override or "").strip()
-        if not api_key:
+        totp_secret = str(self._totp_secret_override or "").strip()
+        if not api_key or not totp_secret:
             if log_fail:
-                logger.warning("Groww api_key missing for account %s. Groww client not initialized.", self.account_id)
+                logger.warning(
+                    "Groww api_key (TOTP token) or totp_secret missing for account %s. "
+                    "Groww client not initialized.",
+                    self.account_id,
+                )
             self.client = None
             return False
         remaining = self._groww_token_cooldown_remaining()
@@ -119,37 +194,66 @@ class Trader:
                     remaining,
                 )
             return self.client is not None
+
+        is_refresh = self._token_issued_at is not None
+        now_mono = time.monotonic()
+        if self._last_token_attempt_mono is not None:
+            min_gap = max(30, int(getattr(Config, "GROWW_TOKEN_REFRESH_MIN_SEC", 300)))
+            if now_mono - self._last_token_attempt_mono < min_gap:
+                return self.client is not None
+        self._token_fetch_times = [
+            t for t in self._token_fetch_times if now_mono - t < self._TOKEN_WINDOW_SEC
+        ]
+        daily_max = max(1, int(getattr(Config, "GROWW_TOKEN_DAILY_MAX", 100)))
+        if len(self._token_fetch_times) >= daily_max:
+            if log_fail:
+                logger.error(
+                    "Groww token fetch cap reached for account %s (%d in 24h; Groww limit is 150).",
+                    self.account_id,
+                    len(self._token_fetch_times),
+                )
+            return self.client is not None
+
         try:
             from growwapi import GrowwAPI
 
-            # Prefer exchanging API key + secret for an access token.
-            # growwapi expects Authorization: Bearer <token> for API calls.
+            self._last_token_attempt_mono = now_mono
+            self._token_fetch_times.append(now_mono)
             token = None
             token_error: BaseException | None = None
-            if api_secret:
-                try:
-                    token = GrowwAPI.get_access_token(
-                        api_key=api_key, secret=api_secret
-                    )
-                except Exception as e:
-                    token_error = e
-                    if self._is_groww_rate_limit_error(e):
-                        self._arm_groww_token_cooldown(str(e))
+            try:
+                token = self._fetch_access_token(api_key, totp_secret)
+            except Exception as e:
+                token_error = e
+                if not self._is_groww_rate_limit_error(e) and self._is_groww_totp_error(e):
+                    # Likely clock drift / a code that was just consumed: retry once with the next code.
                     if log_fail:
-                        logger.error(f"Groww access token fetch failed: {e}")
+                        logger.warning(f"Groww TOTP login rejected ({e}); retrying once with a fresh code.")
+                    try:
+                        token = self._fetch_access_token(api_key, totp_secret)
+                        token_error = None
+                    except Exception as e2:
+                        token_error = e2
+                if token_error is not None:
+                    if self._is_groww_rate_limit_error(token_error):
+                        self._arm_groww_token_cooldown(str(token_error))
+                    if log_fail:
+                        logger.error(f"Groww access token fetch failed: {token_error}")
 
-            # A rate-limited token exchange must not fall back to the raw api_key:
-            # that produces "Access forbidden" and then another token fetch.
-            if not token and token_error is not None and self._is_groww_rate_limit_error(token_error):
-                self._access_token = None
-                self.client = None
-                return False
+            if not token:
+                # No fallback to the raw api_key: a TOTP token is not a bearer token.
+                if not is_refresh:
+                    self._access_token = None
+                    self.client = None
+                return self.client is not None
 
-            # Fall back to using api_key directly (some users store bearer tokens there)
-            self._access_token = token or api_key
+            self._access_token = token
+            self._token_issued_at = datetime.datetime.now(pytz.timezone("Asia/Kolkata"))
             self.client = GrowwAPI(self._access_token)
             if log_fail:
-                if self.place_entry_orders:
+                if is_refresh:
+                    logger.info("Groww access token refreshed for account %s.", self.account_id)
+                elif self.place_entry_orders:
                     logger.info("Trader initialized in LIVE mode (entry orders enabled).")
                 else:
                     logger.info(
@@ -160,8 +264,9 @@ class Trader:
         except Exception as e:
             if log_fail:
                 logger.error(f"Groww client init failed for account {self.account_id}: {e}")
-            self.client = None
-            return False
+            if not is_refresh:
+                self.client = None
+            return self.client is not None
 
     # Limit concurrent Groww broker API calls across all threads.
     _broker_semaphore = threading.Semaphore(3)
@@ -182,6 +287,7 @@ class Trader:
         """
         metrics.increment("broker_calls")
         last_err: Exception | None = None
+        auth_retried = False
         for attempt in range(1, 4):
             try:
                 with self._broker_semaphore:
@@ -190,6 +296,21 @@ class Trader:
                 last_err = e
                 err_str = str(e).lower()
                 is_transient = any(k in err_str for k in self._TRANSIENT_BROKER_ERRORS)
+                # Expired/invalid access token: re-login via TOTP once, then retry the call.
+                if (
+                    not is_transient
+                    and not auth_retried
+                    and attempt < 3
+                    and str(self._totp_secret_override or "").strip()
+                    and self._is_groww_auth_error(e)
+                ):
+                    auth_retried = True
+                    old_client = self.client
+                    if self._refresh_access_token("auth error on broker call"):
+                        owner = getattr(fn, "__self__", None)
+                        if owner is not None and owner is old_client and self.client is not None:
+                            fn = getattr(self.client, getattr(fn, "__name__", ""), fn)
+                        continue
                 if is_transient and attempt < 3:
                     wait = 2 ** attempt  # 2 s, 4 s
                     logger.warning(
@@ -219,6 +340,9 @@ class Trader:
         """
         if self.client is None:
             self._initialize_groww_client(log_fail=log_fail)
+        elif self._token_is_stale():
+            # Access tokens expire daily at 06:00 IST; renew with TOTP before using it.
+            self._refresh_access_token("access token passed 06:00 IST expiry")
         if self.client is None:
             return False
         try:
@@ -232,7 +356,7 @@ class Trader:
             # Immediate re-init after 403/429 doubles token fetches during a crash loop.
             if self._is_groww_rate_limit_error(e) or self._groww_token_cooldown_remaining() > 0:
                 return False
-            # Token could have become valid after manual approval; retry full client init once.
+            # Token may be expired/invalid; re-login with TOTP (throttled) and retry once.
             self._initialize_groww_client(log_fail=log_fail)
             if self.client is None:
                 return False

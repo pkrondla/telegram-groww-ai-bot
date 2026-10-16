@@ -1,4 +1,4 @@
-name: CD - Deploy to Windows EC2 (Native Python + NSSM)
+name: CD - Deploy to AWS Windows EC2 (Native Python + NSSM Service)
 
 on:
   workflow_dispatch:

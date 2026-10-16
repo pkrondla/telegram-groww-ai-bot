@@ -53,7 +53,7 @@ The repository has two deployment workflows:
    ghcr.io/<owner>/<repo>:latest
    ```
 
-3. The `CD - Provision Infra and Deploy` workflow provisions Azure and deploys the image. You can also run it manually with an `image_tag` input.
+3. The `CD - Deploy to Azure Container Apps (Provision Infra + Docker Image)` workflow provisions Azure and deploys the image. You can also run it manually with an `image_tag` input.
 
 ## Manual Local Deployment
 

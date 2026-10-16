@@ -1,4 +1,4 @@
-name: CD - Provision Infra and Deploy
+name: CD - Deploy to Azure Container Apps (Provision Infra + Docker Image)
 
 on:
   workflow_dispatch:

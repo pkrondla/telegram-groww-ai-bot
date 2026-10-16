@@ -65,7 +65,9 @@ class Trader:
         # Access-token lifecycle (Groww tokens expire daily at 06:00 IST).
         self._token_lock = threading.RLock()
         self._token_issued_at = None  # tz-aware datetime (IST) of the last successful login
-        self._last_token_attempt_mono = 0.0
+        # None = never attempted. Must not be 0.0: time.monotonic() is time-since-boot, so on a
+        # freshly booted host (< refresh-min-gap uptime) 0.0 would throttle the very first login.
+        self._last_token_attempt_mono: float | None = None
         self._last_totp_step = None
         self._token_fetch_times: list[float] = []  # monotonic times of fetches in rolling 24h
         try:

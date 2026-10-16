@@ -120,6 +120,15 @@ class TestTotpLogin(unittest.TestCase):
         self.assertRegex(calls[0]["totp"], r"^\d{6}$")
         self.assertEqual(t._access_token, "tok1")
 
+    def test_first_login_not_throttled_on_freshly_booted_host(self):
+        # time.monotonic() is time-since-boot; a host up for only a few seconds must still log in.
+        calls: list = []
+        with patch.dict(sys.modules, {"growwapi": _fake_growwapi(["tok1"], calls)}):
+            with patch("src.trading.execution.trader.time.monotonic", return_value=5.0):
+                t = Trader(dry_run=True, account_id="a1", api_key="k", totp_secret=SECRET)
+        self.assertIsNotNone(t.client)
+        self.assertEqual(len(calls), 1)
+
     def test_missing_totp_secret_means_no_client_and_no_token_call(self):
         calls: list = []
         with patch.dict(sys.modules, {"growwapi": _fake_growwapi(["x"], calls)}):

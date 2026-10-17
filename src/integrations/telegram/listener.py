@@ -34,6 +34,52 @@ def collapse_reply_ancestor_texts(texts: list[str] | None) -> str:
     return "\n\n".join(parts)
 
 
+def bot_user_id_from_token(token: str | None) -> int | None:
+    """Telegram bot user id is the numeric prefix of ``BOT_ID:SECRET``."""
+    prefix = str(token or "").split(":", 1)[0]
+    return int(prefix) if prefix.isdigit() else None
+
+
+def is_foreign_bot_private_chat(
+    *,
+    chat_id,
+    is_private: bool,
+    is_group: bool,
+    is_channel: bool,
+    own_bot_user_id: int | None,
+    admin_id,
+    target_chat_id,
+    chat_is_bot: bool | None = None,
+) -> bool:
+    """True when Telethon saw a DM that is not our Groww bot / admin / signal chat.
+
+    The listener uses the admin's user session, so it also sees DMs with other
+    bots (for example the ORB bot). Those must not be treated as Groww commands.
+    """
+    if is_group or is_channel:
+        return False
+    try:
+        peer = int(chat_id)
+    except (TypeError, ValueError):
+        return False
+
+    def _as_int(value):
+        try:
+            return int(value) if value is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    if _as_int(target_chat_id) == peer:
+        return False
+    if _as_int(admin_id) == peer:
+        return False
+    if own_bot_user_id is not None and int(own_bot_user_id) == peer:
+        return False
+    if is_private:
+        return True
+    return bool(chat_is_bot)
+
+
 # Admin override commands (sent by admin to their own chat or bot)
 _OVERRIDE_COMMANDS = {
     "PAUSE":    "pause",
@@ -941,6 +987,24 @@ class BotListener:
         parent_text = ""
         is_reply = False
         sender_id = getattr(event, "sender_id", None)
+
+        # User-session Telethon sees every private chat, including DMs with the
+        # ORB bot. Do not treat those as Groww admin commands (HELP/STATUS/...).
+        if is_foreign_bot_private_chat(
+            chat_id=event.chat_id,
+            is_private=bool(getattr(event, "is_private", False)),
+            is_group=bool(getattr(event, "is_group", False)),
+            is_channel=bool(getattr(event, "is_channel", False)),
+            own_bot_user_id=bot_user_id_from_token(Config.BOT_TOKEN),
+            admin_id=Config.ADMIN_ID,
+            target_chat_id=self.target_chat_id,
+            chat_is_bot=getattr(getattr(event, "chat", None), "bot", None),
+        ):
+            logger.debug(
+                "[STAGE 1] Ignoring private chat with another bot "
+                f"(chat_id={event.chat_id})."
+            )
+            return
 
         is_target_chat = (
             event.chat_id == self.target_chat_id

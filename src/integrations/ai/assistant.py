@@ -103,10 +103,25 @@ class Assistant:
         "NEW SL",
         "NEW TSL",
         "TSL TO",
+        "TSL AT",
+        "TSL COST",
         "SHIFT SL",
         "SL TO",
+        "SL AT",
         "UPDATE SL",
         "REVISED SL",
+    )
+    # "TSL 40", "TSL TO 40", "TSL AT COST 35" — not bare "TSL" / "TSL HIT".
+    _TSL_SHORTHAND_RE = re.compile(
+        r"(?<![\w/])TSL(?:\s+(?:TO|AT))?(?:\s+COST)?\s+\d",
+        re.IGNORECASE,
+    )
+    _TSL_GONE_OR_HIT_RE = re.compile(r"\bTSL\s+(?:GONE|HIT)\b", re.IGNORECASE)
+    # Allow optional COST between the verb and the price: "TSL AT COST 35".
+    _TRAIL_SL_PRICE_RE = re.compile(
+        r"(?:NEW\s+)?\b(?:TSL|SL|STOP\s*LOSS|STOPLOSS)\b\s*"
+        r"(?:[:=]|AT|TO)?\s*(?:COST\s+)?(\d+(?:\.\d+)?)",
+        re.IGNORECASE,
     )
     # Volatility schedule early restore / re-arm true SL on broker (before LLM).
     _RESTORE_SL_PHRASES = (
@@ -397,12 +412,11 @@ class Assistant:
                 if self._normalize_for_match(phrase) in n:
                     sl = self._extract_trail_sl_price(chunk)
                     return ("TRAIL_SL", sl)
-            # "TSL 40 …" / "TSL TO 40 …" (shorthand; avoids bare "TSL" substring false positives).
-            if re.search(r"(?<![\w/])TSL(?:\s+TO)?\s+\d", chunk, re.IGNORECASE):
-                if not re.search(r"\bTSL\s+(?:GONE|HIT)\b", chunk, re.IGNORECASE):
-                    sl = self._extract_trail_sl_price(chunk)
-                    if sl is not None:
-                        return ("TRAIL_SL", sl)
+            # "TSL 40 …" / "TSL TO 40 …" / "TSL AT COST 35" (avoids bare "TSL").
+            if self._has_tsl_price_shorthand(chunk):
+                sl = self._extract_trail_sl_price(chunk)
+                if sl is not None:
+                    return ("TRAIL_SL", sl)
         return None
 
     @classmethod
@@ -420,9 +434,8 @@ class Assistant:
         for phrase in cls._TRAIL_PHRASES:
             if cls._normalize_for_match(phrase) in n:
                 return True
-        if re.search(r"(?<![\w/])TSL(?:\s+TO)?\s+\d", tail, re.IGNORECASE):
-            if not re.search(r"\bTSL\s+(?:GONE|HIT)\b", tail, re.IGNORECASE):
-                return True
+        if cls._has_tsl_price_shorthand(tail):
+            return True
         for phrase in cls._RESTORE_SL_PHRASES:
             if cls._normalize_for_match(phrase) in n:
                 return True
@@ -497,20 +510,24 @@ class Assistant:
             strike, option_type = m.group(1), m.group(2)
         return re.sub(r"[^\d]", "", strike), str(option_type).upper()
 
-    @staticmethod
-    def _extract_trail_sl_price(text: str) -> float | None:
-        # "TSL TO 55", "NEW TSL 40", "SL TO 55", "STOP LOSS: 55", etc.
-        m = re.search(
-            r"(?:NEW\s+)?(?:TSL|SL|STOP\s*LOSS|STOPLOSS)\s*(?:[:=]|AT|TO)?\s*(\d+(?:\.\d+)?)",
-            text,
-            re.IGNORECASE,
-        )
+    @classmethod
+    def _has_tsl_price_shorthand(cls, text: str) -> bool:
+        """True for priced TSL updates, not TSL HIT / TSL GONE exits."""
+        raw = str(text or "")
+        if not raw.strip() or cls._TSL_GONE_OR_HIT_RE.search(raw):
+            return False
+        return bool(cls._TSL_SHORTHAND_RE.search(raw))
+
+    @classmethod
+    def _extract_trail_sl_price(cls, text: str) -> float | None:
+        # "TSL TO 55", "TSL AT COST 35", "NEW TSL 40", "SL TO 55", "STOP LOSS: 55".
+        m = cls._TRAIL_SL_PRICE_RE.search(text or "")
         if m:
             try:
                 return float(m.group(1))
             except ValueError:
                 return None
-        m2 = re.search(r"(\d+(?:\.\d+)?)\s*(?:AS\s+)?(?:TSL|SL|STOP)", text, re.IGNORECASE)
+        m2 = re.search(r"(\d+(?:\.\d+)?)\s*(?:AS\s+)?(?:TSL|SL|STOP)", text or "", re.IGNORECASE)
         if m2:
             try:
                 return float(m2.group(1))
@@ -1325,7 +1342,7 @@ Return JSON only with these keys:
 Rules:
 - official_symbol must be the bare underlying root. Never include strike or CE/PE in it.
 - Use parent_message to resolve the instrument when child_message only contains an update (e.g. "TSL 65" or "TSL TO 65").
-- TSL / TSL TO / NEW TSL / TRAIL SL / MOVE SL all indicate a trailing stop update.
+- TSL / TSL TO / TSL AT COST / NEW TSL / TRAIL SL / MOVE SL all indicate a trailing stop update.
 - Never set action to BUY.
 - Stock options with no explicit expiry: use current month expiry (expiry_month = current month, expiry_day = "01").
 - Index options with no explicit expiry, use current week's expiry day per index:
@@ -1480,8 +1497,9 @@ Rules:
         if has_context and tail.strip():
             # Check for forced intent on the TAIL only (not full text which includes the
             # parent context).  A trail phrase in the parent (e.g. "TSL TO 202.5") must
-            # not suppress RECONCILE when the child message itself is clearly a target-hit
-            # announcement like "TARGET 2 : 374 HITS".
+            # not suppress RECONCILE when the child is a pure target-hit like
+            # "TARGET 2 : 374 HITS".  A child that itself trails ("TSL AT COST 35")
+            # must still take TRAIL_SL so the broker stop is updated.
             if self._has_target_hit_phrase(tail) and not self._detect_forced_intent(tail, tail):
                 logger.info("[STAGE 2] Deterministic intent: RECONCILE (target hit without exit/trail).")
                 data = self._llm_parse_forced(
@@ -1907,7 +1925,7 @@ entry_range:
   - Use [0, 0] for EXIT_ALL, TRAIL_SL, and RESTORE_SL.
 
 stop_loss:
-  - Number. For TRAIL_SL use the NEW stop value from child_message (e.g. "TSL 40" / "TSL TO 40" → 40.0).
+  - Number. For TRAIL_SL use the NEW stop value from child_message (e.g. "TSL 40" / "TSL TO 40" / "TSL AT COST 35" → 35.0).
   - For RESTORE_SL use 0 (the bot restores using persisted sl_true in active_trades.json).
   - "SL 22" → 22.0. Use 0 if not stated.
 
@@ -1919,8 +1937,8 @@ action:
   - "SELL"         — fresh short entry signal.
   - "EXIT_ALL"     — close position. Triggered by: CLOSE THE TRADE, TSL GONE, TSL HIT, SL HIT,
                       STOPLOSS HIT, BOOK PROFIT, SQUARE OFF, EXIT TRADE, FULL EXIT, STOPPED OUT.
-  - "TRAIL_SL"     — update stop loss. Triggered by: TSL, TSL TO, NEW TSL, TRAIL SL, MOVE SL, SHIFT SL,
-                      SL TO, TRAILING SL. Extract new SL value from child_message.
+  - "TRAIL_SL"     — update stop loss. Triggered by: TSL, TSL TO, TSL AT, TSL AT COST, NEW TSL, TRAIL SL,
+                      MOVE SL, SHIFT SL, SL TO, TRAILING SL. Extract new SL value from child_message.
   - "RESTORE_SL"   — restore broker OCO SL to the channel/admin true SL (persisted as sl_true).
                       Triggered by replies like: RESTORE SL, RESET SL, REVERT SL, TRUE SL, CHANNEL SL.
                       Set entry_range = [0, 0], stop_loss = 0, target = 0.

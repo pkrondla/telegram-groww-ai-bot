@@ -4,9 +4,11 @@ Assistant._split_context_and_tail, and related target / hit logic.
 """
 import sys
 import os
+from unittest.mock import MagicMock
+
 import pytest
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 os.environ.setdefault("TELEGRAM_API_ID",       "1")
 os.environ.setdefault("TELEGRAM_API_HASH",     "x")
@@ -15,6 +17,30 @@ os.environ.setdefault("TELEGRAM_ADMIN_ID",     "1")
 os.environ.setdefault("OPENAI_API_KEY",        "x")
 
 from src.integrations.ai.assistant import Assistant  # noqa: E402
+
+LAURUS_FORCED_LLM = {
+    "official_symbol": "LAURUSLABS",
+    "stock": "LAURUSLABS",
+    "strike": "2100",
+    "option_type": "CE",
+    "expiry_day": "01",
+    "expiry_month": "NOV",
+    "expiry_year": "2026",
+    "entry_range": [0, 0],
+    "stop_loss": 0,
+    "target": 0,
+    "is_trade": True,
+    "action": "TRAIL_SL",
+}
+
+LAURUS_TARGET_HIT_TSL_AT_COST = (
+    "TARGET 1 : 40.25 HITS ⭐️⭐️⭐️\n\n"
+    "GAINS : Rs. 4035/ LOT💰💰\n\n"
+    "TSL AT COST 35\n"
+    "HOLD FOR 46.50, 56\n\n"
+    "#LAURUSLABS  2100 CE\n"
+    "35.50 TO 40.25"
+)
 
 
 class TestExtractSignalTargets:
@@ -146,3 +172,78 @@ class TestHasTargetHitPhrase:
 
     def test_hold_for_not_hit(self):
         assert Assistant._has_target_hit_phrase("HOLD FOR 402") is False
+
+    def test_laurus_channel_update_is_hit(self):
+        assert Assistant._has_target_hit_phrase(LAURUS_TARGET_HIT_TSL_AT_COST) is True
+
+
+class TestTrailSlAtCost:
+    """Channel phrase 'TSL AT COST 35' must trail, not reconcile."""
+
+    def test_extracts_price_after_cost(self):
+        assert Assistant._extract_trail_sl_price("TSL AT COST 35") == 35.0
+        assert Assistant._extract_trail_sl_price("TSL TO COST 21.5") == 21.5
+        assert Assistant._extract_trail_sl_price("TSL COST 40") == 40.0
+        assert Assistant._extract_trail_sl_price("SL AT COST 35") == 35.0
+
+    def test_existing_tsl_to_cost_suffix_still_works(self):
+        # COST after the price is a label, not a blocker.
+        assert Assistant._extract_trail_sl_price("TSL TO 202.5 COST") == 202.5
+        assert Assistant._extract_trail_sl_price("TSL TO 55") == 55.0
+        assert Assistant._extract_trail_sl_price("TSL 40") == 40.0
+
+    def test_forced_intent_is_trail_with_price(self):
+        a = Assistant()
+        assert a._detect_forced_intent("TSL AT COST 35", "TSL AT COST 35") == (
+            "TRAIL_SL",
+            35.0,
+        )
+        assert a._detect_forced_intent(
+            LAURUS_TARGET_HIT_TSL_AT_COST, LAURUS_TARGET_HIT_TSL_AT_COST
+        ) == ("TRAIL_SL", 35.0)
+
+    def test_tail_has_explicit_trail(self):
+        assert Assistant._tail_has_explicit_exit_or_trail("TSL AT COST 35") is True
+        assert Assistant._tail_has_explicit_exit_or_trail("TARGET 1 : 40.25 HITS") is False
+
+    def test_tsl_hit_still_exit_not_trail(self):
+        a = Assistant()
+        assert a._detect_forced_intent("TSL HIT", "TSL HIT") == ("EXIT_ALL", None)
+
+    def test_hold_for_companion_target(self):
+        assert Assistant._extract_hold_target_price(LAURUS_TARGET_HIT_TSL_AT_COST) == 46.50
+
+    def test_parse_target_hit_with_tsl_at_cost_is_trail(self):
+        a = Assistant()
+        a._llm_parse_forced = MagicMock(return_value=dict(LAURUS_FORCED_LLM))
+        raw = a.parse_signal(
+            {
+                "is_reply": True,
+                "parent_text": "#LAURUSLABS BUY 2100 CE NOV\n35.50 TO 38",
+                "child_text": LAURUS_TARGET_HIT_TSL_AT_COST,
+                "full_text": (
+                    "[CONTEXT: #LAURUSLABS BUY 2100 CE NOV\n35.50 TO 38] "
+                    + LAURUS_TARGET_HIT_TSL_AT_COST
+                ),
+            }
+        )
+        assert raw is not None
+        assert raw["action"] == "TRAIL_SL"
+        assert float(raw["stop_loss"]) == 35.0
+        assert float(raw["target"]) == 46.50
+
+    def test_pure_target_hit_reply_still_reconciles(self):
+        a = Assistant()
+        a._llm_parse_forced = MagicMock(return_value=dict(LAURUS_FORCED_LLM))
+        child = "TARGET 1 : 40.25 HITS ⭐️⭐️⭐️"
+        raw = a.parse_signal(
+            {
+                "is_reply": True,
+                "parent_text": "TSL TO 202.5 COST\n#LAURUSLABS 2100 CE",
+                "child_text": child,
+                "full_text": f"[CONTEXT: TSL TO 202.5 COST\n#LAURUSLABS 2100 CE] {child}",
+            }
+        )
+        assert raw is not None
+        assert raw["action"] == "RECONCILE"
+        assert float(raw.get("stop_loss") or 0) == 0.0

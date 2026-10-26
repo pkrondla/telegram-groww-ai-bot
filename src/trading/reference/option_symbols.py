@@ -16,6 +16,26 @@ INDEX_EXPIRY_WEEKDAY: dict[str, int] = {
 
 INDEX_UNDERLYINGS = frozenset(INDEX_EXPIRY_WEEKDAY.keys())
 
+
+def is_index_fno(symbol: str) -> bool:
+    """True when *symbol* is an index root or an index F&O trading symbol.
+
+    Uses exact underlying membership first, then a digit-bounded prefix so
+    ``NIFTY26O0622800CE`` matches but ``NIFTYNXT50`` does not.
+    """
+    s = str(symbol or "").upper().strip()
+    if not s:
+        return False
+    if s in INDEX_UNDERLYINGS:
+        return True
+    letters = re.match(r"^([A-Z]+)", s)
+    if letters and letters.group(1) in INDEX_UNDERLYINGS:
+        return True
+    for idx in sorted(INDEX_UNDERLYINGS, key=len, reverse=True):
+        if s.startswith(idx) and len(s) > len(idx) and s[len(idx)].isdigit():
+            return True
+    return False
+
 _MONTH_ABBR = {
     1: "JAN",
     2: "FEB",

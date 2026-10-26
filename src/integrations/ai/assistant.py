@@ -10,6 +10,7 @@ from src.core.logger import logger
 from src.core.models import TradeSignal
 from src.trading.reference.symbol_manager import symbol_manager
 from src.trading.reference.option_symbols import (
+    INDEX_UNDERLYINGS,
     build_index_monthly_symbol,
     build_index_weekly_symbol,
     is_index_monthly_expiry_day,
@@ -964,7 +965,7 @@ class Assistant:
         data["is_trade"] = True
         return data, "ok"
 
-    _INDEX_UNDERLYINGS = frozenset({"NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX", "BANKEX"})
+    _INDEX_UNDERLYINGS = INDEX_UNDERLYINGS
 
     # Weekly expiry weekday per index (0=Mon, 1=Tue, 2=Wed, 3=Thu, 4=Fri)
     # Source: NSE/BSE circulars effective September 2025

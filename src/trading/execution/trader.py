@@ -19,6 +19,7 @@ from src.trading.reference.option_symbols import (
     INDEX_UNDERLYINGS as _SHARED_INDEX_UNDERLYINGS,
     build_index_monthly_symbol,
     build_index_weekly_symbol,
+    is_index_fno,
     parse_expiry_date_field,
     weekly_token_to_month,
 )
@@ -6163,19 +6164,9 @@ class Trader:
 
     @classmethod
     def _is_index_option_trade(cls, trade_data: dict) -> bool:
-        candidates = []
         for k in ("official_symbol", "underlying", "stock", "trading_symbol"):
-            v = str(trade_data.get(k) or "").upper().strip()
-            if v:
-                candidates.append(v)
-        for raw in candidates:
-            letters = re.match(r"^[A-Z]+", raw)
-            head = letters.group(0) if letters else raw
-            if head in cls.INDEX_UNDERLYINGS:
+            if is_index_fno(str(trade_data.get(k) or "")):
                 return True
-            for idx in cls.INDEX_UNDERLYINGS:
-                if raw.startswith(idx):
-                    return True
         return False
 
     def _segment_lots_caps(self, trade_data: dict) -> tuple[int, int]:
@@ -7038,6 +7029,20 @@ class Trader:
         now = time.time()
         kept = []
         for p in items:
+            blocked = self._pending_fno_block_reason(p)
+            if blocked:
+                kid = p.get("id", "?")
+                if p.get("kind") == "limit_single" and self.place_entry_orders and self.client:
+                    oid = p.get("groww_order_id")
+                    seg = p.get("segment")
+                    if oid and seg:
+                        try:
+                            self.client.cancel_order(groww_order_id=oid, segment=seg)
+                        except Exception as ce:
+                            logger.debug(f"Cancel limit on F&O gate: {ce}")
+                psym = self._pending_item_display_symbol(p) or "pending entry"
+                out.append(f"⏭️ {blocked} — dropped queued {psym} (queue id={kid}).")
+                continue
             exp = float(p.get("expires_at", 0))
             if now > exp:
                 kid = p.get("id", "?")
@@ -7612,11 +7617,47 @@ class Trader:
         logger.info(f"[STAGE 4] LTP {ltp} is IN range {low}-{high} — placing order.")
         return self._finalize_option_order(trade_data, exchange, found_symbol, segment)
 
+    @staticmethod
+    def _pending_fno_block_reason(item: dict) -> str | None:
+        names: list[str] = []
+        td = item.get("trade_data") if isinstance(item.get("trade_data"), dict) else {}
+        names.extend(
+            [
+                str(item.get("trading_symbol") or ""),
+                str(td.get("trading_symbol") or ""),
+                str(td.get("official_symbol") or ""),
+                str(td.get("stock") or ""),
+            ]
+        )
+        for leg in item.get("legs") or []:
+            if not isinstance(leg, dict):
+                continue
+            names.append(str(leg.get("trading_symbol") or ""))
+            names.append(str(leg.get("official_symbol") or ""))
+            names.append(str(leg.get("stock") or ""))
+        for rex in item.get("resolved_legs") or []:
+            if isinstance(rex, dict):
+                names.append(str(rex.get("trading_symbol") or ""))
+        return Config.fno_entry_block_reason(*names, trade_data=td)
+
     def execute_trade(self, trade_data):
         """
         Main entry point for trade execution.
         Returns a string summary of the action taken.
         """
+        action_upper = str((trade_data or {}).get("action") or "").upper()
+        is_spread_entry = bool((trade_data or {}).get("spread") and (trade_data or {}).get("legs"))
+        if action_upper in ("BUY", "SELL") or is_spread_entry:
+            reason = Config.fno_entry_block_reason(trade_data=trade_data)
+            if reason:
+                symbol = (
+                    str((trade_data or {}).get("trading_symbol") or "").strip()
+                    or str((trade_data or {}).get("stock") or "").strip()
+                    or "spread"
+                )
+                logger.info(f"[STAGE 4] {reason} — skipped {symbol}.")
+                return f"⏭️ {reason} — skipped {symbol}."
+
         if trade_data.get("spread") and trade_data.get("legs"):
             logger.info(f"[STAGE 4] Executing SPREAD ({len(trade_data['legs'])} legs).")
             return self._execute_spread(trade_data["legs"])

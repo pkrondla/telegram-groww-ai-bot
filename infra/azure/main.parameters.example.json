@@ -107,6 +107,14 @@
           "value": "True"
         },
         {
+          "name": "INDEX_FNO_ENABLED",
+          "value": "true"
+        },
+        {
+          "name": "STOCK_FNO_ENABLED",
+          "value": "true"
+        },
+        {
           "name": "INDEX_ORDER_LOTS_COUNT",
           "value": "1"
         },

@@ -104,6 +104,45 @@ class Config:
     STOCK_MIN_LOTS = max(1, int(os.getenv("STOCK_MIN_LOTS", "1")))
     STOCK_MAX_LOTS = max(1, int(os.getenv("STOCK_MAX_LOTS", "999")))
     RISK_MODE_ON_ZERO_LOTS = os.getenv("RISK_MODE_ON_ZERO_LOTS", "fixed").strip().lower()
+    # New F&O entries only. Management of already-open positions is unchanged.
+    INDEX_FNO_ENABLED = os.getenv("INDEX_FNO_ENABLED", "true").lower() == "true"
+    STOCK_FNO_ENABLED = os.getenv("STOCK_FNO_ENABLED", "true").lower() == "true"
+
+    @classmethod
+    def fno_entry_block_reason(cls, *symbols: str, trade_data: dict | None = None) -> str | None:
+        """Return a skip reason when a new entry hits a disabled F&O segment."""
+        from src.trading.reference.option_symbols import is_index_fno
+
+        names = [str(s or "") for s in symbols]
+        data = trade_data if isinstance(trade_data, dict) else {}
+        for key in ("official_symbol", "underlying", "stock", "trading_symbol"):
+            names.append(str(data.get(key) or ""))
+        for leg in data.get("legs") or []:
+            if not isinstance(leg, dict):
+                continue
+            names.append(str(leg.get("trading_symbol") or ""))
+            names.append(str(leg.get("official_symbol") or ""))
+            names.append(str(leg.get("stock") or ""))
+
+        saw_index = False
+        saw_stock = False
+        for raw in names:
+            if not raw.strip():
+                continue
+            if is_index_fno(raw):
+                saw_index = True
+            else:
+                saw_stock = True
+
+        index_blocked = saw_index and not cls.INDEX_FNO_ENABLED
+        stock_blocked = saw_stock and not cls.STOCK_FNO_ENABLED
+        if index_blocked and stock_blocked:
+            return "Index and stock F&O disabled"
+        if index_blocked:
+            return "Index F&O disabled"
+        if stock_blocked:
+            return "Stock F&O disabled"
+        return None
 
     # When LTP is outside the signal entry_range, queue and retry instead of permanently skipping
     ENTRY_QUEUE_ENABLED = os.getenv("ENTRY_QUEUE_ENABLED", "true").lower() == "true"

@@ -91,6 +91,9 @@ class StateEngine:
             return self._handle_reconcile_only(signal)
 
         if action in ("BUY", "SELL"):
+            blocked = self._blocked_entry_message(signal)
+            if blocked:
+                return blocked
             return self._handle_entry(signal)
 
         if action == "EXTEND_RANGE":
@@ -164,6 +167,10 @@ class StateEngine:
                 f"ℹ️ EXTEND_RANGE noted for {resolved} (new ceiling: {new_max}), "
                 f"but trade is already active — no action taken."
             )
+
+        blocked = self._blocked_entry_message(signal)
+        if blocked:
+            return blocked
 
         # 2. Symbol is in the pending queue — update the range ceiling.
         pending = self._trader._load_pending()
@@ -458,6 +465,9 @@ class StateEngine:
             return "\n".join(out) if out else "⚠️ Spread management had no actionable legs."
 
         # Normal spread entry: forward to trader
+        blocked = self._blocked_entry_message(signal)
+        if blocked:
+            return blocked
         leg_summary = ", ".join(f"{l.action} {l.trading_symbol}" for l in signal.legs)
         logger.info(f"[STAGE 3] Forwarding SPREAD entry ({len(signal.legs)} legs): {leg_summary}")
         return self._trader.execute_trade(signal.to_legacy_dict())
@@ -496,6 +506,27 @@ class StateEngine:
             )
             return unique
         return None
+
+    def _blocked_entry_message(self, signal: TradeSignal) -> str | None:
+        """Skip new entries when that F&O segment is disabled. Management is not gated."""
+        symbols: list[str] = []
+        if signal.is_spread:
+            for leg in signal.legs or []:
+                symbols.append(str(getattr(leg, "trading_symbol", "") or ""))
+                symbols.append(str(getattr(leg, "official_symbol", "") or ""))
+        else:
+            symbols.append(str(signal.trading_symbol or ""))
+            symbols.append(str(signal.official_symbol or ""))
+        reason = Config.fno_entry_block_reason(*symbols)
+        if not reason:
+            return None
+        label = str(signal.trading_symbol or "").strip()
+        if not label and signal.legs:
+            label = str(getattr(signal.legs[0], "trading_symbol", "") or "").strip()
+        if not label:
+            label = "signal"
+        logger.info(f"[STAGE 3] {reason} — skipped {label}.")
+        return f"⏭️ {reason} — skipped {label}."
 
     def _unresolved_management_message(self, action: str) -> str:
         active = self._trader._load_active_trades()

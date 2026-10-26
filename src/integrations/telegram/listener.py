@@ -6,7 +6,9 @@ import hashlib
 import sqlite3
 import pytz
 from src.core.config import Config
+from src.core import env_file
 from src.core.logger import logger
+from src.trading.reference.option_symbols import is_index_fno
 from src.integrations.ai.assistant import Assistant
 from src.trading.execution.multi_account_manager import MultiAccountExecutionManager
 from src.integrations.telegram.notifier import Notifier
@@ -121,9 +123,6 @@ _SIZE_OVERRIDE_FIXED_PHRASES = (
     "REDUCE QTY",
     "TRADE SMALL",
 )
-_INDEX_UNDERLYINGS = frozenset({"NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX", "BANKEX"})
-
-
 def _startup_command_reference() -> str:
     """Compact admin command/help text shown in startup notification."""
     return "Send HELP to view all available commands."
@@ -490,6 +489,36 @@ class BotListener:
         )
         if m:
             return f"sizing_all_{m.group(1).lower()}"
+        # F&O entry gates (runtime + persist):
+        # FNO / TRADE SCOPE                         -> show current gates
+        # FNO INDEX ON|OFF / TRADES STOCK OFF       -> set one segment
+        # FNO ALL ON / FNO NONE                     -> both segments
+        if t in ("FNO", "FNO STATUS", "TRADE SCOPE", "TRADES FNO", "FNO TRADES"):
+            return "fno_status"
+        m = re.fullmatch(
+            r"(?:FNO|TRADES|TRADE SCOPE|SCOPE)\s+(INDEX|STOCK)\s+"
+            r"(ON|OFF|TRUE|FALSE|ENABLE|DISABLE|ENABLED|DISABLED)",
+            t,
+        )
+        if m:
+            enabled = m.group(2) in ("ON", "TRUE", "ENABLE", "ENABLED")
+            return f"fno_{m.group(1).lower()}_{'on' if enabled else 'off'}"
+        m = re.fullmatch(r"(?:FNO|TRADES|TRADE SCOPE|SCOPE)\s+(ALL|BOTH)(?:\s+ON)?", t)
+        if m:
+            return "fno_all_on"
+        m = re.fullmatch(
+            r"(?:FNO|TRADES|TRADE SCOPE|SCOPE)\s+(NONE|ALL OFF|BOTH OFF)",
+            t,
+        )
+        if m:
+            return "fno_none"
+        m = re.fullmatch(r"(ENABLE|DISABLE)\s+(INDEX|STOCK|ALL|BOTH)", t)
+        if m:
+            turning_on = m.group(1) == "ENABLE"
+            scope = m.group(2)
+            if scope in ("ALL", "BOTH"):
+                return "fno_all_on" if turning_on else "fno_none"
+            return f"fno_{scope.lower()}_{'on' if turning_on else 'off'}"
         # Admin fast exits:
         # - EXIT <TRADING_SYMBOL> : close one position
         # - EXIT ALL              : close every active position
@@ -574,6 +603,52 @@ class BotListener:
             lines.append(f"[{account_id}] {msg}")
         return "\n".join(lines)
 
+    @staticmethod
+    def _fno_status_text(persist_note: str = "", extra: str = "") -> str:
+        index_on = "ON" if Config.INDEX_FNO_ENABLED else "OFF"
+        stock_on = "ON" if Config.STOCK_FNO_ENABLED else "OFF"
+        lines = [
+            "F&O entry gates",
+            f"Index: {index_on}",
+            f"Stock: {stock_on}",
+            "",
+            "Use FNO INDEX ON|OFF, FNO STOCK ON|OFF, FNO ALL ON, or FNO NONE.",
+            "Open positions are still managed when a segment is OFF.",
+        ]
+        if persist_note:
+            lines.append(persist_note)
+        if extra:
+            lines.append(extra)
+        return "\n".join(lines)
+
+    async def _apply_fno_gates(self, *, index: bool | None = None, stock: bool | None = None):
+        written = False
+        if index is not None:
+            Config.INDEX_FNO_ENABLED = bool(index)
+            if env_file.persist_env_bool("INDEX_FNO_ENABLED", Config.INDEX_FNO_ENABLED):
+                written = True
+        if stock is not None:
+            Config.STOCK_FNO_ENABLED = bool(stock)
+            if env_file.persist_env_bool("STOCK_FNO_ENABLED", Config.STOCK_FNO_ENABLED):
+                written = True
+        persist_note = (
+            f"Saved to {env_file.dotenv_path()}."
+            if written
+            else f"No .env file at {env_file.dotenv_path()} — applied for this process only."
+        )
+        extra_parts: list[str] = []
+        if index is False or stock is False:
+            for account_id, rt in self.multi_account.runtimes().items():
+                msgs = await asyncio.to_thread(rt.trader.process_pending_queue)
+                if msgs:
+                    extra_parts.append(f"[{account_id}]\n" + "\n".join(msgs))
+        extra = "\n".join(extra_parts)
+        await self.notifier.send(self._fno_status_text(persist_note, extra))
+        logger.info(
+            f"[STAGE 1] F&O gates updated: index={Config.INDEX_FNO_ENABLED} "
+            f"stock={Config.STOCK_FNO_ENABLED} persisted={written}"
+        )
+
     async def _handle_override(self, command: str):
         if command == "pause":
             self.multi_account.pause_all()
@@ -591,7 +666,13 @@ class BotListener:
             request_graceful_restart()
             logger.info("[STAGE 1] Admin restart requested — graceful shutdown scheduled.")
         elif command == "status":
-            lines = [f"State: {self.multi_account.status_summary()}"]
+            index_fno = "ON" if Config.INDEX_FNO_ENABLED else "OFF"
+            stock_fno = "ON" if Config.STOCK_FNO_ENABLED else "OFF"
+            lines = [
+                f"State: {self.multi_account.status_summary()}",
+                f"Index F&O: {index_fno}",
+                f"Stock F&O: {stock_fno}",
+            ]
             for account_id, rt in self.multi_account.runtimes().items():
                 active = rt.trader._load_active_trades()
                 pending = rt.trader._load_pending()
@@ -678,6 +759,20 @@ class BotListener:
         elif command == "sizing_stock_risk":
             Config.STOCK_POSITION_SIZING_MODE = "risk"
             await self.notifier.send("Stock position sizing set to risk.")
+        elif command == "fno_status":
+            await self.notifier.send(self._fno_status_text())
+        elif command == "fno_index_on":
+            await self._apply_fno_gates(index=True)
+        elif command == "fno_index_off":
+            await self._apply_fno_gates(index=False)
+        elif command == "fno_stock_on":
+            await self._apply_fno_gates(stock=True)
+        elif command == "fno_stock_off":
+            await self._apply_fno_gates(stock=False)
+        elif command == "fno_all_on":
+            await self._apply_fno_gates(index=True, stock=True)
+        elif command == "fno_none":
+            await self._apply_fno_gates(index=False, stock=False)
         elif command == "trades":
             parts = []
             for account_id, rt in self.multi_account.runtimes().items():
@@ -914,6 +1009,11 @@ class BotListener:
                 "- SIZING INDEX FIXED|RISK — set index sizing mode\n"
                 "- SIZING STOCK FIXED|RISK — set stock sizing mode\n"
                 "- SIZING FIXED|RISK — set both index and stock modes\n"
+                "- FNO — show index/stock F&O entry gates\n"
+                "- FNO INDEX ON|OFF — allow or skip new index F&O entries\n"
+                "- FNO STOCK ON|OFF — allow or skip new stock F&O entries\n"
+                "- FNO ALL ON — enable both segments\n"
+                "- FNO NONE — disable new F&O entries (open trades still managed)\n"
                 "- PAUSE — ignore all incoming signals\n"
                 "- RESUME — resume signal processing\n"
                 "- KILL — emergency stop (restart required)\n"
@@ -1168,11 +1268,11 @@ class BotListener:
     @staticmethod
     def _signal_trade_scope(signal) -> str:
         ts = str(getattr(signal, "trading_symbol", "") or "").upper()
-        if not ts:
+        official = str(getattr(signal, "official_symbol", "") or "").upper()
+        if not ts and not official:
             return "UNKNOWN"
-        for idx in _INDEX_UNDERLYINGS:
-            if ts.startswith(idx):
-                return "INDEX"
+        if is_index_fno(official or ts):
+            return "INDEX"
         return "STOCK"
 
     @staticmethod

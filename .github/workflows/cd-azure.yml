@@ -82,6 +82,8 @@ jobs:
           STOCK_MIN_LOTS: ${{ vars.STOCK_MIN_LOTS || '1' }}
           STOCK_MAX_LOTS: ${{ vars.STOCK_MAX_LOTS || '10' }}
           RISK_MODE_ON_ZERO_LOTS: ${{ vars.RISK_MODE_ON_ZERO_LOTS || 'fixed' }}
+          INDEX_FNO_ENABLED: ${{ vars.INDEX_FNO_ENABLED || 'true' }}
+          STOCK_FNO_ENABLED: ${{ vars.STOCK_FNO_ENABLED || 'true' }}
           LOG_LEVEL: ${{ vars.LOG_LEVEL || 'INFO' }}
           ENTRY_QUEUE_ENABLED: ${{ vars.ENTRY_QUEUE_ENABLED || 'true' }}
           ENTRY_QUEUE_POLL_SEC: ${{ vars.ENTRY_QUEUE_POLL_SEC || '30' }}
@@ -214,6 +216,8 @@ jobs:
                 "STOCK_MIN_LOTS",
                 "STOCK_MAX_LOTS",
                 "RISK_MODE_ON_ZERO_LOTS",
+                "INDEX_FNO_ENABLED",
+                "STOCK_FNO_ENABLED",
                 "LOG_LEVEL",
                 "ENTRY_QUEUE_ENABLED",
                 "ENTRY_QUEUE_POLL_SEC",

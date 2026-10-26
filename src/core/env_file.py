@@ -85,6 +85,21 @@ def update_account_capital_in_json(
     return json.dumps(data, separators=(",", ":")), changed
 
 
+def persist_env_bool(key: str, value: bool, path: Path | None = None) -> bool:
+    """
+    Update a boolean env var in os.environ and in .env when that file exists.
+
+    Returns True when the dotenv file was written.
+    """
+    text = "true" if value else "false"
+    os.environ[str(key)] = text
+    env_path = path or dotenv_path()
+    if env_path.exists():
+        update_env_var(str(key), text, env_path)
+        return True
+    return False
+
+
 def persist_account_capital(
     raw_json: str,
     capital_inr: float,

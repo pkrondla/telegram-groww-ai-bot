@@ -26,6 +26,8 @@ env:
   STOCK_MIN_LOTS: ${{ vars.STOCK_MIN_LOTS || '1' }}
   STOCK_MAX_LOTS: ${{ vars.STOCK_MAX_LOTS || '10' }}
   RISK_MODE_ON_ZERO_LOTS: ${{ vars.RISK_MODE_ON_ZERO_LOTS || 'fixed' }}
+  INDEX_FNO_ENABLED: ${{ vars.INDEX_FNO_ENABLED || 'true' }}
+  STOCK_FNO_ENABLED: ${{ vars.STOCK_FNO_ENABLED || 'true' }}
   LOG_LEVEL: ${{ vars.LOG_LEVEL || 'INFO' }}
   ENTRY_QUEUE_ENABLED: ${{ vars.ENTRY_QUEUE_ENABLED || 'true' }}
   ENTRY_QUEUE_POLL_SEC: ${{ vars.ENTRY_QUEUE_POLL_SEC || '30' }}
@@ -136,6 +138,8 @@ jobs:
           STOCK_MIN_LOTS: ${{ vars.STOCK_MIN_LOTS || secrets.STOCK_MIN_LOTS || env.STOCK_MIN_LOTS }}
           STOCK_MAX_LOTS: ${{ vars.STOCK_MAX_LOTS || secrets.STOCK_MAX_LOTS || env.STOCK_MAX_LOTS }}
           RISK_MODE_ON_ZERO_LOTS: ${{ vars.RISK_MODE_ON_ZERO_LOTS || secrets.RISK_MODE_ON_ZERO_LOTS || env.RISK_MODE_ON_ZERO_LOTS }}
+          INDEX_FNO_ENABLED: ${{ vars.INDEX_FNO_ENABLED || secrets.INDEX_FNO_ENABLED || env.INDEX_FNO_ENABLED }}
+          STOCK_FNO_ENABLED: ${{ vars.STOCK_FNO_ENABLED || secrets.STOCK_FNO_ENABLED || env.STOCK_FNO_ENABLED }}
           LOG_LEVEL: ${{ vars.LOG_LEVEL || secrets.LOG_LEVEL || env.LOG_LEVEL }}
           ENTRY_QUEUE_ENABLED: ${{ vars.ENTRY_QUEUE_ENABLED || secrets.ENTRY_QUEUE_ENABLED || env.ENTRY_QUEUE_ENABLED }}
           ENTRY_QUEUE_POLL_SEC: ${{ vars.ENTRY_QUEUE_POLL_SEC || secrets.ENTRY_QUEUE_POLL_SEC || env.ENTRY_QUEUE_POLL_SEC }}
@@ -234,6 +238,8 @@ jobs:
               f"STOCK_MIN_LOTS={clean('STOCK_MIN_LOTS')}",
               f"STOCK_MAX_LOTS={clean('STOCK_MAX_LOTS')}",
               f"RISK_MODE_ON_ZERO_LOTS={clean('RISK_MODE_ON_ZERO_LOTS')}",
+              f"INDEX_FNO_ENABLED={clean('INDEX_FNO_ENABLED')}",
+              f"STOCK_FNO_ENABLED={clean('STOCK_FNO_ENABLED')}",
               f"LOG_LEVEL={clean('LOG_LEVEL')}",
               f"ENTRY_QUEUE_ENABLED={clean('ENTRY_QUEUE_ENABLED')}",
               f"ENTRY_QUEUE_POLL_SEC={clean('ENTRY_QUEUE_POLL_SEC')}",

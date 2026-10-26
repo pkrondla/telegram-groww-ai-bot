@@ -6,7 +6,8 @@ States
 PENDING  — Signal parsed; waiting for LTP to enter the entry range (pending queue).
 ACTIVE   — Entry filled on broker (OCO may or may not be armed yet).
 EXITING  — EXIT_ALL dispatched; waiting for broker confirmation.
-CLOSED   — Position confirmed flat on broker; removed from active book.
+CLOSED   — This bot's owned remaining qty is 0 (not necessarily broker-symbol flat);
+             removed from active book. Leftover lots may belong to another bot.
 
 Allowed transitions per state
 ------------------------------

@@ -42,6 +42,8 @@ class Trader:
     # Stored in active_trades.json when a BUY was validated in dry run but not sent to Groww.
     DRY_RUN_PLACEHOLDER_ORDER_ID = "DRY_RUN_NO_ORDER"
     SMART_SEGMENT = "FNO"
+    # GrowwBot entries use NRML. ORB on the same account uses MIS — never treat MIS net as ours.
+    DEFAULT_PRODUCT = "NRML"
     # Shared across accounts so one 429 cools down every subsequent token fetch.
     _token_cooldown_until = 0.0
     INDEX_UNDERLYINGS = _SHARED_INDEX_UNDERLYINGS
@@ -413,16 +415,28 @@ class Trader:
                 return
 
             logger.info(f"Reconciling {len(local_trades)} active trades with Groww...")
-            positions_map = self._active_positions_map()
-            active_symbols = set(positions_map.keys())
+            # Default map is this bot's product (NRML); per-symbol product is checked below.
+            positions_map = self._active_positions_map(product=self.DEFAULT_PRODUCT)
 
             updated_trades = {}
-            for symbol, rec in local_trades.items():
-                if symbol in active_symbols:
-                    updated_trades[symbol] = self._normalize_active_trade_record(rec)
+            for symbol, raw in local_trades.items():
+                rec = self._normalize_active_trade_record(raw)
+                product = self._record_product(rec)
+                owned = self._owned_remaining_qty(rec)
+                if product == self.DEFAULT_PRODUCT:
+                    pos = positions_map.get(symbol)
+                    broker_qty = self._position_quantity(pos) if pos else 0
                 else:
-                    logger.info(f"Reconciliation: Found manual close for {symbol}. Removing from bot memory.")
-            
+                    _, broker_qty = self._get_open_position_for_symbol(symbol, product=product)
+                if owned > 0 and broker_qty != 0:
+                    rec_aligned, shrunk = self._align_remaining_to_nrml_broker(rec, broker_qty)
+                    updated_trades[symbol] = rec_aligned if shrunk else rec
+                else:
+                    logger.info(
+                        f"Reconciliation: {symbol} not open for this bot "
+                        f"(owned={owned}, broker_{product}={broker_qty}). Removing from bot memory."
+                    )
+
             self._save_all_trades(updated_trades)
             logger.info("Trade reconciliation complete.")
         except Exception as e:
@@ -1638,9 +1652,19 @@ class Trader:
         local_qty: int,
         broker_net_qty: int,
     ) -> str:
+        """
+        Compare this bot's owned qty to broker qty for our product.
+
+        QTY_MISMATCH only when broker has *fewer* lots than we own (missing fills).
+        broker_net > local is leftover (other bots) — reported as OK_WITH_LEFTOVER.
+        """
+        local_q = abs(int(local_qty or 0))
+        broker_q = abs(int(broker_net_qty or 0))
         if local_open and broker_open:
-            if abs(int(local_qty or 0)) == abs(int(broker_net_qty or 0)):
+            if broker_q == local_q:
                 return "OK"
+            if broker_q > local_q:
+                return "OK_WITH_LEFTOVER"
             return "QTY_MISMATCH"
         if local_open and not broker_open:
             return "STALE_LOCAL"
@@ -1693,6 +1717,12 @@ class Trader:
         broker_by_sym: dict[str, dict] = {}
         broker_fetch_ok = True
         for row in self._list_fno_positions():
+            # PNL DIFF for this bot compares against our product only (default NRML).
+            row_product = self._position_product(row)
+            if row_product and row_product != self.DEFAULT_PRODUCT:
+                continue
+            if not row_product and self.DEFAULT_PRODUCT != "NRML":
+                continue
             metrics = self._broker_metrics_from_position(row)
             sym = str(metrics.get("symbol") or "")
             if sym:
@@ -1722,7 +1752,7 @@ class Trader:
         for sym in all_symbols:
             rec = self._normalize_active_trade_record(local_active.get(sym) or {})
             local_open = sym in local_active
-            local_qty = int(self._num_or(rec.get("entry_qty"), 0)) if local_open else 0
+            local_qty = self._owned_remaining_qty(rec) if local_open else 0
             loc = local_by_sym.get(sym, {"settled_inr": 0.0, "pending": 0, "legs": 0})
             bm = broker_by_sym.get(sym, {})
             broker_net = int(bm.get("net_qty") or 0)
@@ -1751,19 +1781,21 @@ class Trader:
                 missing_local += 1
                 pnl_note = " ⚠️ MISSING_LOCAL_JOURNAL"
 
-            if sync in ("OK", "FLAT") and not pnl_note and loc.get("legs", 0) == 0 and not local_open:
+            if sync in ("OK", "OK_WITH_LEFTOVER", "FLAT") and not pnl_note and loc.get("legs", 0) == 0 and not local_open:
                 if broker_open or broker_pnl is None:
                     continue
 
             book_part = f"book: local={'OPEN' if local_open else 'flat'} broker={'OPEN' if broker_open else 'flat'}"
-            if sync != "OK" and sync != "FLAT":
+            if sync not in ("OK", "FLAT"):
                 book_part += f" [{sync}]"
             if sync == "QTY_MISMATCH":
-                book_part += f" (local_qty={local_qty} broker_net={broker_net})"
+                book_part += f" (owned={local_qty} broker_nrml={broker_net})"
+            elif sync == "OK_WITH_LEFTOVER":
+                book_part += f" (owned={local_qty} broker_nrml={broker_net} leftover={broker_net - local_qty})"
             elif broker_open:
                 raw_q = int(bm.get("raw_quantity") or 0)
                 if raw_q and raw_q != broker_net:
-                    book_part += f" (broker_net={broker_net}, raw_qty={raw_q})"
+                    book_part += f" (broker_nrml={broker_net}, raw_qty={raw_q})"
 
             local_pnl_s = self._fmt_inr(local_pnl) if loc.get("legs", 0) else "—"
             if loc.get("pending", 0):
@@ -1903,24 +1935,124 @@ class Trader:
                 continue
         return 0
 
-    def _active_positions_map(self) -> dict[str, dict]:
+    @staticmethod
+    def _position_product(position: dict | None) -> str:
+        if not isinstance(position, dict):
+            return ""
+        return str(
+            position.get("product")
+            or position.get("product_type")
+            or position.get("productType")
+            or ""
+        ).upper().strip()
+
+    @classmethod
+    def _record_product(cls, rec: dict | None) -> str:
+        rec = rec if isinstance(rec, dict) else {}
+        p = str(rec.get("product") or "").upper().strip()
+        return p if p else cls.DEFAULT_PRODUCT
+
+    def _filled_leg_qty(self, rec: dict | None) -> int:
+        """Qty already exited on this bot's FILLED OCO / protection-plan legs."""
+        rec = rec if isinstance(rec, dict) else {}
+        filled = 0
+        for leg in self._sorted_protection_plan_legs(rec):
+            if str(leg.get("leg_state") or "").upper() != "FILLED":
+                continue
+            filled += max(0, int(self._num_or(leg.get("allocated_qty"), leg.get("qty"))))
+        if filled > 0:
+            return filled
+        for leg in self._sorted_oco_legs(rec):
+            if str(leg.get("status") or "").upper() != "FILLED":
+                continue
+            filled += max(0, int(self._num_or(leg.get("qty"), 0)))
+        return filled
+
+    def _owned_remaining_qty(self, rec: dict | None) -> int:
+        """
+        This bot's remaining lots for the trade — never broker net for the symbol.
+
+        Prefer persisted ``remaining_qty``. Older rows reconstruct as
+        entry_qty minus FILLED leg qty (not entry_qty - broker_net).
+        """
+        rec = rec if isinstance(rec, dict) else {}
+        entry_qty = max(0, int(self._num_or(rec.get("entry_qty"), 0)))
+        if "remaining_qty" in rec and rec.get("remaining_qty") is not None:
+            try:
+                rem = int(float(rec.get("remaining_qty")))
+            except (TypeError, ValueError):
+                rem = -1
+            if rem >= 0:
+                if entry_qty > 0:
+                    return max(0, min(rem, entry_qty))
+                return max(0, rem)
+        if entry_qty <= 0:
+            return 0
+        return max(0, entry_qty - self._filled_leg_qty(rec))
+
+    def _refresh_remaining_qty(self, rec: dict | None, *, from_filled_legs: bool = False) -> dict:
+        """Ensure remaining_qty is set. Optionally recompute from FILLED legs after OCO sync."""
+        out = dict(rec) if isinstance(rec, dict) else {}
+        entry_qty = max(0, int(self._num_or(out.get("entry_qty"), 0)))
+        if from_filled_legs or "remaining_qty" not in out or out.get("remaining_qty") is None:
+            out["remaining_qty"] = max(0, entry_qty - self._filled_leg_qty(out))
+        else:
+            try:
+                rem = int(float(out.get("remaining_qty")))
+            except (TypeError, ValueError):
+                rem = max(0, entry_qty - self._filled_leg_qty(out))
+            out["remaining_qty"] = max(0, min(rem, entry_qty) if entry_qty > 0 else max(0, rem))
+        if not out.get("product"):
+            out["product"] = self.DEFAULT_PRODUCT
+        return out
+
+    def _owned_open_qty_for_protection(self, rec: dict | None, broker_qty: int) -> int:
+        """Owned remaining capped by this product's broker qty (for OCO size / exits)."""
+        owned = self._owned_remaining_qty(rec)
+        broker = abs(int(broker_qty or 0))
+        if owned <= 0 or broker <= 0:
+            return 0
+        return min(owned, broker)
+
+    def _active_positions_map(self, product: str | None = None) -> dict[str, dict]:
+        """
+        Open FNO positions keyed by trading_symbol.
+
+        When ``product`` is set (default NRML for this bot), only rows of that
+        product are included so a shared-account MIS row is not treated as ours.
+        """
         if self.client is None:
             return {}
+        want = str(product or self.DEFAULT_PRODUCT).upper().strip() or self.DEFAULT_PRODUCT
         fno_positions = self.client.get_positions_for_user(segment="FNO")
         positions = fno_positions.get("positions", []) if isinstance(fno_positions, dict) else []
         out = {}
         for p in positions:
+            if not isinstance(p, dict):
+                continue
             sym = p.get("trading_symbol")
             if not sym:
                 continue
-            if self._position_quantity(p) != 0:
-                out[str(sym)] = p
+            if self._position_quantity(p) == 0:
+                continue
+            row_product = self._position_product(p)
+            # Rows with no product field: include only when asking for default NRML
+            # (legacy payloads); otherwise require an exact match.
+            if row_product:
+                if row_product != want:
+                    continue
+            elif want != self.DEFAULT_PRODUCT:
+                continue
+            out[str(sym)] = p
         return out
 
-    def _get_open_position_for_symbol(self, symbol: str) -> tuple[dict | None, int]:
-        """Return (position_dict, qty) for symbol from broker live positions."""
+    def _get_open_position_for_symbol(
+        self, symbol: str, product: str | None = None
+    ) -> tuple[dict | None, int]:
+        """Return (position_dict, qty) for symbol+product from broker live positions."""
+        want = str(product or self.DEFAULT_PRODUCT).upper().strip() or self.DEFAULT_PRODUCT
         try:
-            pmap = self._active_positions_map()
+            pmap = self._active_positions_map(product=want)
         except Exception:
             return None, 0
         pos = pmap.get(symbol)
@@ -1952,15 +2084,23 @@ class Trader:
         if not force and str(rec.get("protection_armed_date") or "") == today:
             return False, None
 
-        qty = abs(self._position_quantity(position))
+        rec_norm = self._normalize_active_trade_record(rec)
+        broker_qty = abs(self._position_quantity(position))
+        # Protect only this bot's remaining lots (capped by NRML broker qty), never account net.
+        qty = self._owned_open_qty_for_protection(rec_norm, broker_qty)
         if qty <= 0:
             return False, None
-        rec_norm = self._normalize_active_trade_record(rec)
-        rec_norm = self._sync_protection_plan_from_progress(rec_norm, qty)
+        owned_open = self._owned_remaining_qty(rec_norm)
+        rec_norm = self._sync_protection_plan_from_progress(rec_norm, owned_open)
         rec_norm = self._sync_oco_snapshot_from_broker(
-            symbol, rec_norm, payload_cache=payload_cache, open_qty=qty
+            symbol, rec_norm, payload_cache=payload_cache, open_qty=owned_open
         )
-        rec_norm = self._sync_protection_plan_from_progress(rec_norm, qty)
+        rec_norm = self._refresh_remaining_qty(rec_norm, from_filled_legs=True)
+        owned_open = self._owned_remaining_qty(rec_norm)
+        qty = self._owned_open_qty_for_protection(rec_norm, broker_qty)
+        if qty <= 0:
+            return False, None
+        rec_norm = self._sync_protection_plan_from_progress(rec_norm, owned_open)
         complete_before, reason_before = self._has_complete_oco_protection(
             symbol, rec_norm, qty, payload_cache=payload_cache
         )
@@ -2079,12 +2219,7 @@ class Trader:
 
         exchange = str(position.get("exchange") or "NSE")
         segment = str(position.get("segment") or self.SMART_SEGMENT)
-        product_type = str(
-            position.get("product")
-            or position.get("product_type")
-            or position.get("productType")
-            or "NRML"
-        ).upper()
+        product_type = self._record_product(rec_norm)
 
         created_legs: list[dict] = []
         rearm_warnings: list[str] = []
@@ -2305,13 +2440,16 @@ class Trader:
             return None
         if self.client is None:
             return None
-        pos, qty = self._get_open_position_for_symbol(symbol)
-        if qty == 0:
+        rec_rearm = dict(rec or self._get_active_trade_record(symbol) or {})
+        product = self._record_product(rec_rearm)
+        pos, qty = self._get_open_position_for_symbol(symbol, product=product)
+        owned = self._owned_remaining_qty(rec_rearm)
+        if self._owned_open_qty_for_protection(rec_rearm, qty) <= 0:
             return (
-                f"⚠️ OCO recovery skipped for {symbol}: no open broker position to protect. "
+                f"⚠️ OCO recovery skipped for {symbol}: no owned open qty to protect "
+                f"(owned={owned}, broker_{product}={qty}). "
                 f"Last error: {reason}{self._ltp_suffix_for_symbol(symbol)}"
             )
-        rec_rearm = dict(rec or self._get_active_trade_record(symbol) or {})
         rec_rearm["protection_armed_date"] = ""
         ok, alert = self._rearm_oco_for_open_position(symbol, rec_rearm, pos or {}, force=True)
         if not ok:
@@ -2406,13 +2544,14 @@ class Trader:
                 f"⚠️ TRAIL_SL stored sl_true={sl} for {symbol} locally, but cannot create OCO "
                 f"(no Groww client).{self._ltp_suffix_for_symbol(symbol)}"
             )
-        pos, qty = self._get_open_position_for_symbol(symbol)
-        if qty <= 0:
-            return (
-                f"⚠️ TRAIL_SL stored sl_true={sl} for {symbol} locally, but no open broker "
-                f"position to protect.{self._ltp_suffix_for_symbol(symbol)}"
-            )
         rec_rearm = dict(self._get_active_trade_record(symbol) or rec or {})
+        product = self._record_product(rec_rearm)
+        pos, qty = self._get_open_position_for_symbol(symbol, product=product)
+        if self._owned_open_qty_for_protection(rec_rearm, qty) <= 0:
+            return (
+                f"⚠️ TRAIL_SL stored sl_true={sl} for {symbol} locally, but no owned "
+                f"{product} position to protect.{self._ltp_suffix_for_symbol(symbol)}"
+            )
         rec_rearm["stop_loss"] = sl
         rec_rearm["sl_true"] = sl
         rec_rearm["protection_armed_date"] = ""
@@ -2871,17 +3010,24 @@ class Trader:
         payload_cache: dict[str, dict] = {}
         rec_norm = self._normalize_active_trade_record(rec)
         pos = pos or {}
-        open_qty = abs(self._position_quantity(pos))
+        broker_qty = abs(self._position_quantity(pos))
+        open_qty = self._owned_remaining_qty(rec_norm)
+        protect_qty = self._owned_open_qty_for_protection(rec_norm, broker_qty)
         if self._is_unprotected_zero_sl_fill(rec_norm):
             return self._skip_rearm_unprotected_fill(source=source, symbol=symbol, rec=rec_norm)
         if open_qty > 0:
             rec_norm = self._sync_protection_plan_from_progress(rec_norm, open_qty)
+            rec_norm = self._refresh_remaining_qty(rec_norm)
             self._persist_active_trade_record(symbol, rec_norm)
         rec_norm = self._sync_oco_snapshot_from_broker(
             symbol, rec_norm, payload_cache=payload_cache, open_qty=open_qty
         )
+        rec_norm = self._refresh_remaining_qty(rec_norm, from_filled_legs=True)
+        open_qty = self._owned_remaining_qty(rec_norm)
+        protect_qty = self._owned_open_qty_for_protection(rec_norm, broker_qty)
         if open_qty > 0:
             rec_norm = self._sync_protection_plan_from_progress(rec_norm, open_qty)
+            rec_norm = self._refresh_remaining_qty(rec_norm)
             self._persist_active_trade_record(symbol, rec_norm)
 
         force_rearm = bool(force_initial)
@@ -2912,7 +3058,7 @@ class Trader:
                 force_reasons.append("target_leg_missing")
             else:
                 complete, reason = self._has_complete_oco_protection(
-                    symbol, rec_norm, open_qty, payload_cache=payload_cache
+                    symbol, rec_norm, protect_qty, payload_cache=payload_cache
                 )
                 if not complete:
                     force_rearm = True
@@ -2934,8 +3080,11 @@ class Trader:
             detail_parts.append(str(alert).replace("\n", " | "))
 
         rec_after = self._get_active_trade_record(symbol) or rec_norm
+        protect_qty = self._owned_open_qty_for_protection(
+            rec_after, abs(self._position_quantity(pos))
+        )
         complete_after, _ = self._has_complete_oco_protection(
-            symbol, rec_after, open_qty, payload_cache=payload_cache
+            symbol, rec_after, protect_qty, payload_cache=payload_cache
         )
         if not complete_after:
             rec_force = dict(rec_after)
@@ -2951,8 +3100,11 @@ class Trader:
             elif alert2:
                 detail_parts.append("integrity_retry=" + str(alert2).replace("\n", " | "))
             rec_final = self._get_active_trade_record(symbol) or rec_after
+            protect_qty = self._owned_open_qty_for_protection(
+                rec_final, abs(self._position_quantity(pos))
+            )
             final_ok, final_reason = self._has_complete_oco_protection(
-                symbol, rec_final, open_qty, payload_cache=payload_cache
+                symbol, rec_final, protect_qty, payload_cache=payload_cache
             )
             if not final_ok:
                 success = False
@@ -2997,20 +3149,27 @@ class Trader:
         Deterministic integrity reconciler for protection legs.
         Returns (ok, reason). When not ok, caller should trigger force re-arm.
         """
-        open_qty = abs(self._position_quantity(pos or {}))
-        if open_qty <= 0:
-            return True, "no_open_qty"
         rec_norm = self._normalize_active_trade_record(rec or {})
+        broker_qty = abs(self._position_quantity(pos or {}))
+        open_qty = self._owned_remaining_qty(rec_norm)
+        protect_qty = self._owned_open_qty_for_protection(rec_norm, broker_qty)
+        if protect_qty <= 0:
+            return True, "no_open_qty"
         rec_norm = self._sync_protection_plan_from_progress(rec_norm, open_qty)
         rec_norm = self._sync_oco_snapshot_from_broker(
             symbol, rec_norm, payload_cache=payload_cache, open_qty=open_qty
         )
+        rec_norm = self._refresh_remaining_qty(rec_norm, from_filled_legs=True)
+        open_qty = self._owned_remaining_qty(rec_norm)
+        protect_qty = self._owned_open_qty_for_protection(rec_norm, broker_qty)
+        if protect_qty <= 0:
+            return True, "no_open_qty"
         rec_norm = self._sync_protection_plan_from_progress(rec_norm, open_qty)
-        expected = self._expected_oco_leg_count_for_open_qty(rec_norm, open_qty)
+        expected = self._expected_oco_leg_count_for_open_qty(rec_norm, protect_qty)
         complete, reason = self._has_complete_oco_protection(
             symbol,
             rec_norm,
-            open_qty,
+            protect_qty,
             payload_cache=payload_cache,
         )
         if complete:
@@ -3042,12 +3201,17 @@ class Trader:
         today = self._today_ist_iso()
         for symbol, rec in list(updated.items()):
             try:
-                pos = positions_map.get(symbol)
-                if not pos:
+                rec_norm = self._normalize_active_trade_record(rec)
+                product = self._record_product(rec_norm)
+                if product == self.DEFAULT_PRODUCT:
+                    pos = positions_map.get(symbol)
+                    broker_qty = self._position_quantity(pos) if pos else 0
+                else:
+                    pos, broker_qty = self._get_open_position_for_symbol(symbol, product=product)
+                if self._owned_open_qty_for_protection(rec_norm, broker_qty) <= 0:
                     continue
                 # Suppress auto-rearm during VOL_SL drop window: drop has fired today but
                 # re-arm has not yet — let VOL_SL scheduler place the OCO at the right time.
-                rec_norm = self._normalize_active_trade_record(rec)
                 drop_done = str(rec_norm.get("vol_sl_drop_done_for") or "") == today
                 rearm_done = str(rec_norm.get("vol_sl_rearm_done_for") or "") == today
                 if drop_done and not rearm_done:
@@ -3059,8 +3223,8 @@ class Trader:
                 result = self._execute_rearm_for_symbol(
                     source=source,
                     symbol=symbol,
-                    rec=rec,
-                    pos=pos,
+                    rec=rec_norm,
+                    pos=pos or {},
                     force_initial=False,
                 )
                 stats["rearmed"] += int(result.get("rearmed") or 0)
@@ -3112,54 +3276,68 @@ class Trader:
         if not local:
             return stats
 
-        positions_map = self._active_positions_map()
+        positions_map = self._active_positions_map(product=self.DEFAULT_PRODUCT)
         stats["active"] = len(positions_map)
-        active_symbols = set(positions_map.keys())
 
-        # Reconcile: remove locals that are not open on broker; keep opens unchanged here.
+        # Reconcile: keep only trades with owned remaining AND our product open on broker.
         updated = {}
-        for symbol, rec in local.items():
-            if symbol in active_symbols:
-                updated[symbol] = self._normalize_active_trade_record(rec)
+        for symbol, raw in local.items():
+            nrec = self._normalize_active_trade_record(raw)
+            product = self._record_product(nrec)
+            owned = self._owned_remaining_qty(nrec)
+            if product == self.DEFAULT_PRODUCT:
+                pos = positions_map.get(symbol)
+                broker_qty = self._position_quantity(pos) if pos else 0
             else:
-                stats["removed"] += 1
-                try:
-                    nrec = self._normalize_active_trade_record(rec)
-                    inferred = self._reconcile_exit_fill_from_positions(symbol=symbol, active_rec=nrec) or {}
-                    has_fill = (
-                        float(self._num_or(inferred.get("exit_price"), 0.0)) > 0
-                        and int(abs(self._num_or(inferred.get("exit_qty"), 0))) > 0
+                pos, broker_qty = self._get_open_position_for_symbol(symbol, product=product)
+            if owned > 0 and broker_qty != 0:
+                nrec, shrunk = self._align_remaining_to_nrml_broker(nrec, broker_qty)
+                updated[symbol] = nrec
+                if shrunk:
+                    logger.info(
+                        f"[RECONCILE] {symbol}: shrunk remaining_qty to broker {product}={broker_qty}."
                     )
-                    fallback_exit = (
-                        float(inferred.get("exit_price"))
-                        if has_fill
-                        else 0.0
-                    )
-                    fallback_qty = (
-                        int(abs(self._num_or(inferred.get("exit_qty"), 0)))
-                        if has_fill
-                        else int(self._num_or(nrec.get("entry_qty"), 0))
-                    )
-                    close_reason = (
-                        "RECONCILE_OCO_FILL"
-                        if inferred.get("source") == "oco_legs"
-                        else "RECONCILE_BROKER_FILL"
-                        if inferred.get("source") == "broker_positions"
-                        else "RECONCILE_FLAT"
-                    )
-                    self._record_completed_trade(
-                        symbol=symbol,
-                        active_rec=nrec,
-                        close_reason=close_reason,
-                        exit_price=fallback_exit,
-                        exit_qty=fallback_qty,
-                        close_order_id=str(inferred.get("order_id") or ""),
-                        exit_pending=not has_fill,
-                        exit_fill_source=str(inferred.get("source") or ("pending" if not has_fill else "")),
-                    )
-                except Exception as e:
-                    logger.warning(f"[RECONCILE] Could not journal closed trade for {symbol}: {e}")
-                logger.info(f"[RECONCILE] Removing stale local trade {symbol} (not active on broker).")
+                continue
+            stats["removed"] += 1
+            try:
+                inferred = self._reconcile_exit_fill_from_positions(symbol=symbol, active_rec=nrec) or {}
+                has_fill = (
+                    float(self._num_or(inferred.get("exit_price"), 0.0)) > 0
+                    and int(abs(self._num_or(inferred.get("exit_qty"), 0))) > 0
+                )
+                fallback_exit = (
+                    float(inferred.get("exit_price"))
+                    if has_fill
+                    else 0.0
+                )
+                fallback_qty = (
+                    int(abs(self._num_or(inferred.get("exit_qty"), 0)))
+                    if has_fill
+                    else int(owned or self._num_or(nrec.get("entry_qty"), 0))
+                )
+                close_reason = (
+                    "RECONCILE_OCO_FILL"
+                    if inferred.get("source") == "oco_legs"
+                    else "RECONCILE_BROKER_FILL"
+                    if inferred.get("source") == "broker_positions"
+                    else "RECONCILE_FLAT"
+                )
+                self._record_completed_trade(
+                    symbol=symbol,
+                    active_rec=nrec,
+                    close_reason=close_reason,
+                    exit_price=fallback_exit,
+                    exit_qty=fallback_qty,
+                    close_order_id=str(inferred.get("order_id") or ""),
+                    exit_pending=not has_fill,
+                    exit_fill_source=str(inferred.get("source") or ("pending" if not has_fill else "")),
+                )
+            except Exception as e:
+                logger.warning(f"[RECONCILE] Could not journal closed trade for {symbol}: {e}")
+            logger.info(
+                f"[RECONCILE] Removing stale local trade {symbol} "
+                f"(owned={owned}, broker_{product}={broker_qty})."
+            )
         self._save_all_trades(updated)
 
         if not (include_rearm and Config.AUTO_REARM_PROTECTION):
@@ -3208,7 +3386,7 @@ class Trader:
         if not local:
             return "ℹ️ REARM: no active trades in local book."
 
-        positions_map = self._active_positions_map()
+        positions_map = self._active_positions_map(product=self.DEFAULT_PRODUCT)
         if not positions_map:
             return "ℹ️ REARM: no open broker positions found."
 
@@ -3224,10 +3402,17 @@ class Trader:
                 skipped += 1
                 details.append(f"• {symbol}: skipped (dry-run placeholder)")
                 continue
-            pos = positions_map.get(symbol)
-            if not pos:
+            product = self._record_product(rec)
+            if product == self.DEFAULT_PRODUCT:
+                pos = positions_map.get(symbol)
+                broker_qty = self._position_quantity(pos) if pos else 0
+            else:
+                pos, broker_qty = self._get_open_position_for_symbol(symbol, product=product)
+            if self._owned_open_qty_for_protection(rec, broker_qty) <= 0:
                 skipped += 1
-                details.append(f"• {symbol}: skipped (not open on broker)")
+                details.append(
+                    f"• {symbol}: skipped (no owned {product} qty on broker)"
+                )
                 continue
             try:
                 result = self._execute_rearm_for_symbol(
@@ -3300,10 +3485,26 @@ class Trader:
             return True
 
         try:
-            _, open_qty = self._get_open_position_for_symbol(symbol)
-            if open_qty != 0:
+            product = self._record_product(rec)
+            owned = self._owned_remaining_qty(rec)
+            _, open_qty = self._get_open_position_for_symbol(symbol, product=product)
+            # Still open for this bot only when we own lots AND our product has broker qty.
+            # Extra MIS / leftover NRML above owned does not keep or inflate this trade.
+            if owned > 0 and open_qty != 0:
+                rec_aligned, shrunk = self._align_remaining_to_nrml_broker(rec, open_qty)
+                if shrunk:
+                    self._persist_active_trade_record(symbol, rec_aligned)
                 return True
-            logger.info(f"Reconcile symbol: {symbol} is not active on broker. Removing local active trade row.")
+            if owned <= 0:
+                logger.info(
+                    f"Reconcile symbol: {symbol} owned remaining is 0 "
+                    f"(broker_{product}={open_qty}). Removing local active trade row."
+                )
+            else:
+                logger.info(
+                    f"Reconcile symbol: {symbol} owned={owned} but broker {product} is flat. "
+                    f"Removing local active trade row."
+                )
             inferred = self._reconcile_exit_fill_from_positions(symbol=symbol, active_rec=rec) or {}
             has_fill = (
                 float(self._num_or(inferred.get("exit_price"), 0.0)) > 0
@@ -3317,7 +3518,7 @@ class Trader:
             fallback_qty = (
                 int(abs(self._num_or(inferred.get("exit_qty"), 0)))
                 if has_fill
-                else int(self._num_or(rec.get("entry_qty"), 0))
+                else int(owned or self._num_or(rec.get("entry_qty"), 0))
             )
             close_reason = (
                 "RECONCILE_OCO_FILL"
@@ -3398,6 +3599,22 @@ class Trader:
 
         return candidates[0]
 
+    def _align_remaining_to_nrml_broker(self, rec: dict, broker_qty: int) -> tuple[dict, bool]:
+        """
+        If NRML broker qty is below owned remaining, shrink remaining_qty.
+        That is how OCO target/SL fills are reflected without using account net
+        (extra MIS/ORB lots must not hide or invent fills).
+        """
+        out = dict(rec) if isinstance(rec, dict) else {}
+        owned = self._owned_remaining_qty(out)
+        broker = max(0, abs(int(broker_qty or 0)))
+        if owned > 0 and broker < owned:
+            out["remaining_qty"] = broker
+            return out, True
+        if "remaining_qty" not in out or out.get("remaining_qty") is None:
+            out = self._refresh_remaining_qty(out)
+        return out, False
+
     def sync_target_progression_for_symbol(self, symbol: str) -> str | None:
         """
         Immediate broker-validated progression check for one symbol.
@@ -3409,9 +3626,16 @@ class Trader:
         rec = self._get_active_trade_record(resolved)
         if not rec:
             return None
-        pos, qty = self._get_open_position_for_symbol(resolved)
+        product = self._record_product(rec)
+        pos, qty = self._get_open_position_for_symbol(resolved, product=product)
+        owned = self._owned_remaining_qty(rec)
+        if owned <= 0:
+            return None
         if qty <= 0:
             return None
+        rec, shrunk = self._align_remaining_to_nrml_broker(rec, qty)
+        if shrunk:
+            self._persist_active_trade_record(resolved, rec)
         return self._sync_multi_target_progress_for_symbol(resolved, rec, pos or {})
 
     def admin_sync_target_progression(self, symbol_filter: str | None = None) -> str:
@@ -3669,12 +3893,16 @@ class Trader:
                         out[k] = float(out.get(k) or 0)
                     except Exception:
                         out[k] = 0.0
-            for k in ("entry_qty", "lot_size"):
+            for k in ("entry_qty", "lot_size", "remaining_qty"):
                 if k in out:
                     try:
                         out[k] = int(float(out.get(k) or 0))
                     except Exception:
                         out[k] = 0
+            out["product"] = (
+                str(out.get("product") or Trader.DEFAULT_PRODUCT).upper().strip()
+                or Trader.DEFAULT_PRODUCT
+            )
             for k in ("entry_side", "opened_at_ist", "entry_order_id", "spread_group_id"):
                 if k in out and out.get(k) is not None:
                     out[k] = str(out.get(k) or "")
@@ -3787,6 +4015,8 @@ class Trader:
         signal_targets: list[float] | None = None,
         sl_progress_stage: str | None = None,
         protection_plan_legs: list[dict] | None = None,
+        remaining_qty: int | None = None,
+        product: str | None = None,
     ):
         trades = self._load_active_trades()
         current = self._normalize_active_trade_record(trades.get(symbol))
@@ -3803,6 +4033,15 @@ class Trader:
             current["entry_side"] = str(entry_side).upper()
         if entry_qty is not None:
             current["entry_qty"] = int(entry_qty)
+            # New/updated fill: remaining defaults to full entry unless caller overrides.
+            if remaining_qty is None and "remaining_qty" not in current:
+                current["remaining_qty"] = int(entry_qty)
+        if remaining_qty is not None:
+            current["remaining_qty"] = max(0, int(remaining_qty))
+        if product is not None:
+            current["product"] = str(product or self.DEFAULT_PRODUCT).upper().strip() or self.DEFAULT_PRODUCT
+        elif not current.get("product"):
+            current["product"] = self.DEFAULT_PRODUCT
         if lot_size is not None:
             current["lot_size"] = int(lot_size)
         if entry_avg_price is not None:
@@ -4415,8 +4654,11 @@ class Trader:
         legs = self._sorted_oco_legs(rec_norm)
         if len(legs) < 2:
             return None
-        open_qty = abs(self._position_quantity(position or {}))
+        # Progress from this bot's remaining qty / FILLED legs — never broker net
+        # (extra ORB lots must not look like a T1 hit).
+        open_qty = self._owned_remaining_qty(rec_norm)
         next_rec = self._sync_protection_plan_from_progress(rec_norm, open_qty)
+        next_rec = self._refresh_remaining_qty(next_rec, from_filled_legs=True)
         new_stage = str(next_rec.get("sl_progress_stage") or "NONE").upper().strip() or "NONE"
         prev_stage = str(rec_norm.get("sl_progress_stage") or "NONE").upper().strip() or "NONE"
         prev_true = float(self._num_or(rec_norm.get("sl_true"), rec_norm.get("stop_loss")))
@@ -4829,11 +5071,12 @@ class Trader:
         # Broker-side OCO can be cancelled/expired while position remains open.
         # If every attempted leg is stale/unmodifiable, create fresh OCO protection.
         if attempted > 0 and success == 0 and skipped_stale > 0 and not failed:
-            pos, qty = self._get_open_position_for_symbol(symbol)
-            if qty == 0:
+            product = self._record_product(rec)
+            pos, qty = self._get_open_position_for_symbol(symbol, product=product)
+            if self._owned_open_qty_for_protection(rec, qty) <= 0:
                 return (
-                    f"⚠️ RESTORE_SL failed for {symbol}: broker order is stale and no open position exists."
-                    f"{self._ltp_suffix_for_symbol(symbol)}"
+                    f"⚠️ RESTORE_SL failed for {symbol}: broker order is stale and no owned "
+                    f"{product} position exists.{self._ltp_suffix_for_symbol(symbol)}"
                 )
             rec_rearm = dict(rec)
             rec_rearm["stop_loss"] = float(last_sl_true)
@@ -4931,8 +5174,9 @@ class Trader:
                 if not admin_drop and str(rec.get("vol_sl_drop_done_for") or "") == today:
                     continue
 
-                pos, qty = self._get_open_position_for_symbol(symbol)
-                if qty == 0:
+                product = self._record_product(rec)
+                pos, qty = self._get_open_position_for_symbol(symbol, product=product)
+                if self._owned_open_qty_for_protection(rec, qty) <= 0:
                     continue
 
                 order_ids = self._oco_ids_from_record(rec)
@@ -4962,8 +5206,9 @@ class Trader:
                 if not admin_rearm and str(rec.get("vol_sl_rearm_done_for") or "") == today:
                     continue
 
-                pos, qty = self._get_open_position_for_symbol(symbol)
-                if qty == 0:
+                product = self._record_product(rec)
+                pos, qty = self._get_open_position_for_symbol(symbol, product=product)
+                if self._owned_open_qty_for_protection(rec, qty) <= 0:
                     continue
 
                 sl_true = float(rec.get("sl_true") or rec.get("stop_loss") or 0)
@@ -6641,13 +6886,16 @@ class Trader:
                     "last_broker_sync_at": self._now_ist_iso(),
                 }
             )
+        entry_qty_saved = int(trade_data.get("quantity") or 0)
         self._save_active_trade(
             symbol,
             primary_order_id,
             stop_loss=float(broker_sl),
             target=float(signal_targets[0]),
             entry_side=str(trade_data.get("action") or "BUY").upper(),
-            entry_qty=int(trade_data.get("quantity") or 0),
+            entry_qty=entry_qty_saved,
+            remaining_qty=entry_qty_saved,
+            product=str(product_type or self.DEFAULT_PRODUCT).upper(),
             lot_size=int(trade_data.get("lot_size") or 0),
             entry_avg_price=float(entry_avg_price or 0.0),
             opened_at_ist=self._now_ist_iso(),
@@ -6662,7 +6910,9 @@ class Trader:
         # re-arm so the position ends up with complete multi-target OCO legs.
         all_legs_complete = all(str(l.get("status") or "").upper() == "ACTIVE" for l in created_legs)
         if not all_legs_complete:
-            pos, pos_qty = self._get_open_position_for_symbol(symbol)
+            pos, pos_qty = self._get_open_position_for_symbol(
+                symbol, product=str(product_type or self.DEFAULT_PRODUCT).upper()
+            )
             if pos_qty > 0:
                 try:
                     rec_now = self._get_active_trade_record(symbol) or {}
@@ -6736,13 +6986,16 @@ class Trader:
 
         if not self.place_entry_orders:
             if action == "BUY":
+                dry_qty = int(trade_data.get("quantity") or 0)
                 self._save_active_trade(
                     symbol,
                     self.DRY_RUN_PLACEHOLDER_ORDER_ID,
                     stop_loss=float(trade_data.get("stop_loss") or 0),
                     target=float(trade_data.get("target") or 0),
                     entry_side=action,
-                    entry_qty=int(trade_data.get("quantity") or 0),
+                    entry_qty=dry_qty,
+                    remaining_qty=dry_qty,
+                    product=self.DEFAULT_PRODUCT,
                     lot_size=int(trade_data.get("lot_size") or 0),
                     entry_avg_price=float(ltp or 0.0),
                     opened_at_ist=self._now_ist_iso(),
@@ -6798,6 +7051,8 @@ class Trader:
                 target=float(trade_data.get("target") or 0),
                 entry_side=action,
                 entry_qty=int(quantity),
+                remaining_qty=int(quantity),
+                product=str(product_type or self.DEFAULT_PRODUCT).upper(),
                 lot_size=int(trade_data.get("lot_size") or 0),
                 entry_avg_price=float(fill.get("avg_price") or ltp or 0.0),
                 opened_at_ist=self._now_ist_iso(),
@@ -6869,13 +7124,16 @@ class Trader:
             )
             # Persist the filled LIMIT entry immediately even if OCO is not attached.
             try:
+                lim_qty = int(fill.get("filled_qty") or trade_data.get("quantity") or 0)
                 self._save_active_trade(
                     symbol,
                     "",
                     stop_loss=float(trade_data.get("stop_loss") or 0),
                     target=float(trade_data.get("target") or 0),
                     entry_side=action,
-                    entry_qty=int(fill.get("filled_qty") or trade_data.get("quantity") or 0),
+                    entry_qty=lim_qty,
+                    remaining_qty=lim_qty,
+                    product=self.DEFAULT_PRODUCT,
                     lot_size=int(trade_data.get("lot_size") or 0),
                     entry_avg_price=float(fill.get("avg_price") or ltp or 0.0),
                     opened_at_ist=self._now_ist_iso(),
@@ -7804,6 +8062,8 @@ class Trader:
                         )
 
                     rec_before = self._get_active_trade_record(symbol) or {}
+                    product = self._record_product(rec_before)
+                    owned_before = self._owned_remaining_qty(rec_before)
                     # 1) Cancel OCO protection (best effort).
                     for oid in order_ids:
                         try:
@@ -7821,63 +8081,69 @@ class Trader:
                                 f"[STAGE 4] EXIT_ALL cancel_smart_order warning for {symbol} id={oid}: {e}"
                             )
 
-                    # 2) Flatten any remaining net position with MARKET order.
-                    pos, qty = self._get_open_position_for_symbol(symbol)
-                    if qty == 0:
+                    # 2) Sell only this bot's remaining qty (product from local book),
+                    # capped by broker qty for that product — never account net.
+                    pos, broker_qty = self._get_open_position_for_symbol(symbol, product=product)
+                    flat_qty = self._owned_open_qty_for_protection(rec_before, broker_qty)
+                    if flat_qty <= 0:
+                        # Owned already 0, or our product is flat (lots may remain for another bot).
                         self._record_completed_trade(
                             symbol=symbol,
                             active_rec=rec_before,
                             close_reason="EXIT_ALL_ALREADY_FLAT",
                             exit_price=self._num_or(rec_before.get("entry_avg_price"), 0.0),
-                            exit_qty=int(self._num_or(rec_before.get("entry_qty"), 0)),
+                            exit_qty=int(
+                                owned_before
+                                or self._num_or(rec_before.get("entry_qty"), 0)
+                            ),
                         )
                         self._remove_active_trade(symbol)
+                        leftover_note = ""
+                        if abs(int(broker_qty or 0)) > 0 and owned_before <= 0:
+                            leftover_note = (
+                                f" Broker still shows {broker_qty} {product} lot(s) "
+                                f"(left for other bots / manual)."
+                            )
+                        elif owned_before > 0 and abs(int(broker_qty or 0)) == 0:
+                            leftover_note = (
+                                f" Owned remaining was {owned_before} but broker {product} is flat."
+                            )
                         logger.info(
-                            f"[STAGE 4] EXIT SUCCESS: {symbol} has no open position after cancel; removed from active book."
+                            f"[STAGE 4] EXIT SUCCESS: {symbol} owned flat after cancel "
+                            f"(owned={owned_before}, broker_{product}={broker_qty}); removed from active book."
                         )
                         return (
-                            f"🚨 EXIT SUCCESS: {symbol} already flat; cleared local active trade."
-                            f"{fallback_note}{self._ltp_suffix_for_symbol(symbol)}"
+                            f"🚨 EXIT SUCCESS: {symbol} already flat for this bot; cleared local active trade."
+                            f"{leftover_note}{fallback_note}{self._ltp_suffix_for_symbol(symbol)}"
                         )
 
-                    tx = "SELL" if qty > 0 else "BUY"
-                    flat_qty = abs(int(qty))
+                    if abs(int(broker_qty or 0)) < owned_before:
+                        logger.warning(
+                            f"[STAGE 4] EXIT_ALL {symbol}: broker {product} qty {broker_qty} < "
+                            f"owned {owned_before}; capping sell to {flat_qty}."
+                        )
+
+                    tx = "SELL" if int(broker_qty) > 0 else "BUY"
                     seg = str((pos or {}).get("segment") or self.SMART_SEGMENT)
                     ex = str((pos or {}).get("exchange") or "NSE")
-                    product = str(
-                        (pos or {}).get("product")
-                        or (pos or {}).get("product_type")
-                        or (pos or {}).get("productType")
-                        or "NRML"
-                    ).upper()
                     logger.info(
                         f"[STAGE 4] EXIT_ALL flatten: placing MARKET {tx} {symbol} qty={flat_qty} "
-                        f"(exchange={ex}, segment={seg}, product={product})."
+                        f"(owned={owned_before}, broker_{product}={broker_qty}, "
+                        f"exchange={ex}, segment={seg}, product={product})."
                     )
                     exit_resp = self.client.place_order(
                         validity="DAY",
                         exchange=ex,
                         order_type="MARKET",
                         product=product,
-                        quantity=flat_qty,
+                        quantity=int(flat_qty),
                         segment=seg,
                         trading_symbol=symbol,
                         transaction_type=tx,
                         price=0.0,
                     )
 
-                    # 3) Verify flattened.
-                    _, qty_after = self._get_open_position_for_symbol(symbol)
-                    if qty_after != 0:
-                        logger.warning(
-                            f"[STAGE 4] EXIT_ALL partial/failed flatten for {symbol}: remaining qty={qty_after}."
-                        )
-                        return (
-                            f"⚠️ EXIT PARTIAL: Cancelled protection for {symbol}, but position still open "
-                            f"(remaining qty {qty_after}).{fallback_note}{self._ltp_suffix_for_symbol(symbol)}"
-                        )
-
-                    self._remove_active_trade(symbol)
+                    # 3) Success = this bot's owned remaining is 0, not broker symbol flat.
                     exit_order_id = str((exit_resp or {}).get("groww_order_id") or "")
                     exit_fallback_price = self._num_or((pos or {}).get("ltp"), 0.0)
                     if exit_fallback_price <= 0:
@@ -7888,20 +8154,50 @@ class Trader:
                         fallback_price=float(exit_fallback_price or 0.0),
                         fallback_qty=flat_qty,
                     )
+                    filled = int(fill.get("filled_qty") or flat_qty)
+                    _, qty_after = self._get_open_position_for_symbol(symbol, product=product)
+                    owned_after = max(0, owned_before - max(0, filled))
+                    # If broker shows fewer than owned_after, prefer broker (partial / external sell).
+                    if abs(int(qty_after or 0)) < owned_after:
+                        owned_after = abs(int(qty_after or 0))
+
+                    if owned_after > 0:
+                        rec_partial = dict(rec_before)
+                        rec_partial["remaining_qty"] = int(owned_after)
+                        self._persist_active_trade_record(symbol, rec_partial)
+                        logger.warning(
+                            f"[STAGE 4] EXIT_ALL partial for {symbol}: sold={filled}, "
+                            f"owned_left={owned_after}, broker_{product}={qty_after}."
+                        )
+                        return (
+                            f"⚠️ EXIT PARTIAL: Cancelled protection for {symbol}, sold {filled} "
+                            f"of owned {owned_before} (owned left {owned_after}, "
+                            f"broker {product} {qty_after})."
+                            f"{fallback_note}{self._ltp_suffix_for_symbol(symbol)}"
+                        )
+
+                    self._remove_active_trade(symbol)
                     self._record_completed_trade(
                         symbol=symbol,
                         active_rec=rec_before,
                         close_reason="EXIT_ALL",
                         exit_price=float(fill.get("avg_price") or 0.0),
-                        exit_qty=int(fill.get("filled_qty") or flat_qty),
+                        exit_qty=int(filled or flat_qty),
                         close_order_id=exit_order_id,
                     )
+                    leftover = abs(int(qty_after or 0))
+                    leftover_note = (
+                        f" Broker still shows {leftover} {product} lot(s) (other bots / leftover)."
+                        if leftover > 0
+                        else ""
+                    )
                     logger.info(
-                        f"[STAGE 4] EXIT SUCCESS: {symbol} flattened and removed from active book."
+                        f"[STAGE 4] EXIT SUCCESS: {symbol} owned qty closed "
+                        f"(sold={filled}, broker_{product}_after={qty_after}); removed from active book."
                     )
                     return (
-                        f"🚨 EXIT SUCCESS: Closed {symbol} position and cleared active trade."
-                        f"{fallback_note}{self._ltp_suffix_for_symbol(symbol)}"
+                        f"🚨 EXIT SUCCESS: Closed {symbol} owned position and cleared active trade."
+                        f"{leftover_note}{fallback_note}{self._ltp_suffix_for_symbol(symbol)}"
                     )
                 
                 elif action == "TRAIL_SL":

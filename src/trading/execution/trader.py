@@ -4867,20 +4867,34 @@ class Trader:
         trades[symbol] = rec
         self._save_all_trades(trades)
 
-    def _broker_sl_for_target_modify(self, symbol: str, payload: dict) -> float:
-        """Broker SL level to preserve when applying a target-only OCO modify."""
-        sl_px = float(self._oco_payload_stop_trigger_price(payload))
-        if sl_px > 0:
-            return sl_px
+    def _broker_sl_for_target_modify(
+        self,
+        symbol: str,
+        payload: dict,
+        *,
+        preferred_sl: float | None = None,
+    ) -> float:
+        """
+        SL to send with a target-only OCO modify.
+
+        Prefer the just-trailed local book (stop_loss / sl_true) over a freshly
+        fetched payload: get_smart_order can still show the pre-trail stop, and
+        writing that stale value back would revert TRAIL_SL.
+        """
+        pref = float(self._num_or(preferred_sl, 0.0))
+        if pref > 0:
+            return pref
         sym = str(symbol or "").strip()
-        if not sym:
-            return 0.0
-        nrec = self._normalize_active_trade_record(self._get_active_trade_record(sym) or {})
-        broker_sl = float(self._num_or(nrec.get("stop_loss"), 0.0))
-        if broker_sl > 0:
-            return broker_sl
-        st = float(self._num_or(nrec.get("sl_true"), 0.0))
-        return float(st) if st > 0 else 0.0
+        if sym:
+            nrec = self._normalize_active_trade_record(self._get_active_trade_record(sym) or {})
+            broker_sl = float(self._num_or(nrec.get("stop_loss"), 0.0))
+            if broker_sl > 0:
+                return broker_sl
+            st = float(self._num_or(nrec.get("sl_true"), 0.0))
+            if st > 0:
+                return st
+        sl_px = float(self._oco_payload_stop_trigger_price(payload))
+        return sl_px if sl_px > 0 else 0.0
 
     def _require_live_oco_payload_for_modify(self, order_id: str, payload: dict) -> None:
         """
@@ -4978,6 +4992,7 @@ class Trader:
         *,
         symbol: str | None = None,
         preserve_sl: bool = True,
+        preserve_sl_price: float | None = None,
         payload_cache: dict[str, dict] | None = None,
     ) -> float:
         """
@@ -4999,7 +5014,13 @@ class Trader:
 
         self._require_live_oco_payload_for_modify(oid, payload)
 
-        sl_px = float(self._broker_sl_for_target_modify(str(symbol or "").strip(), payload))
+        sl_px = float(
+            self._broker_sl_for_target_modify(
+                str(symbol or "").strip(),
+                payload,
+                preferred_sl=preserve_sl_price,
+            )
+        )
         modify_kw: dict = {
             "smart_order_id": order_id,
             "smart_order_type": self.client.SMART_ORDER_TYPE_OCO,
@@ -8335,6 +8356,12 @@ class Trader:
                     )
                     rec_live = self._get_active_trade_record(symbol) or {}
                     oco_tgt_modify_cache: dict[str, dict] = {}
+                    preferred_sl = float(self._num_or(trade_data.get("stop_loss"), 0.0))
+                    if preferred_sl <= 0:
+                        preferred_sl = float(
+                            self._num_or(rec_live.get("sl_true"), rec_live.get("stop_loss"))
+                        )
+                    preserve_sl_price = preferred_sl if preferred_sl > 0 else None
                     legs = rec_live.get("oco_legs")
                     attempted = 0
                     success = 0
@@ -8379,6 +8406,7 @@ class Trader:
                                         leg_target_broker,
                                         symbol=symbol,
                                         preserve_sl=not clear_stop_loss,
+                                        preserve_sl_price=preserve_sl_price,
                                         payload_cache=oco_tgt_modify_cache,
                                     )
                                 except Exception as e1:
@@ -8393,6 +8421,7 @@ class Trader:
                                             leg_target_broker,
                                             symbol=symbol,
                                             preserve_sl=not clear_stop_loss,
+                                            preserve_sl_price=preserve_sl_price,
                                             payload_cache=oco_tgt_modify_cache,
                                         )
                                     else:
@@ -8430,6 +8459,7 @@ class Trader:
                                         eff_tgt,
                                         symbol=symbol,
                                         preserve_sl=not clear_stop_loss,
+                                        preserve_sl_price=preserve_sl_price,
                                         payload_cache=oco_tgt_modify_cache,
                                     )
                                 except Exception as e1:
@@ -8444,6 +8474,7 @@ class Trader:
                                             eff_tgt,
                                             symbol=symbol,
                                             preserve_sl=not clear_stop_loss,
+                                            preserve_sl_price=preserve_sl_price,
                                             payload_cache=oco_tgt_modify_cache,
                                         )
                                     else:

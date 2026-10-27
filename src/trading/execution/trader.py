@@ -2116,8 +2116,10 @@ class Trader:
 
         raw_true_sl = float(self._num_or(rec_norm.get("sl_true"), rec_norm.get("stop_loss")))
         if raw_true_sl <= 0:
-            logger.warning(f"[REARM] Skip {symbol}: invalid stored SL (sl_true={raw_true_sl}).")
-            return False, f"⚠️ OCO re-arm skipped for {symbol}: invalid stored SL (sl_true={raw_true_sl})."
+            logger.warning(
+                f"[REARM] Skip {symbol}: signal SL=0 (sl_true={raw_true_sl}); stop cannot be armed."
+            )
+            return False, f"⚠️ OCO re-arm skipped for {symbol}: signal SL=0 (sl_true={raw_true_sl})."
         broker_sl = self._round_price_to_tick(float(raw_true_sl), mode="nearest")
         if broker_sl <= 0:
             logger.warning(
@@ -2469,37 +2471,60 @@ class Trader:
             f"Re-armed and retried action.\n{retry_result}"
         )
 
+    @classmethod
+    def _stored_sl_is_zero(cls, rec: dict | None) -> bool:
+        """True when the signal/book SL is 0 — stop cannot be armed until TRAIL_SL."""
+        rec_norm = cls._normalize_active_trade_record(rec or {})
+        sl = float(cls._num_or(rec_norm.get("sl_true"), rec_norm.get("stop_loss")))
+        return sl <= 0
+
+    def _record_has_live_oco_id(self, rec: dict | None) -> bool:
+        rec_norm = self._normalize_active_trade_record(rec or {})
+        sid = str(rec_norm.get("smart_order_id") or "")
+        if sid and sid != self.DRY_RUN_PLACEHOLDER_ORDER_ID:
+            return True
+        for oid in self._oco_ids_from_record(rec_norm):
+            if oid and oid != self.DRY_RUN_PLACEHOLDER_ORDER_ID:
+                return True
+        return False
+
     def _is_unprotected_zero_sl_fill(self, rec: dict | None) -> bool:
         """Filled position with no SL and no OCO — waiting for the first TRAIL_SL."""
         rec_norm = self._normalize_active_trade_record(rec or {})
         if not record_has_fill_evidence(rec_norm):
             return False
-        sl = float(self._num_or(rec_norm.get("sl_true"), rec_norm.get("stop_loss")))
-        if sl > 0:
+        if not self._stored_sl_is_zero(rec_norm):
             return False
-        sid = str(rec_norm.get("smart_order_id") or "")
-        if sid and sid != self.DRY_RUN_PLACEHOLDER_ORDER_ID:
-            return False
-        if self._oco_ids_from_record(rec_norm):
-            return False
-        return True
+        return not self._record_has_live_oco_id(rec_norm)
 
     def _skip_rearm_unprotected_fill(self, *, source: str, symbol: str, rec: dict) -> dict:
-        """Do not force-create OCO when SL is still 0; alert once then stay quiet."""
+        """SL=0 is a valid signal state: warn once, never treat as integrity error."""
         rec_norm = self._normalize_active_trade_record(rec or {})
         already = bool(rec_norm.get("unprotected_fill_alerted"))
+        has_oco = self._record_has_live_oco_id(rec_norm)
+        sl = float(self._num_or(rec_norm.get("sl_true"), rec_norm.get("stop_loss")))
         if not already:
             rec_norm["unprotected_fill_alerted"] = True
             rec_norm["fsm_state"] = str(rec_norm.get("fsm_state") or TradeState.ACTIVE.value)
             self._persist_active_trade_record(symbol, rec_norm)
-            logger.warning(
-                f"[REARM] {symbol}: filled with no SL/OCO — waiting for TRAIL_SL "
-                f"(source={source}). Skipping integrity retry."
-            )
-            line = (
-                f"ℹ️ REARM[{source}] {symbol}: unprotected fill (SL=0, no OCO) — "
-                "waiting for TRAIL_SL; not an integrity failure."
-            )
+            if has_oco:
+                logger.warning(
+                    f"[REARM] {symbol}: signal SL=0 (sl_true={sl}) — stop cannot be armed "
+                    f"(source={source}). Skipping integrity retry."
+                )
+                line = (
+                    f"⚠️ REARM[{source}] {symbol}: signal SL=0 — stop cannot be armed; "
+                    "not an integrity error."
+                )
+            else:
+                logger.warning(
+                    f"[REARM] {symbol}: filled with no SL/OCO — waiting for TRAIL_SL "
+                    f"(source={source}). Skipping integrity retry."
+                )
+                line = (
+                    f"⚠️ REARM[{source}] {symbol}: unprotected fill (SL=0, no OCO) — "
+                    "waiting for TRAIL_SL; not an integrity error."
+                )
             return {
                 "rearmed": 0,
                 "line": line,
@@ -2508,7 +2533,7 @@ class Trader:
                 "primary_alert": line,
             }
         logger.info(
-            f"[REARM] Skip {symbol}: unprotected fill still has no SL to arm."
+            f"[REARM] Skip {symbol}: signal SL=0; still no SL to arm."
         )
         return {
             "rearmed": 0,
@@ -2973,7 +2998,15 @@ class Trader:
         retry = " +retry" if retried else ""
         detail_up = str(detail or "").upper()
         integrity_ok = "INTEGRITY=OK" in detail_up and "INTEGRITY_FAILED" not in detail_up
-        if success and ("RE-ARMED" in detail_up or "INTEGRITY_RETRY=OK" in detail_up):
+        zero_sl = (
+            "SIGNAL SL=0" in detail_up
+            or "SL_ZERO" in detail_up
+            or "INVALID STORED SL" in detail_up
+        )
+        if zero_sl:
+            # Channel signals may publish SL=0; missing stop is expected until TRAIL_SL.
+            status = "⚠️"
+        elif success and ("RE-ARMED" in detail_up or "INTEGRITY_RETRY=OK" in detail_up):
             status = "✅"
         elif integrity_ok:
             # Re-arm action may skip because protection already remains intact.
@@ -3013,7 +3046,7 @@ class Trader:
         broker_qty = abs(self._position_quantity(pos))
         open_qty = self._owned_remaining_qty(rec_norm)
         protect_qty = self._owned_open_qty_for_protection(rec_norm, broker_qty)
-        if self._is_unprotected_zero_sl_fill(rec_norm):
+        if self._stored_sl_is_zero(rec_norm):
             return self._skip_rearm_unprotected_fill(source=source, symbol=symbol, rec=rec_norm)
         if open_qty > 0:
             rec_norm = self._sync_protection_plan_from_progress(rec_norm, open_qty)
@@ -3107,12 +3140,21 @@ class Trader:
                 symbol, rec_final, protect_qty, payload_cache=payload_cache
             )
             if not final_ok:
-                success = False
-                detail_parts.append(f"integrity_failed:{final_reason}")
-                logger.error(
-                    f"[REARM] Final integrity failure for {symbol} after {source} re-arm "
-                    f"(forced={force_rearm}, retried={retried}): {final_reason}"
-                )
+                if self._stored_sl_is_zero(rec_final):
+                    success = True
+                    detail_parts.append(f"sl_zero:{final_reason}")
+                    logger.warning(
+                        f"[REARM] Signal SL=0 for {symbol} after {source} re-arm "
+                        f"(forced={force_rearm}, retried={retried}): {final_reason} "
+                        "(expected until TRAIL_SL; not an integrity error)."
+                    )
+                else:
+                    success = False
+                    detail_parts.append(f"integrity_failed:{final_reason}")
+                    logger.error(
+                        f"[REARM] Final integrity failure for {symbol} after {source} re-arm "
+                        f"(forced={force_rearm}, retried={retried}): {final_reason}"
+                    )
             else:
                 success = True
                 detail_parts.append("integrity=ok")

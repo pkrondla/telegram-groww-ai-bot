@@ -164,6 +164,14 @@ class TestUnprotectedFillRearm:
         rec["stop_loss"] = 30.0
         assert t._is_unprotected_zero_sl_fill(rec) is False
 
+    def test_zero_sl_with_target_only_oco_is_still_zero_sl(self):
+        t = self._trader()
+        rec = dict(ZERO_SL_FILL)
+        rec["smart_order_id"] = "OCO-1"
+        rec["oco_legs"] = [{"smart_order_id": "OCO-1", "qty": 65, "status": "TARGET_ONLY"}]
+        assert t._stored_sl_is_zero(rec) is True
+        assert t._is_unprotected_zero_sl_fill(rec) is False
+
     def test_skip_rearm_alerts_once(self):
         t = self._trader()
         t._persist_active_trade_record = MagicMock()
@@ -173,6 +181,7 @@ class TestUnprotectedFillRearm:
         assert first["success"] is True
         assert first["attempted"] is True
         assert first["line"]
+        assert first["line"].startswith("⚠️")
         rec2 = dict(ZERO_SL_FILL)
         rec2["unprotected_fill_alerted"] = True
         second = t._skip_rearm_unprotected_fill(
@@ -180,6 +189,43 @@ class TestUnprotectedFillRearm:
         )
         assert second["attempted"] is False
         assert second["line"] is None
+
+    def test_execute_rearm_zero_sl_target_only_is_warning(self):
+        t = self._trader()
+        t._persist_active_trade_record = MagicMock()
+        rec = dict(ZERO_SL_FILL)
+        rec["smart_order_id"] = "OCO-1"
+        rec["oco_legs"] = [{"smart_order_id": "OCO-1", "qty": 65, "status": "TARGET_ONLY"}]
+        with patch.object(Trader, "_rearm_oco_for_open_position") as rearm:
+            result = t._execute_rearm_for_symbol(
+                source="schedule",
+                symbol="NIFTY26OCT22850CE",
+                rec=rec,
+                pos={"quantity": 65},
+                force_initial=False,
+            )
+            rearm.assert_not_called()
+        assert result["success"] is True
+        assert result["line"].startswith("⚠️")
+        assert "SL=0" in result["line"]
+        assert "integrity error" in result["line"].lower()
+
+    def test_rearm_alert_line_zero_sl_is_warning_not_error(self):
+        line = Trader._rearm_alert_line(
+            source="schedule",
+            symbol="NIFTY26OCT22850CE",
+            attempted=True,
+            forced=True,
+            retried=True,
+            success=False,
+            detail=(
+                "forced_by=reconcile:schedule: expected=1, "
+                "reason=incomplete trigger legs (target=True, stop=False); "
+                "⚠️ OCO re-arm skipped for NIFTY26OCT22850CE: signal SL=0 (sl_true=0.0)."
+            ),
+        )
+        assert line.startswith("⚠️")
+        assert not line.startswith("❌")
 
     def test_trail_create_protection_dry_run(self):
         t = self._trader()

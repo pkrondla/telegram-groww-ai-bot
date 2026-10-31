@@ -71,15 +71,25 @@ class TestBuildOcoLegsPlan:
         assert [p["target_index"] for p in plan] == [1, 2, 3]
 
     # -----------------------------------------------------------------
-    # Single lot → all qty routed to T2
+    # Single lot → all qty routed to T1
     # -----------------------------------------------------------------
-    def test_single_lot_routes_to_t2(self, trader):
+    def test_single_lot_routes_to_t1(self, trader):
         plan = trader._build_oco_legs_plan(
             total_qty=65, lot_size=65, signal_targets=[68.0, 88.0]
         )
         assert len(plan) == 1
-        assert plan[0]["target_index"] == 2
+        assert plan[0]["target_index"] == 1
+        assert plan[0]["target_signal"] == pytest.approx(68.0)
         assert plan[0]["qty"] == 65
+
+    def test_single_lot_three_targets_still_routes_to_t1(self, trader):
+        plan = trader._build_oco_legs_plan(
+            total_qty=75, lot_size=75, signal_targets=[41.0, 63.0, 90.0]
+        )
+        assert len(plan) == 1
+        assert plan[0]["target_index"] == 1
+        assert plan[0]["target_signal"] == pytest.approx(41.0)
+        assert plan[0]["qty"] == 75
 
     # -----------------------------------------------------------------
     # Empty / zero inputs

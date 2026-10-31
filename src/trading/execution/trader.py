@@ -5666,13 +5666,12 @@ class Trader:
         if unit <= 0:
             unit = 1
         total_lots = max(1, qty // unit)
-        # Policy: for single-lot entries, prioritize runner capture by targeting T2.
-        # If T2 is unavailable, gracefully fall back to T1.
-        if total_lots == 1 and len(targets) >= 2:
+        # Policy: one lot cannot be split — book T1 instead of holding for T2.
+        if total_lots == 1:
             logger.info(
-                f"[STAGE 4] Single-lot policy applied: total_lots=1, routing full qty={qty} to T2 ({float(targets[1]):.2f})."
+                f"[STAGE 4] Single-lot policy applied: total_lots=1, routing full qty={qty} to T1 ({float(targets[0]):.2f})."
             )
-            return [{"qty": qty, "target_signal": float(targets[1]), "target_index": 2}]
+            return [{"qty": qty, "target_signal": float(targets[0]), "target_index": 1}]
         if len(targets) == 2:
             ratios = cls._parse_split_config(Config.TARGET_SPLIT_2, 2)
             t1 = min(int(math.ceil(total_lots * ratios[0] / 100.0)), total_lots)
@@ -8369,9 +8368,8 @@ class Trader:
                     failed: list[str] = []
                     if isinstance(legs, list) and legs:
                         # Multi-target update: map targets[] to legs by target_index when provided.
-                        # If only one active leg exists and 2+ targets were provided, mirror the
-                        # single-lot entry policy by preferring T2.
-                        prefer_t2_single_leg = bool(len(legs) == 1 and len(targets) >= 2 and target_leg_index <= 0)
+                        # Single-lot entries are T1 (target_index=1). A leftover T2/T3 runner
+                        # keeps its own index so a ladder update does not pull it back to T1.
                         for i, leg in enumerate(legs):
                             if not isinstance(leg, dict):
                                 continue
@@ -8387,8 +8385,6 @@ class Trader:
                                     # Explicit T1/T2/T3 update: pick that index if present, else fall back.
                                     idx = max(1, int(target_leg_index))
                                     leg_target_signal = float(targets[min(idx, len(targets)) - 1])
-                                elif prefer_t2_single_leg:
-                                    leg_target_signal = float(targets[1])
                                 else:
                                     # Global ladder update: update each leg by its target_index (clamped).
                                     idx = max(1, int(leg_target_index))

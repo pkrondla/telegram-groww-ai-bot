@@ -188,6 +188,8 @@ class TestExitAllOwnQty(unittest.TestCase):
         t = _trader()
         t.dry_run = False
         t.place_entry_orders = True
+        # EXIT_ALL is queued when IST market is closed (weekends / off hours).
+        t._market_window_state_ist = MagicMock(return_value="open")
         t.client = MagicMock()
         t.client.SMART_ORDER_TYPE_OCO = "OCO"
         t.client.get_positions_for_user.return_value = {
